@@ -31,23 +31,38 @@ class KamaConfig:
 
 
 # 构建并返回运行时配置：默认值 → TOML → .env → 系统环境变量（后者优先级最高）
+# 函数作用：加载并合并多层配置来源，返回一个完整的 KamaConfig 对象
+# 返回值：KamaConfig 配置对象，包含 host、port、logging 等所有配置项
 def get_config() -> KamaConfig:
+    # 创建 KamaConfig 实例，使用所有字段的默认值初始化
     config = KamaConfig()
 
-    # .env 必须在读取 KAMA_CONFIG 之前加载，以便 .env 中的 KAMA_CONFIG 能影响 TOML 路径
+    # 加载当前目录下的 .env 文件，override=False 表示不覆盖已存在的环境变量
+    # 注意：必须在读取 KAMA_CONFIG 环境变量之前加载，以便 .env 中的 KAMA_CONFIG 能影响 TOML 路径
     load_dotenv(".env", override=False)
 
+    # 获取配置文件路径：优先使用 KAMA_CONFIG 环境变量，否则使用默认路径 ~/.kama/config.toml
+    # expanduser() 将路径中的 ~ 转换为实际的用户主目录路径
     config_path = Path(os.environ.get("KAMA_CONFIG", _DEFAULT_CONFIG_PATH)).expanduser()
 
+    # 判断配置文件是否存在
     if config_path.exists():
+        # 使用 try-except 块捕获 TOML 解析错误
         try:
+            # 以二进制只读模式打开配置文件
             with open(config_path, "rb") as f:
+                # 使用 tomllib 解析 TOML 文件内容，返回字典数据
                 data = tomllib.load(f)
+        # 捕获 TOML 语法错误
         except tomllib.TOMLDecodeError as e:
+            # 抛出 SystemExit 异常终止程序，提示配置文件解析错误及具体原因
             raise SystemExit(f"Config parse error ({config_path}): {e}") from e
+        # 调用 _apply_toml 函数，将 TOML 解析结果应用到 config 对象
         _apply_toml(config, data)
 
+    # 调用 _apply_env 函数，用环境变量覆盖 config 中对应的配置项
     _apply_env(config)
+    # 返回最终的配置对象
     return config
 
 
