@@ -104,6 +104,9 @@ class SessionStore:
             messages.append({"role": role, "content": row.get("content", "")})
 
         messages = self._trim_orphan_tool_use(messages)
+        # 【s6 新增】对超长的 tool_result 做内存截断，不修改磁盘上的 thread.jsonl
+        # 原因：工具输出（如 pytest、grep）可能非常大，每轮都传给 LLM 会很快占满 context window
+        # 完整内容仍保留在 thread.jsonl 和 events.jsonl 中，需要审计时可以查看
         from kama_claude.core.compact.budget import truncate_tool_results
         return truncate_tool_results(messages)
 
@@ -129,7 +132,9 @@ class SessionStore:
             return messages[:last_balanced]
         return messages
 
-    # 将压缩后的消息对覆盖写入 thread.jsonl，原文件备份为 thread_<ts>.jsonl.bak
+    # 【手动压缩】将压缩后的消息对覆盖写入 thread.jsonl，原文件备份为 thread_<ts>.jsonl.bak
+    # 调用方：SessionManager.compact() 用户输入 /compact 命令时调用
+    # 与自动压缩的区别：自动压缩只修改内存中的 messages，此方法会持久化修改磁盘上的 thread.jsonl
     def write_compacted(self, sid: str, messages: list[dict[str, Any]]) -> None:
         path = self.session_dir(sid) / "thread.jsonl"
         ts_str = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")

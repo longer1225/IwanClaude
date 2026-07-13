@@ -131,7 +131,9 @@ class SessionManager:
             self._store.write_meta(session)
             await self._bus.publish(SessionClosedEvent(session_id=sid, ts=session.updated_at))
 
-    # 手动压缩指定 session 的 thread，将摘要持久化写入 thread.jsonl
+    # 【s6 手动压缩】用户输入 /compact 命令时触发，将 session 的 thread 持久化压缩
+    # 与自动压缩的区别：自动压缩只修改内存中的 messages，此方法会覆盖磁盘上的 thread.jsonl
+    # 调用方：CoreApp._handle_command() 处理 session.compact 命令
     async def compact(self, sid: str, focus: str = "") -> Any:
         session = self._get_session(sid)
         lock = self._locks[sid]
@@ -142,16 +144,29 @@ class SessionManager:
         async with lock:
             from kama_claude.core.bus.commands import SessionCompactResult
             from kama_claude.core.compact.compactor import Compactor
+            # 1. 读取 session 的完整 thread 历史
             messages = self._store.read_messages(sid)
+            # 2. 获取 session 目录（用于创建 Compactor）
             session_dir = self._store.session_dir(sid)
+            # 3. 创建 Compactor（注意：这里不调用 compact() 方法，而是调用 compact_messages()）
             compactor = Compactor(self._bus, session_dir, sid)
+            # 4. 调用纯函数式压缩，不修改任何状态，只获取摘要结果
+            # 为什么用 compact_messages() 而不是 compact()：
+            #   - compact() 会修改 context.messages（内存），但这里没有 context
+            #   - compact_messages() 是纯函数，只返回摘要文本
             result = await compactor.compact_messages(messages, self._provider, focus=focus)
+            # 5. 如果压缩失败（LLM 出错或返回空摘要），抛错误给客户端
             if result is None:
                 raise HandlerError(-32021, "compaction failed or not beneficial")
+            # 6. 【关键】将压缩后的对话对持久化写入 thread.jsonl
+            # 原文件备份为 thread_<ts>.jsonl.bak
+            # 格式：[user: 摘要文本, assistant: "Understood, I'll continue from this summary."]
+            # 这样下次读取 thread 时，就只看到摘要而不是完整历史
             self._store.write_compacted(sid, [
                 {"role": "user", "content": result.summary_text},
                 {"role": "assistant", "content": "Understood, I'll continue from this summary."},
             ])
+            # 7. 返回压缩结果（摘要 token 数和节省的 token 数）
             return SessionCompactResult(
                 summary_tokens=result.summary_tokens,
                 saved_tokens=max(0, result.original_token_estimate - result.summary_tokens),

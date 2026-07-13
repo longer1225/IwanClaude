@@ -141,13 +141,16 @@ class SessionClosedEvent(BaseModel):
     ts: str
 
 
+# 【s6 新增】上下文压缩完成事件
+# 发布时机：Compactor.compact() 成功压缩上下文后
+# 用途：通知 TUI 更新上下文水位显示（将水位重置为压缩后的 token 数）
 class ContextCompactedEvent(BaseModel):
     type: Literal["context.compacted"] = "context.compacted"
-    session_id: str
-    run_id: str
-    original_tokens: int
-    summary_tokens: int
-    ts: str
+    session_id: str           # session ID
+    run_id: str               # 当前 run ID
+    original_tokens: int      # 压缩前的原始 token 估算
+    summary_tokens: int       # 压缩后的摘要 token 数
+    ts: str                   # 时间戳
 
 
 class PermissionRequestedEvent(BaseModel):

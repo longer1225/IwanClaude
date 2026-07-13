@@ -125,6 +125,9 @@ class AnthropicProvider:
         usage = final_message.usage
         cache_read: int = getattr(usage, "cache_read_input_tokens", 0) or 0
         cache_create: int = getattr(usage, "cache_creation_input_tokens", 0) or 0
+        # 【s6 新增】计算上下文使用率：输入 token 数 / 模型最大 context window
+        # 例如：输入 100000 token，模型窗口 200000 → context_pct = 0.5（50%）
+        # 用途：1. TUI 显示上下文水位  2. AgentLoop 判断是否触发自动压缩
         context_pct = usage.input_tokens / _context_window(self._model)
 
         await bus.publish(

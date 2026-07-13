@@ -115,6 +115,13 @@ class AgentRunner:
             notes = ""
         run_path.mkdir(parents=True, exist_ok=True)
 
+        # 【s6 新增】加载三层 context（稳定背景信息），拼入 system prompt 而非 messages
+        # 三层 context 的设计：
+        #   1. global_ctx (~/.kama/context.md)：全局用户偏好（长期不变）
+        #   2. project_ctx (.kama/context.md)：项目目录约定（切换项目时变化）
+        #   3. notes（store.read_notes）：会话级事实（通过 note_save 工具积累）
+        # 为什么放 system prompt：这些不是某一轮对话内容，而是工作背景，语义更准确
+        # 也不会污染 thread.jsonl（thread 只记录对话历史）
         global_ctx = load_context_file(Path("~/.kama/context.md").expanduser())
         project_ctx = load_context_file(Path(".kama/context.md"))
 
@@ -157,6 +164,9 @@ class AgentRunner:
                         self._trace,
                         include_payload=self._config.trace.include_llm_payload,
                     )
+                # 【s6 新增】创建 Compactor，绑定事件总线、session 目录和 session ID
+                # session_dir：用于写入摘要文件（summary_<ts>.md）
+                # session_id_str：用于发布 ContextCompactedEvent
                 session_dir = store.session_dir(session.id) if session is not None and store is not None else run_path
                 session_id_str = session.id if session is not None else ""
                 compactor = Compactor(bus, session_dir, session_id_str)
