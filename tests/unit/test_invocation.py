@@ -4,11 +4,11 @@ import asyncio
 
 from pydantic import BaseModel
 
-from kama_claude.core.events.bus import EventBus
-from kama_claude.core.llm.types import ToolCallBlock
-from kama_claude.core.tools.base import BaseTool, ToolResult
-from kama_claude.core.tools.invocation import invoke_tool
-from kama_claude.core.tools.registry import ToolRegistry
+from iwan_claude.core.events.bus import EventBus
+from iwan_claude.core.llm.types import ToolCallBlock
+from iwan_claude.core.tools.base import BaseTool, ToolResult
+from iwan_claude.core.tools.invocation import invoke_tool
+from iwan_claude.core.tools.registry import ToolRegistry
 
 # --- stub tools --------------------------------------------------------------
 
