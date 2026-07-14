@@ -1,0 +1,6 @@
+import iwan_claude
+
+
+# 打印当前 iwan_claude 包的版本号
+def cmd_version() -> None:
+    print(iwan_claude.__version__)

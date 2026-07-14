@@ -1,18 +1,64 @@
+# ── Environment & Secrets ──
 .env
+.env.*
+!.env.example
+
+# ── Virtual Environments ──
 .venv/
+venv/
+ENV/
+env/
+
+# ── Python Bytecode ──
 __pycache__/
 *.pyc
 *.pyo
+*.pyd
+
+# ── Build & Distribution ──
 runs/
 dist/
 build/
 *.egg-info/
+eggs/
+*.egg
+
+# ── Tool Caches ──
 .mypy_cache/
 .ruff_cache/
 .pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# ── IDE ──
 .vscode/
-uv.lock
 .idea/
+*.swp
+*.swo
+*~
+
+# ── Package Lock ──
+uv.lock
+Pipfile.lock
+poetry.lock
+
+# ── OS ──
 .DS_Store
+Thumbs.db
+
+# ── Logs & Data ──
 *.log
+logs/
 workspace/
+sandbox/
+.iwan/
+.kama/
+
+# ── Accidental Files ──
+$null
+
+# ── Local Configs ──
+config.local.toml
+*.local.toml

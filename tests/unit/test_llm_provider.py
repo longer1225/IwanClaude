@@ -5,9 +5,9 @@ from unittest.mock import MagicMock
 import pytest
 from pydantic import BaseModel
 
-from kama_claude.core.events.bus import EventBus
-from kama_claude.core.llm.provider import AnthropicProvider
-from kama_claude.core.llm.types import LlmResponse
+from iwan_claude.core.events.bus import EventBus
+from iwan_claude.core.llm.provider import AnthropicProvider
+from iwan_claude.core.llm.types import LlmResponse
 
 # --- helpers -----------------------------------------------------------------
 
