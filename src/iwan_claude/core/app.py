@@ -21,11 +21,16 @@ import iwan_claude
 from iwan_claude.core.bus.commands import (
     AgentRunCommand,
     AgentRunResult,
+    CheckpointInfo,
     EventSubscribeCommand,
     EventSubscribeResult,
     PermissionRespondCommand,
     PermissionRespondResult,
     PongResult,
+    SessionCheckpointListCommand,
+    SessionCheckpointListResult,
+    SessionCheckpointRestoreCommand,
+    SessionCheckpointRestoreResult,
     SessionCloseCommand,
     SessionCloseResult,
     SessionCompactCommand,
@@ -151,6 +156,33 @@ class CoreApp:
         result = await self._sessions.compact(cmd.session_id, cmd.focus)
         return result  # type: ignore[no-any-return]
 
+    async def _session_checkpoint_list_handler(self, params: dict[str, Any]) -> SessionCheckpointListResult:
+        assert self._sessions is not None
+        cmd = SessionCheckpointListCommand.model_validate(params)
+        checkpoints = await self._sessions.list_checkpoints(cmd.session_id)
+        return SessionCheckpointListResult(
+            thread_id=cmd.session_id,
+            checkpoints=[CheckpointInfo(**c) for c in checkpoints],
+        )
+
+    async def _session_checkpoint_restore_handler(self, params: dict[str, Any]) -> SessionCheckpointRestoreResult:
+        assert self._sessions is not None
+        cmd = SessionCheckpointRestoreCommand.model_validate(params)
+        result = await self._sessions.restore_checkpoint(cmd.session_id, cmd.checkpoint_id)
+        if result is None:
+            return SessionCheckpointRestoreResult(
+                success=False,
+                checkpoint_id=cmd.checkpoint_id,
+                step=0,
+                message="checkpoint not found",
+            )
+        return SessionCheckpointRestoreResult(
+            success=True,
+            checkpoint_id=cmd.checkpoint_id,
+            step=result["step"],
+            message=f"restored to step {result['step']}",
+        )
+
     # 关闭 session 并返回 closed 状态
     async def _session_close_handler(self, params: dict[str, Any]) -> SessionCloseResult:
         assert self._sessions is not None
@@ -273,6 +305,8 @@ class CoreApp:
         server.register("session.close", self._session_close_handler)
         server.register("permission.respond", self._permission_respond_handler)
         server.register("session.compact", self._session_compact_handler)
+        server.register("session.checkpoint.list", self._session_checkpoint_list_handler)
+        server.register("session.checkpoint.restore", self._session_checkpoint_restore_handler)
 
         addr = await server.start()
         logger.info("iwan-core %s listening addr=%s", iwan_claude.__version__, addr)

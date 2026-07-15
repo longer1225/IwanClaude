@@ -100,6 +100,37 @@ class SessionCompactResult(BaseModel):
     saved_tokens: int
 
 
+class SessionCheckpointListCommand(BaseModel):
+    type: Literal["session.checkpoint.list"] = "session.checkpoint.list"
+    session_id: str
+
+
+class CheckpointInfo(BaseModel):
+    checkpoint_id: str
+    step: int
+    timestamp: str
+    summary: str
+    node: str | None = None
+
+
+class SessionCheckpointListResult(BaseModel):
+    checkpoints: list[CheckpointInfo]
+    thread_id: str
+
+
+class SessionCheckpointRestoreCommand(BaseModel):
+    type: Literal["session.checkpoint.restore"] = "session.checkpoint.restore"
+    session_id: str
+    checkpoint_id: str
+
+
+class SessionCheckpointRestoreResult(BaseModel):
+    success: bool
+    checkpoint_id: str
+    step: int
+    message: str
+
+
 # 根据 type 字段决定命令类型的判别联合
 Command = Annotated[
     PingCommand
@@ -110,6 +141,8 @@ Command = Annotated[
     | SessionGetHistoryCommand
     | SessionCloseCommand
     | PermissionRespondCommand
-    | SessionCompactCommand,
+    | SessionCompactCommand
+    | SessionCheckpointListCommand
+    | SessionCheckpointRestoreCommand,
     Discriminator("type"),
 ]

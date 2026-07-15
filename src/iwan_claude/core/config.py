@@ -29,6 +29,9 @@ class LoggingConfig:
 @dataclass
 class AgentConfig:
     max_steps: int = _DEFAULT_MAX_STEPS
+    engine: str = "legacy"
+    checkpoint_backend: str = "none"  # "none" | "memory" | "sqlite"
+    checkpoint_db_path: str = ".iwan/checkpoints.db"
 
 
 @dataclass

@@ -108,6 +108,62 @@ async def _chat_async(config: IwanConfig) -> int:
                 )
                 continue
 
+            if content.startswith("/checkpoint"):
+                parts = content.split()
+                if len(parts) >= 2 and parts[1] == "list":
+                    result = await client.send_command(
+                        "session.checkpoint.list",
+                        {"session_id": session_id},
+                    )
+                    checkpoints = result.get("checkpoints", [])
+                    thread_id = result.get("thread_id", "")
+                    print(f"\nCheckpoints for session {thread_id}:")
+                    if not checkpoints:
+                        print("  (no checkpoints found - make sure engine=langgraph and checkpoint_backend!=none)")
+                    else:
+                        for i, cp in enumerate(reversed(checkpoints)):
+                            ts = cp.get("timestamp", "")
+                            summary = cp.get("summary", "")
+                            node = cp.get("node", "")
+                            print(f"  [{i}] step={cp['step']}  {ts}  {summary}")
+                            print(f"     id: {cp['checkpoint_id']}")
+                    print()
+                    continue
+                elif len(parts) >= 3 and parts[1] == "restore":
+                    idx_or_id = parts[2]
+                    list_result = await client.send_command(
+                        "session.checkpoint.list",
+                        {"session_id": session_id},
+                    )
+                    checkpoints = list_result.get("checkpoints", [])
+                    if not checkpoints:
+                        print("  error: no checkpoints available")
+                        continue
+
+                    if idx_or_id.isdigit():
+                        idx = int(idx_or_id)
+                        if idx < 0 or idx >= len(checkpoints):
+                            print(f"  error: index {idx} out of range (0-{len(checkpoints)-1})")
+                            continue
+                        cp = checkpoints[len(checkpoints) - 1 - idx]
+                        checkpoint_id = cp["checkpoint_id"]
+                    else:
+                        checkpoint_id = idx_or_id
+
+                    result = await client.send_command(
+                        "session.checkpoint.restore",
+                        {"session_id": session_id, "checkpoint_id": checkpoint_id},
+                    )
+                    if result.get("success"):
+                        print(f"\n  restored to step {result['step']}: {result['message']}")
+                    else:
+                        print(f"\n  restore failed: {result['message']}")
+                    print()
+                    continue
+                else:
+                    print("  usage: /checkpoint list | /checkpoint restore <index_or_id>")
+                    continue
+
             await client.send_command(
                 "session.send_message",
                 {"session_id": session_id, "content": content},

@@ -141,6 +141,17 @@ class SessionStore:
                 row: dict[str, Any] = {"ts": _now(), "role": msg["role"], "content": msg["content"]}
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
+    def write_messages(self, sid: str, messages: list[dict[str, Any]]) -> None:
+        path = self.session_dir(sid) / "thread.jsonl"
+        ts_str = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+        bak = self.session_dir(sid) / f"thread_{ts_str}.jsonl.bak"
+        if path.exists():
+            path.rename(bak)
+        with path.open("w", encoding="utf-8") as f:
+            for msg in messages:
+                row: dict[str, Any] = {"ts": _now(), "role": msg["role"], "content": msg["content"]}
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
     # 读取 notes.md 全文，文件不存在时返回空字符串
     def read_notes(self, sid: str) -> str:
         path = self.session_dir(sid) / "notes.md"

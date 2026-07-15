@@ -5,17 +5,18 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from iwan_claude.core.bus.events import StepFinishedEvent, StepStartedEvent
+from iwan_claude.core.compact.compactor import Compactor
 from iwan_claude.core.context import ExecutionContext
 from iwan_claude.core.events.bus import EventBus
 from iwan_claude.core.llm.base import LLMProvider
+from iwan_claude.core.permissions.manager import PermissionManager
 from iwan_claude.core.system_prompt import build_base_system_prompt
 from iwan_claude.core.tools.invocation import invoke_tool
 from iwan_claude.core.tools.registry import ToolRegistry
 import logging
 
 if TYPE_CHECKING:
-    from iwan_claude.core.compact.compactor import Compactor
-    from iwan_claude.core.permissions.manager import PermissionManager
+    pass
 
 
 log = logging.getLogger(__name__)
@@ -32,7 +33,7 @@ class AgentLoop:
         registry: ToolRegistry,
         bus: EventBus,
         *,
-        llm_model_name: str,
+        llm_model_name: str = "",
         permission_manager: PermissionManager | None = None,
         compactor: Compactor | None = None,
         compact_threshold: float = 0.0,
@@ -42,7 +43,7 @@ class AgentLoop:
         self._registry = registry
         self._bus = bus
         self._llm_model_name = llm_model_name
-        self._permission_manager = permission_manager or PermissionManager()
+        self._permission_manager = permission_manager
         self._compactor = compactor
         self._compact_threshold = compact_threshold
         self._session_id = session_id

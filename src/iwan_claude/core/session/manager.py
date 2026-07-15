@@ -189,6 +189,39 @@ class SessionManager:
         self._get_session(sid)
         return self._store.read_messages(sid)
 
+    async def list_checkpoints(self, sid: str) -> list[dict[str, Any]]:
+        self._get_session(sid)
+        runner = self._runner_factory()
+        try:
+            return await runner.list_checkpoints(sid)
+        finally:
+            await runner.close()
+
+    async def restore_checkpoint(self, sid: str, checkpoint_id: str) -> dict[str, Any] | None:
+        session = self._get_session(sid)
+        lock = self._locks[sid]
+        if lock.locked():
+            raise HandlerError(SESSION_BUSY, "session busy")
+
+        async with lock:
+            runner = self._runner_factory()
+            state = await runner.restore_checkpoint(sid, checkpoint_id)
+            await runner.close()
+
+            if state is None:
+                return None
+
+            messages = state.get("messages", [])
+            step = state.get("step", 0)
+
+            self._store.write_messages(sid, messages)
+
+            session.run_ids = session.run_ids[:step] if session.run_ids else []
+            session.updated_at = _now()
+            self._store.write_meta(session)
+
+            return {"checkpoint_id": checkpoint_id, "step": step, "messages": len(messages)}
+
     # 从内存索引取 session，不存在时抛 JSON-RPC 结构化错误
     def _get_session(self, sid: str) -> Session:
         session = self._sessions.get(sid)

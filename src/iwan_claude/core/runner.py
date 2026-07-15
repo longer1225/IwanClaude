@@ -22,17 +22,37 @@ from iwan_claude.core.runs import RUNS_DIR, new_run_id
 from iwan_claude.core.session.model import Session
 from iwan_claude.core.session.store import SessionStore
 from iwan_claude.core.subagent.registry import BackgroundTaskRegistry
-from iwan_claude.core.subagent.tool import AgentResultTool, SpawnAgentTool
+from iwan_claude.core.subagent.tool import (
+    AgentResultTool,
+    BatchResultTool,
+    CancelAgentTool,
+    SpawnAgentTool,
+    SpawnAgentsTool,
+)
 from iwan_claude.core.task.manager import TaskManager
 from iwan_claude.core.tools.builtin import (
     BashTool,
+    CopyFileTool,
+    DeleteFileTool,
+    DeleteLinesTool,
+    EditByLinesTool,
+    EditBySearchTool,
+    FileExistsTool,
+    FileStatTool,
+    FindFilesTool,
+    GrepSearchTool,
+    InsertAtLineTool,
     ListDirTool,
+    MkdirTool,
     NoteSaveTool,
     ReadFileTool,
+    RenameFileTool,
+    RunPythonTool,
     TaskCreateTool,
     TaskGetTool,
     TaskListTool,
     TaskUpdateTool,
+    ViewFileTool,
     WriteFileTool,
 )
 from iwan_claude.core.tools.registry import ToolRegistry
@@ -75,6 +95,123 @@ class AgentRunner:
         self._mcp_manager = mcp_manager
         # 跨 run 共享的后台 subagent 任务注册表
         self._task_registry = BackgroundTaskRegistry()
+        # LangGraph checkpointer (lazy initialized)
+        self._checkpointer: Any = None
+        self._checkpointer_ctx: Any = None
+
+    async def _init_checkpointer(self) -> Any:
+        if self._checkpointer is not None:
+            return self._checkpointer
+
+        backend = self._config.agent.checkpoint_backend
+        if backend == "none":
+            self._checkpointer = None
+            return None
+        elif backend == "memory":
+            from langgraph.checkpoint.memory import InMemorySaver
+
+            self._checkpointer = InMemorySaver()
+            return self._checkpointer
+        elif backend == "sqlite":
+            from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+
+            db_path = Path(self._config.agent.checkpoint_db_path)
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+            conn_str = str(db_path.resolve())
+            ctx = await AsyncSqliteSaver.from_conn_string(conn_str)
+            saver = await ctx.__aenter__()
+            self._checkpointer_ctx = ctx
+            self._checkpointer = saver
+            return saver
+        else:
+            logging.getLogger(__name__).warning(
+                "Unknown checkpoint_backend=%r, using none", backend
+            )
+            self._checkpointer = None
+            return None
+
+    async def close(self) -> None:
+        if self._checkpointer_ctx is not None:
+            try:
+                if hasattr(self._checkpointer_ctx, "__aexit__"):
+                    await self._checkpointer_ctx.__aexit__(None, None, None)
+                elif hasattr(self._checkpointer_ctx, "__exit__"):
+                    self._checkpointer_ctx.__exit__(None, None, None)
+            except Exception:
+                logging.getLogger(__name__).exception("Error closing checkpointer context")
+            self._checkpointer_ctx = None
+        if self._checkpointer is not None:
+            if hasattr(self._checkpointer, "close") and not hasattr(self._checkpointer_ctx, "__exit__"):
+                if asyncio.iscoroutinefunction(self._checkpointer.close):
+                    await self._checkpointer.close()
+                else:
+                    self._checkpointer.close()
+            self._checkpointer = None
+
+    async def list_checkpoints(self, thread_id: str) -> list[dict[str, Any]]:
+        if self._checkpointer is None:
+            return []
+
+        result = []
+        try:
+            checkpoints = await self._checkpointer.alist(
+                {"configurable": {"thread_id": thread_id}}
+            )
+            for cp_tuple in checkpoints:
+                configurable = cp_tuple.config.get("configurable", {})
+                checkpoint_id = configurable.get("checkpoint_id", "")
+                step = cp_tuple.metadata.get("step", 0)
+                timestamp = cp_tuple.checkpoint.get("ts", "")
+
+                channel_values = cp_tuple.checkpoint.get("channel_values", {})
+                if "messages" in channel_values:
+                    msgs = channel_values["messages"]
+                    if msgs and isinstance(msgs, list) and len(msgs) > 0:
+                        last_msg = msgs[-1]
+                        content = last_msg.get("content", "")
+                        if isinstance(content, str):
+                            summary = content[:50] + "..." if len(content) > 50 else content
+                        else:
+                            summary = f"step={step}"
+                    else:
+                        summary = f"step={step}"
+                else:
+                    summary = f"step={step}"
+
+                result.append({
+                    "checkpoint_id": checkpoint_id,
+                    "step": step,
+                    "timestamp": timestamp,
+                    "summary": summary,
+                    "node": None,
+                })
+        except Exception:
+            logging.getLogger(__name__).exception("Failed to list checkpoints")
+
+        return sorted(result, key=lambda x: x["step"])
+
+    async def restore_checkpoint(self, thread_id: str, checkpoint_id: str) -> dict[str, Any] | None:
+        if self._checkpointer is None:
+            return None
+
+        try:
+            checkpoint_tuple = await self._checkpointer.aget_tuple(
+                {"configurable": {"thread_id": thread_id, "checkpoint_id": checkpoint_id}}
+            )
+            if checkpoint_tuple is None:
+                return None
+
+            state = checkpoint_tuple.checkpoint.get("channel_values", {})
+            return {
+                "messages": state.get("messages", []),
+                "step": state.get("step", 0),
+                "status": state.get("status", ""),
+                "_tool_calls": state.get("_tool_calls", []),
+                "_stop_reason": state.get("_stop_reason", ""),
+            }
+        except Exception:
+            logging.getLogger(__name__).exception("Failed to restore checkpoint")
+            return None
 
     # 构建工具注册表，注入 TaskManager（任务工具共享同一实例）；可选注入 SpawnAgentTool
     def _build_registry(
@@ -96,7 +233,26 @@ class AgentRunner:
             return allowed is None or name in allowed
 
         registry = ToolRegistry()
-        for t in [ReadFileTool(), BashTool(), WriteFileTool(), ListDirTool()]:
+        for t in [
+            ReadFileTool(),
+            BashTool(),
+            WriteFileTool(),
+            ListDirTool(),
+            DeleteFileTool(),
+            RenameFileTool(),
+            CopyFileTool(),
+            MkdirTool(),
+            FileStatTool(),
+            FileExistsTool(),
+            FindFilesTool(),
+            GrepSearchTool(),
+            RunPythonTool(),
+            ViewFileTool(),
+            EditByLinesTool(),
+            EditBySearchTool(),
+            InsertAtLineTool(),
+            DeleteLinesTool(),
+        ]:
             if _ok(t.name):
                 registry.register(t)
         for t in [
@@ -130,6 +286,25 @@ class AgentRunner:
                 )
             if _ok("agent_result"):
                 registry.register(AgentResultTool(self._task_registry))
+            if _ok("spawn_agents"):
+                registry.register(
+                    SpawnAgentsTool(
+                        provider=provider,
+                        parent_bus=bus,
+                        parent_run_id=run_id,
+                        permission_manager=self._permission_manager,
+                        max_steps=self._config.agent.max_steps,
+                        task_registry=self._task_registry,
+                        runs_dir=runs_dir,
+                        session_id=session_id,
+                        llm_model_name=self._config.llm.default_model,
+                        depth=0,
+                    )
+                )
+            if _ok("batch_result"):
+                registry.register(BatchResultTool(self._task_registry))
+            if _ok("cancel_agent"):
+                registry.register(CancelAgentTool(self._task_registry))
         if self._mcp_manager is not None:
             for mcp_tool in self._mcp_manager.get_tools():
                 if _ok(mcp_tool.name):
@@ -221,14 +396,28 @@ class AgentRunner:
                     else run_path
                 )
                 compactor = Compactor(bus, session_dir, session_id_str)
-                loop = AgentLoop(
-                    provider, registry, bus,
-                    llm_model_name=self._config.llm.default_model,
-                    permission_manager=self._permission_manager,
-                    compactor=compactor,
-                    compact_threshold=self._config.compaction.auto_threshold,
-                    session_id=session_id_str,
-                )
+                if self._config.agent.engine == "langgraph":
+                    from iwan_claude.core.langgraph_loop import LangGraphAgentLoop
+
+                    checkpointer = await self._init_checkpointer()
+                    loop = LangGraphAgentLoop(
+                        provider, registry, bus,
+                        llm_model_name=self._config.llm.default_model,
+                        permission_manager=self._permission_manager,
+                        compactor=compactor,
+                        compact_threshold=self._config.compaction.auto_threshold,
+                        session_id=session_id_str,
+                        checkpointer=checkpointer,
+                    )
+                else:
+                    loop = AgentLoop(
+                        provider, registry, bus,
+                        llm_model_name=self._config.llm.default_model,
+                        permission_manager=self._permission_manager,
+                        compactor=compactor,
+                        compact_threshold=self._config.compaction.auto_threshold,
+                        session_id=session_id_str,
+                    )
                 await loop.run(context)
             except asyncio.CancelledError:
                 cancelled = True
