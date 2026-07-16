@@ -10,6 +10,12 @@ from iwan_claude.core.permissions.manager import PermissionManager
 from iwan_claude.core.permissions.policy import PermissionDecision, ToolPolicy
 from iwan_claude.core.permissions.storage import load_policy_file
 
+
+@pytest.fixture(autouse=True)
+def reset_sandbox() -> None:
+    import iwan_claude.core.sandbox as sb_module
+    sb_module._sandbox_manager = None
+
 # ── helpers ──────────────────────────────────────────────────────────────────
 
 def _make_manager(**policies: ToolPolicy) -> PermissionManager:

@@ -4,6 +4,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
 
+from iwan_claude.core.sandbox import validate_path
 from iwan_claude.core.tools.base import BaseTool, ToolResult
 
 _MAX_BYTES = 512 * 1024  # 512 KB
@@ -36,6 +37,8 @@ class ReadFileTool(BaseTool):
     # 读取文件内容；超 512KB 截断；禁止 .. 路径遍历
     async def invoke(self, params: dict[str, object]) -> ToolResult:
         path_str = ReadFileParams.model_validate(params).path
+
+        validate_path(path_str, "read")
 
         if ".." in Path(path_str).parts:
             raise PermissionError(f"path traversal not allowed: {path_str}")

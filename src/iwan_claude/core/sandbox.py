@@ -59,10 +59,7 @@ class SandboxManager:
             return path
         except ValueError:
             if self._config.ask_on_access_denied:
-                raise PermissionError(
-                    f"sandbox access denied: {operation} path '{path_str}' is outside sandbox root '{self._sandbox_root}'. "
-                    "Please confirm if you want to allow this operation."
-                )
+                return path
             else:
                 raise PermissionError(
                     f"sandbox access denied: {operation} path '{path_str}' is outside sandbox root '{self._sandbox_root}'"

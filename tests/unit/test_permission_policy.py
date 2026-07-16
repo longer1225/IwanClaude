@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from iwan_claude.core.permissions.policy import (
     PermissionDecision,
     ToolPolicy,
@@ -7,6 +9,12 @@ from iwan_claude.core.permissions.policy import (
     matches_outside_cwd,
     param_preview,
 )
+
+
+@pytest.fixture(autouse=True)
+def reset_sandbox() -> None:
+    import iwan_claude.core.sandbox as sb_module
+    sb_module._sandbox_manager = None
 
 # ── Tier 1: deny_patterns ────────────────────────────────────────────────────
 

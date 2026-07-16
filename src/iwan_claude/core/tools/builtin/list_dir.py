@@ -4,6 +4,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from iwan_claude.core.sandbox import validate_path
 from iwan_claude.core.tools.base import BaseTool, ToolResult
 
 _MAX_DEPTH = 4
@@ -45,6 +46,8 @@ class ListDirTool(BaseTool):
         p = ListDirParams.model_validate(params)
         path_str = p.path
         max_depth = p.max_depth
+
+        validate_path(path_str, "read")
 
         if ".." in Path(path_str).parts:
             raise PermissionError(f"path traversal not allowed: {path_str}")

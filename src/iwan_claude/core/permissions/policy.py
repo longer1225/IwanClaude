@@ -3,7 +3,10 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from enum import StrEnum
+from pathlib import Path
 from typing import Any
+
+from iwan_claude.core.sandbox import get_sandbox
 
 
 class PermissionDecision(StrEnum):
@@ -71,6 +74,36 @@ def param_preview(tool_name: str, params: dict[str, Any]) -> str:
     return snippet[:_PREVIEW_MAX] if len(snippet) > _PREVIEW_MAX else snippet
 
 
+def _check_sandbox_path(tool_name: str, params: dict[str, Any]) -> bool:
+    sandbox = get_sandbox()
+    if not sandbox.enabled:
+        return False
+
+    path_params = {
+        "read_file": "path",
+        "write_file": "path",
+        "list_dir": "path",
+        "delete_file": "path",
+        "rename_file": "path",
+        "copy_file": "path",
+        "mkdir": "path",
+        "file_stat": "path",
+        "file_exists": "path",
+        "view_file": "path",
+        "edit_by_lines": "path",
+        "edit_by_search": "path",
+        "insert_at_line": "path",
+        "delete_lines": "path",
+    }
+
+    path_key = path_params.get(tool_name)
+    if path_key and path_key in params:
+        path_str = str(params[path_key])
+        return not sandbox.is_path_allowed(path_str)
+
+    return False
+
+
 # 对工具 + 参数执行 4 层静态策略评估，返回 ALLOW/DENY/ASK
 def evaluate(
     tool_name: str,
@@ -93,6 +126,10 @@ def evaluate(
 
     # Tier 2: OUTSIDE_CWD_HEURISTICS — forced ASK, not bypassable
     if command and matches_outside_cwd(command):
+        return PermissionDecision.ASK
+
+    # Tier 2.5: sandbox path check — forced ASK if path is outside sandbox
+    if _check_sandbox_path(tool_name, params):
         return PermissionDecision.ASK
 
     # Tier 3: allow_patterns (bash only)

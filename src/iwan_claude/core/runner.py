@@ -10,6 +10,7 @@ from iwan_claude.core.bus.events import RunFinishedEvent, RunStartedEvent
 from iwan_claude.core.compact.compactor import Compactor
 from iwan_claude.core.config import IwanConfig
 from iwan_claude.core.context import ExecutionContext
+from iwan_claude.core.sandbox import init_sandbox
 from iwan_claude.core.events.bus import EventBus, EventHandler
 from iwan_claude.core.events.writer import EventWriter
 from iwan_claude.core.llm.base import LLMProvider
@@ -95,6 +96,8 @@ class AgentRunner:
         self._mcp_manager = mcp_manager
         # 跨 run 共享的后台 subagent 任务注册表
         self._task_registry = BackgroundTaskRegistry()
+        # 初始化沙箱配置
+        init_sandbox(config.sandbox)
         # LangGraph checkpointer (lazy initialized)
         self._checkpointer: Any = None
         self._checkpointer_ctx: Any = None

@@ -530,3 +530,47 @@ def _apply_env(config: IwanConfig) -> None:
             raise SystemExit(
                 f"Config error: IWAN_COMPACT_TOOL_KEEP must be an integer, got: {compact_tool_keep!r}"
             )
+
+    sandbox_enabled = os.environ.get("IWAN_SANDBOX_ENABLED")
+    if sandbox_enabled is not None:
+        config.sandbox.enabled = sandbox_enabled.lower() not in ("0", "false", "no")
+
+    sandbox_root = os.environ.get("IWAN_SANDBOX_ROOT")
+    if sandbox_root is not None:
+        config.sandbox.root = sandbox_root
+
+    sandbox_max_file_size = os.environ.get("IWAN_SANDBOX_MAX_FILE_SIZE")
+    if sandbox_max_file_size is not None:
+        try:
+            val = int(sandbox_max_file_size)
+            if val <= 0:
+                raise SystemExit(
+                    f"Config error: IWAN_SANDBOX_MAX_FILE_SIZE must be a positive integer, got: {sandbox_max_file_size!r}"
+                )
+            config.sandbox.max_file_size = val
+        except ValueError:
+            raise SystemExit(
+                f"Config error: IWAN_SANDBOX_MAX_FILE_SIZE must be an integer, got: {sandbox_max_file_size!r}"
+            )
+
+    sandbox_max_total_size = os.environ.get("IWAN_SANDBOX_MAX_TOTAL_SIZE")
+    if sandbox_max_total_size is not None:
+        try:
+            val = int(sandbox_max_total_size)
+            if val <= 0:
+                raise SystemExit(
+                    f"Config error: IWAN_SANDBOX_MAX_TOTAL_SIZE must be a positive integer, got: {sandbox_max_total_size!r}"
+                )
+            config.sandbox.max_total_size = val
+        except ValueError:
+            raise SystemExit(
+                f"Config error: IWAN_SANDBOX_MAX_TOTAL_SIZE must be an integer, got: {sandbox_max_total_size!r}"
+            )
+
+    sandbox_search_limited = os.environ.get("IWAN_SANDBOX_SEARCH_LIMITED")
+    if sandbox_search_limited is not None:
+        config.sandbox.search_limited = sandbox_search_limited.lower() not in ("0", "false", "no")
+
+    sandbox_ask_on_access_denied = os.environ.get("IWAN_SANDBOX_ASK_ON_ACCESS_DENIED")
+    if sandbox_ask_on_access_denied is not None:
+        config.sandbox.ask_on_access_denied = sandbox_ask_on_access_denied.lower() not in ("0", "false", "no")

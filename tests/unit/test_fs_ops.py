@@ -14,6 +14,12 @@ from iwan_claude.core.tools.builtin.fs_ops import (
 )
 
 
+@pytest.fixture(autouse=True)
+def reset_sandbox() -> None:
+    import iwan_claude.core.sandbox as sb_module
+    sb_module._sandbox_manager = None
+
+
 # ── delete_file ────────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio

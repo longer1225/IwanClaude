@@ -16,6 +16,12 @@ from iwan_claude.core.tools.builtin.editor import (
 )
 
 
+@pytest.fixture(autouse=True)
+def reset_sandbox() -> None:
+    import iwan_claude.core.sandbox as sb_module
+    sb_module._sandbox_manager = None
+
+
 # ── Helpers: line preservation roundtrip ──────────────────────────────────────
 
 

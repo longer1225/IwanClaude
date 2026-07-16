@@ -47,11 +47,18 @@ class TestSandboxManager:
         assert result.is_absolute()
 
     def test_validate_path_denied(self, tmp_path: Path) -> None:
-        config = SandboxConfig(enabled=True, root=str(tmp_path))
+        config = SandboxConfig(enabled=True, root=str(tmp_path), ask_on_access_denied=False)
         sb = SandboxManager(config)
 
         with pytest.raises(PermissionError, match="sandbox access denied"):
             sb.validate_path(str(tmp_path.parent / "outside.txt"))
+
+    def test_validate_path_denied_asks(self, tmp_path: Path) -> None:
+        config = SandboxConfig(enabled=True, root=str(tmp_path), ask_on_access_denied=True)
+        sb = SandboxManager(config)
+
+        result = sb.validate_path(str(tmp_path.parent / "outside.txt"))
+        assert result.is_absolute()
 
     def test_check_file_size(self, tmp_path: Path) -> None:
         config = SandboxConfig(enabled=True, root=str(tmp_path), max_file_size=100)
@@ -115,13 +122,21 @@ class TestSandboxModuleFunctions:
         assert not is_path_allowed(str(tmp_path.parent / "outside.txt"))
 
     def test_validate_path_function(self, tmp_path: Path) -> None:
-        config = SandboxConfig(enabled=True, root=str(tmp_path))
+        config = SandboxConfig(enabled=True, root=str(tmp_path), ask_on_access_denied=False)
         init_sandbox(config)
 
         validate_path(str(tmp_path / "test.txt"))
 
         with pytest.raises(PermissionError):
             validate_path(str(tmp_path.parent / "outside.txt"))
+
+    def test_validate_path_function_asks(self, tmp_path: Path) -> None:
+        config = SandboxConfig(enabled=True, root=str(tmp_path), ask_on_access_denied=True)
+        init_sandbox(config)
+
+        validate_path(str(tmp_path / "test.txt"))
+        result = validate_path(str(tmp_path.parent / "outside.txt"))
+        assert result.is_absolute()
 
     def test_check_file_size_function(self, tmp_path: Path) -> None:
         config = SandboxConfig(enabled=True, root=str(tmp_path), max_file_size=100)
