@@ -9,6 +9,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
+from iwan_claude.core.sandbox import get_search_root, get_sandbox, validate_path
 from iwan_claude.core.tools.base import BaseTool, ToolResult
 
 
@@ -161,6 +162,17 @@ class FindFilesTool(BaseTool):
                 is_error=True,
                 error_type="runtime_error",
             )
+
+        if get_sandbox().enabled:
+            search_root = get_search_root()
+            try:
+                root.resolve().relative_to(search_root)
+            except ValueError:
+                return ToolResult(
+                    content=f"find root '{p.root}' is outside the allowed search area",
+                    is_error=True,
+                    error_type="permission_denied",
+                )
         try:
             content_re: re.Pattern[str] | None = None
             if p.content_pattern:
@@ -353,6 +365,17 @@ class GrepSearchTool(BaseTool):
                 is_error=True,
                 error_type="runtime_error",
             )
+
+        if get_sandbox().enabled:
+            search_root = get_search_root()
+            try:
+                root.resolve().relative_to(search_root)
+            except ValueError:
+                return ToolResult(
+                    content=f"grep root '{p.root}' is outside the allowed search area",
+                    is_error=True,
+                    error_type="permission_denied",
+                )
         try:
             if p.fixed_string:
                 matcher: _Matcher = _FixedMatcher(p.pattern, case_sensitive=p.case_sensitive)

@@ -8,6 +8,7 @@ from typing import ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from iwan_claude.core.sandbox import validate_path
 from iwan_claude.core.tools.base import BaseTool, ToolResult
 
 _MAX_BYTES = 2 * 1024 * 1024  # 2 MB editor payload limit
@@ -19,9 +20,10 @@ _BACKUP_SUBDIR = Path(".iwan") / "backups"
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-def _validate_rel_path(path_str: str) -> Path:
+def _validate_rel_path(path_str: str, operation: str = "access") -> Path:
     if ".." in Path(path_str).parts:
         raise PermissionError(f"path traversal not allowed: {path_str}")
+    validate_path(path_str, operation)
     return Path(path_str)
 
 
@@ -202,7 +204,7 @@ class ViewFileTool(BaseTool):
 
     async def invoke(self, params: dict[str, object]) -> ToolResult:
         p = ViewFileParams.model_validate(params)
-        path = _validate_rel_path(p.path)
+        path = _validate_rel_path(p.path, "read")
         if not path.exists():
             return ToolResult(
                 content=f"view_file: file not found: {p.path}",
@@ -331,7 +333,7 @@ class EditByLinesTool(BaseTool, _EditorWriteToolMixin):
 
     async def estimate_affected_paths(self, params: dict[str, object]) -> list[str]:
         p = EditByLinesParams.model_validate(params)
-        target = _validate_rel_path(p.path)
+        target = _validate_rel_path(p.path, "write")
         out = [str(target)]
         if p.backup and target.exists():
             out.append(str(_backup_destination(Path.cwd(), target)))
@@ -339,7 +341,7 @@ class EditByLinesTool(BaseTool, _EditorWriteToolMixin):
 
     async def invoke(self, params: dict[str, object]) -> ToolResult:
         p = EditByLinesParams.model_validate(params)
-        path = _validate_rel_path(p.path)
+        path = _validate_rel_path(p.path, "write")
         if not path.exists():
             return ToolResult(
                 content=f"edit_by_lines: file not found: {p.path}",
@@ -501,7 +503,7 @@ class EditBySearchTool(BaseTool, _EditorWriteToolMixin):
 
     async def estimate_affected_paths(self, params: dict[str, object]) -> list[str]:
         p = EditBySearchParams.model_validate(params)
-        target = _validate_rel_path(p.path)
+        target = _validate_rel_path(p.path, "write")
         out = [str(target)]
         if p.backup and target.exists():
             out.append(str(_backup_destination(Path.cwd(), target)))
@@ -509,7 +511,7 @@ class EditBySearchTool(BaseTool, _EditorWriteToolMixin):
 
     async def invoke(self, params: dict[str, object]) -> ToolResult:
         p = EditBySearchParams.model_validate(params)
-        path = _validate_rel_path(p.path)
+        path = _validate_rel_path(p.path, "write")
         if not path.exists():
             return ToolResult(
                 content=f"edit_by_search: file not found: {p.path}",
@@ -647,7 +649,7 @@ class InsertAtLineTool(BaseTool, _EditorWriteToolMixin):
 
     async def estimate_affected_paths(self, params: dict[str, object]) -> list[str]:
         p = InsertAtLineParams.model_validate(params)
-        target = _validate_rel_path(p.path)
+        target = _validate_rel_path(p.path, "write")
         out = [str(target)]
         if p.backup and target.exists():
             out.append(str(_backup_destination(Path.cwd(), target)))
@@ -655,7 +657,7 @@ class InsertAtLineTool(BaseTool, _EditorWriteToolMixin):
 
     async def invoke(self, params: dict[str, object]) -> ToolResult:
         p = InsertAtLineParams.model_validate(params)
-        path = _validate_rel_path(p.path)
+        path = _validate_rel_path(p.path, "write")
         if not path.exists():
             return ToolResult(
                 content=f"insert_at_line: file not found: {p.path}",
@@ -775,7 +777,7 @@ class DeleteLinesTool(BaseTool, _EditorWriteToolMixin):
 
     async def estimate_affected_paths(self, params: dict[str, object]) -> list[str]:
         p = DeleteLinesParams.model_validate(params)
-        target = _validate_rel_path(p.path)
+        target = _validate_rel_path(p.path, "delete")
         out = [str(target)]
         if p.backup and target.exists():
             out.append(str(_backup_destination(Path.cwd(), target)))
@@ -784,7 +786,7 @@ class DeleteLinesTool(BaseTool, _EditorWriteToolMixin):
     async def invoke(self, params: dict[str, object]) -> ToolResult:
         p = DeleteLinesParams.model_validate(params)
         # Validate path early (raises PermissionError on traversal matching convention)
-        _validate_rel_path(p.path)
+        _validate_rel_path(p.path, "delete")
         edit_result = await EditByLinesTool().invoke(
             {
                 "path": p.path,

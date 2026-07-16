@@ -92,6 +92,17 @@ class McpConfig:
 
 
 @dataclass
+class SandboxConfig:
+    enabled: bool = True
+    root: str = "./sandbox"
+    allow_parent_dirs: bool = False
+    max_file_size: int = 10 * 1024 * 1024
+    max_total_size: int = 100 * 1024 * 1024
+    search_limited: bool = False
+    ask_on_access_denied: bool = True
+
+
+@dataclass
 class IwanConfig:
     host: str = _DEFAULT_HOST
     port: int = _DEFAULT_PORT
@@ -102,6 +113,7 @@ class IwanConfig:
     permission: PermissionConfig = field(default_factory=PermissionConfig)
     compaction: CompactionConfig = field(default_factory=CompactionConfig)
     mcp: McpConfig = field(default_factory=McpConfig)
+    sandbox: SandboxConfig = field(default_factory=SandboxConfig)
 
 
 # 构建并返回运行时配置：默认值 → 全局 TOML → 项目本地 TOML → .env → 系统环境变量（后者优先级最高）
@@ -136,7 +148,7 @@ def get_config() -> IwanConfig:
 
 # 将已解析的 TOML 根表写入 config；未知小节或类型错误时退出进程
 def _apply_toml(config: IwanConfig, data: dict[str, Any]) -> None:
-    unknown = set(data.keys()) - {"core", "logging", "agent", "llm", "trace", "permission", "compaction", "mcp"}
+    unknown = set(data.keys()) - {"core", "logging", "agent", "llm", "trace", "permission", "compaction", "mcp", "sandbox"}
     if unknown:
         raise SystemExit(f"Unknown top-level config keys: {', '.join(sorted(unknown))}")
 
@@ -330,6 +342,49 @@ def _apply_toml(config: IwanConfig, data: dict[str, Any]) -> None:
                     raise SystemExit(f"Config error: mcp.servers[{i}].port must be an integer")
                 s.port = val
             config.mcp.servers.append(s)
+
+    if "sandbox" in data:
+        sb = data["sandbox"]
+        if not isinstance(sb, dict):
+            raise SystemExit("Config error: [sandbox] must be a table")
+        unknown_sb: set[str] = set(sb.keys()) - {"enabled", "root", "allow_parent_dirs", "max_file_size", "max_total_size", "search_limited", "ask_on_access_denied"}
+        if unknown_sb:
+            raise SystemExit(f"Unknown [sandbox] keys: {', '.join(sorted(unknown_sb))}")
+        if "enabled" in sb:
+            val = sb["enabled"]
+            if not isinstance(val, bool):
+                raise SystemExit("Config error: sandbox.enabled must be a boolean")
+            config.sandbox.enabled = val
+        if "root" in sb:
+            val = sb["root"]
+            if not isinstance(val, str):
+                raise SystemExit("Config error: sandbox.root must be a string")
+            config.sandbox.root = val
+        if "allow_parent_dirs" in sb:
+            val = sb["allow_parent_dirs"]
+            if not isinstance(val, bool):
+                raise SystemExit("Config error: sandbox.allow_parent_dirs must be a boolean")
+            config.sandbox.allow_parent_dirs = val
+        if "max_file_size" in sb:
+            val = sb["max_file_size"]
+            if not isinstance(val, int) or val <= 0:
+                raise SystemExit("Config error: sandbox.max_file_size must be a positive integer")
+            config.sandbox.max_file_size = val
+        if "max_total_size" in sb:
+            val = sb["max_total_size"]
+            if not isinstance(val, int) or val <= 0:
+                raise SystemExit("Config error: sandbox.max_total_size must be a positive integer")
+            config.sandbox.max_total_size = val
+        if "search_limited" in sb:
+            val = sb["search_limited"]
+            if not isinstance(val, bool):
+                raise SystemExit("Config error: sandbox.search_limited must be a boolean")
+            config.sandbox.search_limited = val
+        if "ask_on_access_denied" in sb:
+            val = sb["ask_on_access_denied"]
+            if not isinstance(val, bool):
+                raise SystemExit("Config error: sandbox.ask_on_access_denied must be a boolean")
+            config.sandbox.ask_on_access_denied = val
 
 
 # 用 IWAN_* 环境变量覆盖 config 中对应字段（若变量已设置）

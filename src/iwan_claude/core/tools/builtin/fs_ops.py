@@ -10,12 +10,14 @@ from typing import Any, ClassVar
 
 from pydantic import BaseModel, ConfigDict
 
+from iwan_claude.core.sandbox import validate_path
 from iwan_claude.core.tools.base import BaseTool, ToolResult
 
 
-def _validate_rel_path(path_str: str) -> Path:
+def _validate_rel_path(path_str: str, operation: str = "access") -> Path:
     if ".." in Path(path_str).parts:
         raise PermissionError(f"path traversal not allowed: {path_str}")
+    validate_path(path_str, operation)
     return Path(path_str)
 
 
@@ -84,7 +86,7 @@ class DeleteFileTool(BaseTool, _WriteToolMixin):
 
     async def estimate_affected_paths(self, params: dict[str, object]) -> list[str]:
         p = DeleteFileParams.model_validate(params)
-        root = _validate_rel_path(p.path)
+        root = _validate_rel_path(p.path, "delete")
         if not p.recursive:
             return [str(root)]
         collected: list[str] = []
@@ -99,7 +101,7 @@ class DeleteFileTool(BaseTool, _WriteToolMixin):
 
     async def invoke(self, params: dict[str, object]) -> ToolResult:
         p = DeleteFileParams.model_validate(params)
-        path = _validate_rel_path(p.path)
+        path = _validate_rel_path(p.path, "delete")
         if not path.exists():
             return ToolResult(
                 content=f"delete target does not exist: {p.path}",
@@ -181,8 +183,8 @@ class RenameFileTool(BaseTool, _WriteToolMixin):
 
     async def estimate_affected_paths(self, params: dict[str, object]) -> list[str]:
         p = RenameFileParams.model_validate(params)
-        src = _validate_rel_path(p.src)
-        dst = _validate_rel_path(p.dst)
+        src = _validate_rel_path(p.src, "rename")
+        dst = _validate_rel_path(p.dst, "rename")
         affected: list[str] = [str(src)]
         if dst.exists() and p.overwrite:
             if dst.is_dir():
@@ -197,8 +199,8 @@ class RenameFileTool(BaseTool, _WriteToolMixin):
 
     async def invoke(self, params: dict[str, object]) -> ToolResult:
         p = RenameFileParams.model_validate(params)
-        src = _validate_rel_path(p.src)
-        dst = _validate_rel_path(p.dst)
+        src = _validate_rel_path(p.src, "rename")
+        dst = _validate_rel_path(p.dst, "rename")
         if not src.exists():
             return ToolResult(
                 content=f"rename src does not exist: {p.src}",
@@ -272,7 +274,8 @@ class CopyFileTool(BaseTool, _WriteToolMixin):
 
     async def estimate_affected_paths(self, params: dict[str, object]) -> list[str]:
         p = CopyFileParams.model_validate(params)
-        dst = _validate_rel_path(p.dst)
+        _validate_rel_path(p.src, "copy")
+        dst = _validate_rel_path(p.dst, "copy")
         affected: list[str] = []
         if dst.exists() and p.overwrite:
             if dst.is_dir():
@@ -287,8 +290,8 @@ class CopyFileTool(BaseTool, _WriteToolMixin):
 
     async def invoke(self, params: dict[str, object]) -> ToolResult:
         p = CopyFileParams.model_validate(params)
-        src = _validate_rel_path(p.src)
-        dst = _validate_rel_path(p.dst)
+        src = _validate_rel_path(p.src, "copy")
+        dst = _validate_rel_path(p.dst, "copy")
         if not src.exists():
             return ToolResult(
                 content=f"copy src does not exist: {p.src}",
@@ -375,7 +378,7 @@ class MkdirTool(BaseTool, _WriteToolMixin):
 
     async def estimate_affected_paths(self, params: dict[str, object]) -> list[str]:
         p = MkdirParams.model_validate(params)
-        root = _validate_rel_path(p.path)
+        root = _validate_rel_path(p.path, "mkdir")
         if not p.parents:
             return [str(root)]
         parts: list[str] = []
@@ -385,7 +388,7 @@ class MkdirTool(BaseTool, _WriteToolMixin):
 
     async def invoke(self, params: dict[str, object]) -> ToolResult:
         p = MkdirParams.model_validate(params)
-        path = _validate_rel_path(p.path)
+        path = _validate_rel_path(p.path, "mkdir")
         try:
             path.mkdir(parents=p.parents, exist_ok=p.exist_ok)
             return ToolResult(content=f"mkdir {p.path} (parents={p.parents}, exist_ok={p.exist_ok})")
@@ -434,7 +437,7 @@ class FileStatTool(BaseTool):
 
     async def invoke(self, params: dict[str, object]) -> ToolResult:
         p = FileStatParams.model_validate(params)
-        path = _validate_rel_path(p.path)
+        path = _validate_rel_path(p.path, "read")
         if not path.exists():
             return ToolResult(
                 content=f"file does not exist: {p.path}",
@@ -508,7 +511,7 @@ class FileExistsTool(BaseTool):
 
     async def invoke(self, params: dict[str, object]) -> ToolResult:
         p = FileExistsParams.model_validate(params)
-        path = _validate_rel_path(p.path)
+        path = _validate_rel_path(p.path, "read")
         exists = path.exists()
         kind = ""
         if exists:

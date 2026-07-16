@@ -7,6 +7,12 @@ import pytest
 from iwan_claude.core.tools.builtin.write_file import WriteFileTool
 
 
+@pytest.fixture(autouse=True)
+def reset_sandbox() -> None:
+    import iwan_claude.core.sandbox as sb_module
+    sb_module._sandbox_manager = None
+
+
 # ── mode: overwrite (default) ──────────────────────────────────────────────────
 
 @pytest.mark.asyncio

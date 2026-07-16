@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import sys
 import tempfile
 import venv
@@ -10,12 +11,25 @@ from typing import ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from iwan_claude.core.sandbox import validate_path
 from iwan_claude.core.tools.base import BaseTool, ToolResult
 
 
 _MAX_OUTPUT_BYTES = 128 * 1024  # 128 KB
 _DEFAULT_TIMEOUT = 60
 _IS_WINDOWS = sys.platform == "win32"
+
+_FILE_OP_FUNCTIONS = {
+    "open", "open_file", "file",
+    "__import__('os').open", "__import__('pathlib').Path",
+}
+
+_FILE_OP_PATTERNS = [
+    re.compile(r'\bopen\s*\(\s*["\']([^"\']+)["\']'),
+    re.compile(r'\bPath\s*\(\s*["\']([^"\']+)["\']'),
+    re.compile(r'\bos\.path\.\w+\s*\(\s*["\']([^"\']+)["\']'),
+    re.compile(r'\bos\.(?:mkdir|makedirs|rmdir|remove|unlink|rename)\s*\(\s*["\']([^"\']+)["\']'),
+]
 
 
 class RunPythonParams(BaseModel):
@@ -97,11 +111,31 @@ class RunPythonTool(BaseTool):
     async def invoke(self, params: dict[str, object]) -> ToolResult:
         p = RunPythonParams.model_validate(params)
 
+        for pattern in _FILE_OP_PATTERNS:
+            for match in pattern.finditer(p.code):
+                file_path = match.group(1)
+                try:
+                    validate_path(file_path, "execute")
+                except PermissionError:
+                    return ToolResult(
+                        content=f"sandbox access denied: Python code attempts to access file outside sandbox: '{file_path}'",
+                        is_error=True,
+                        error_type="permission_denied",
+                    )
+
         work_path: Path | None = None
         if p.work_dir is not None:
             if ".." in Path(p.work_dir).parts:
                 return ToolResult(
                     content=f"work_dir path traversal not allowed: {p.work_dir}",
+                    is_error=True,
+                    error_type="permission_denied",
+                )
+            try:
+                validate_path(p.work_dir, "execute")
+            except PermissionError:
+                return ToolResult(
+                    content=f"sandbox access denied: work_dir '{p.work_dir}' is outside sandbox",
                     is_error=True,
                     error_type="permission_denied",
                 )

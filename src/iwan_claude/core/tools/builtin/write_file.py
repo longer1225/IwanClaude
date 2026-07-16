@@ -8,15 +8,17 @@ from typing import ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict
 
+from iwan_claude.core.sandbox import check_file_size, check_total_quota, validate_path
 from iwan_claude.core.tools.base import BaseTool, ToolResult
 
 _MAX_BYTES = 1 * 1024 * 1024  # 1 MB
 _WRITE_MODES = ("overwrite", "append", "fail_if_exists")
 
 
-def _validate_rel_path(path_str: str) -> Path:
+def _validate_rel_path(path_str: str, operation: str = "write") -> Path:
     if ".." in Path(path_str).parts:
         raise PermissionError(f"path traversal not allowed: {path_str}")
+    validate_path(path_str, operation)
     return Path(path_str)
 
 
@@ -86,7 +88,7 @@ class WriteFileTool(BaseTool, _WriteToolMixin):
 
     async def estimate_affected_paths(self, params: dict[str, object]) -> list[str]:
         p = WriteFileParams.model_validate(params)
-        target = _validate_rel_path(p.path)
+        target = _validate_rel_path(p.path, "write")
         affected: list[str] = [str(target)]
         if target.exists() and p.backup and p.mode != "append":
             backup_path = _backup_destination(target)
@@ -98,12 +100,22 @@ class WriteFileTool(BaseTool, _WriteToolMixin):
         # PermissionError is intentionally raised directly (not wrapped as ToolResult)
         # so that the invocation layer (see test_write_file_rejects_traversal) can
         # uniformly detect path traversal attempts and surface them as an event.
-        path = _validate_rel_path(p.path)
+        path = _validate_rel_path(p.path, "write")
 
         encoded = p.content.encode("utf-8")
         if len(encoded) > _MAX_BYTES:
             return ToolResult(
                 content=f"content too large: {len(encoded)} bytes (limit 1 MB)",
+                is_error=True,
+                error_type="runtime_error",
+            )
+
+        try:
+            check_file_size(encoded)
+            check_total_quota(len(encoded))
+        except ValueError as exc:
+            return ToolResult(
+                content=str(exc),
                 is_error=True,
                 error_type="runtime_error",
             )

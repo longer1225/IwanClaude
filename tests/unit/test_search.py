@@ -7,6 +7,20 @@ import pytest
 from iwan_claude.core.tools.builtin.search import FindFilesTool, GrepSearchTool
 
 
+@pytest.fixture(autouse=True)
+def reset_sandbox() -> None:
+    import iwan_claude.core.sandbox as sb_module
+    sb_module._sandbox_manager = None
+
+
+@pytest.fixture(autouse=True)
+def configure_sandbox_for_test(tmp_path: Path) -> None:
+    from iwan_claude.core.config import SandboxConfig
+    from iwan_claude.core.sandbox import init_sandbox
+    config = SandboxConfig(enabled=False, root=str(tmp_path), search_limited=False)
+    init_sandbox(config)
+
+
 def _make_tree(root: Path) -> None:
     (root / "src").mkdir()
     (root / "src" / "main.py").write_text("def hello():\n    print('hello world')\n\nVALUE = 42\n")
