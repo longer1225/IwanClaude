@@ -190,6 +190,12 @@ class CoreApp:
         await self._sessions.close(cmd.session_id)
         return SessionCloseResult(status="closed")
 
+    async def _session_engine_info_handler(self, params: dict[str, Any]) -> dict[str, str]:
+        return {
+            "engine": self._config.agent.engine,
+            "checkpoint_backend": self._config.agent.checkpoint_backend,
+        }
+
     # 注册客户端事件订阅，可选先回放 events.jsonl 历史再接收实时流
     async def _subscribe_handler(self, params: dict[str, Any]) -> EventSubscribeResult:
         cmd = EventSubscribeCommand.model_validate(params)
@@ -307,6 +313,7 @@ class CoreApp:
         server.register("session.compact", self._session_compact_handler)
         server.register("session.checkpoint.list", self._session_checkpoint_list_handler)
         server.register("session.checkpoint.restore", self._session_checkpoint_restore_handler)
+        server.register("session.engine_info", self._session_engine_info_handler)
 
         addr = await server.start()
         logger.info("iwan-core %s listening addr=%s", iwan_claude.__version__, addr)

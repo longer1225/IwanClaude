@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import re
+import zipfile
 from dataclasses import dataclass, field
+from io import BytesIO
 from pathlib import Path
+from typing import Any
+
+import httpx
 
 
 # Skill 数据类：封装一个可复用的工作流模板
@@ -156,3 +162,117 @@ class SkillLoader:
     # 使用场景：用户输入 "/skill orchestrate 帮我做XXX"，XXX 替换 $ARGUMENTS
     def render_prompt(self, skill: Skill, arguments: str) -> str:
         return skill.system_prompt_template.replace("$ARGUMENTS", arguments)
+
+    # 下载并安装 skill
+    # 支持的 URL 格式：
+    #   - GitHub 仓库: https://github.com/username/repo
+    #   - GitHub 仓库指定分支: https://github.com/username/repo/tree/branch
+    #   - ZIP 文件: https://example.com/skill.zip
+    #   - SKILL.md 文件: https://example.com/SKILL.md
+    async def install_from_url(self, url: str, global_install: bool = False) -> tuple[str, bool]:
+        target_dir = Path("~/.iwan/skills").expanduser() if global_install else Path(".iwan/skills")
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            url = self._normalize_url(url)
+            content, content_type = await self._download_content(url)
+
+            if content_type == "zip":
+                return await self._install_from_zip(content, target_dir)
+            elif content_type == "skill_md":
+                return await self._install_from_skill_md(content, url, target_dir)
+            else:
+                return "Unsupported content type", False
+        except Exception as exc:
+            return f"Failed to install skill: {exc}", False
+
+    def _normalize_url(self, url: str) -> str:
+        url = url.strip().rstrip("/")
+
+        if url.startswith("github.com"):
+            url = "https://" + url
+        elif url.startswith("git@github.com:"):
+            url = url.replace("git@github.com:", "https://github.com/")
+
+        if "github.com" in url and "/tree/" in url:
+            parts = url.split("/tree/")
+            branch = parts[1].split("/")[0]
+            repo_path = parts[0]
+            return f"{repo_path}/archive/refs/heads/{branch}.zip"
+        elif "github.com" in url and not url.endswith(".zip"):
+            return f"{url}/archive/refs/heads/main.zip"
+
+        return url
+
+    async def _download_content(self, url: str) -> tuple[bytes, str]:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30, connect=10)) as client:
+            response = await client.get(url)
+            response.raise_for_status()
+
+            content_type = response.headers.get("content-type", "")
+            if url.endswith(".zip") or "zip" in content_type:
+                return response.content, "zip"
+            elif url.endswith(".md") or url.endswith("SKILL.md"):
+                return response.content, "skill_md"
+            else:
+                return response.content, "unknown"
+
+    async def _install_from_zip(self, content: bytes, target_dir: Path) -> tuple[str, bool]:
+        zip_buffer = BytesIO(content)
+        installed_skills: list[str] = []
+
+        with zipfile.ZipFile(zip_buffer, "r") as zf:
+            for info in zf.infolist():
+                if info.is_dir():
+                    continue
+
+                path = Path(info.filename)
+                if path.name == "SKILL.md":
+                    skill_name = path.parent.name
+                    dest_dir = target_dir / skill_name
+                    dest_dir.mkdir(parents=True, exist_ok=True)
+                    dest_path = dest_dir / "SKILL.md"
+                    with zf.open(info) as src, open(dest_path, "wb") as dst:
+                        dst.write(src.read())
+                    installed_skills.append(skill_name)
+                elif path.suffix == ".md" and path.parent.parent.name == "skills":
+                    skill_name = path.stem
+                    dest_dir = target_dir / skill_name
+                    dest_dir.mkdir(parents=True, exist_ok=True)
+                    dest_path = dest_dir / "SKILL.md"
+                    with zf.open(info) as src, open(dest_path, "wb") as dst:
+                        dst.write(src.read())
+                    installed_skills.append(skill_name)
+
+        if not installed_skills:
+            return "No SKILL.md files found in the zip", False
+
+        return f"Installed skills: {', '.join(installed_skills)}", True
+
+    async def _install_from_skill_md(self, content: bytes, url: str, target_dir: Path) -> tuple[str, bool]:
+        try:
+            text = content.decode("utf-8")
+            m = _FRONTMATTER_RE.match(text)
+            skill_name = "unknown"
+
+            if m:
+                front = m.group(1)
+                for line in front.splitlines():
+                    if line.strip().startswith("name:"):
+                        skill_name = line.strip()[len("name:"):].strip().strip('"').strip("'")
+                        break
+
+            if skill_name == "unknown":
+                from urllib.parse import urlparse
+
+                parsed = urlparse(url)
+                skill_name = Path(parsed.path).stem
+
+            dest_dir = target_dir / skill_name
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            dest_path = dest_dir / "SKILL.md"
+            dest_path.write_bytes(content)
+
+            return f"Installed skill: {skill_name}", True
+        except Exception as exc:
+            return f"Failed to install skill: {exc}", False

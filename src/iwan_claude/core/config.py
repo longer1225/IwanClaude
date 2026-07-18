@@ -98,6 +98,16 @@ class SandboxConfig:
     allow_parent_dirs: bool = False
     max_file_size: int = 10 * 1024 * 1024
     max_total_size: int = 100 * 1024 * 1024
+
+
+@dataclass
+class RagConfig:
+    enabled: bool = False
+    embedding_model: str = "deepseek-embed-v3"
+    max_chunk_size: int = 512
+    chunk_overlap: int = 64
+    top_k: int = 5
+    index_path: str = ".iwan/rag_index"
     search_limited: bool = False
     ask_on_access_denied: bool = True
 
@@ -114,6 +124,7 @@ class IwanConfig:
     compaction: CompactionConfig = field(default_factory=CompactionConfig)
     mcp: McpConfig = field(default_factory=McpConfig)
     sandbox: SandboxConfig = field(default_factory=SandboxConfig)
+    rag: RagConfig = field(default_factory=RagConfig)
 
 
 # 构建并返回运行时配置：默认值 → 全局 TOML → 项目本地 TOML → .env → 系统环境变量（后者优先级最高）
@@ -148,7 +159,7 @@ def get_config() -> IwanConfig:
 
 # 将已解析的 TOML 根表写入 config；未知小节或类型错误时退出进程
 def _apply_toml(config: IwanConfig, data: dict[str, Any]) -> None:
-    unknown = set(data.keys()) - {"core", "logging", "agent", "llm", "trace", "permission", "compaction", "mcp", "sandbox"}
+    unknown = set(data.keys()) - {"core", "logging", "agent", "llm", "trace", "permission", "compaction", "mcp", "sandbox", "rag"}
     if unknown:
         raise SystemExit(f"Unknown top-level config keys: {', '.join(sorted(unknown))}")
 
@@ -386,6 +397,44 @@ def _apply_toml(config: IwanConfig, data: dict[str, Any]) -> None:
                 raise SystemExit("Config error: sandbox.ask_on_access_denied must be a boolean")
             config.sandbox.ask_on_access_denied = val
 
+    if "rag" in data:
+        rag = data["rag"]
+        if not isinstance(rag, dict):
+            raise SystemExit("Config error: [rag] must be a table")
+        unknown_rag: set[str] = set(rag.keys()) - {"enabled", "embedding_model", "max_chunk_size", "chunk_overlap", "top_k", "index_path"}
+        if unknown_rag:
+            raise SystemExit(f"Unknown [rag] keys: {', '.join(sorted(unknown_rag))}")
+        if "enabled" in rag:
+            val = rag["enabled"]
+            if not isinstance(val, bool):
+                raise SystemExit("Config error: rag.enabled must be a boolean")
+            config.rag.enabled = val
+        if "embedding_model" in rag:
+            val = rag["embedding_model"]
+            if not isinstance(val, str):
+                raise SystemExit("Config error: rag.embedding_model must be a string")
+            config.rag.embedding_model = val
+        if "max_chunk_size" in rag:
+            val = rag["max_chunk_size"]
+            if not isinstance(val, int) or val <= 0:
+                raise SystemExit("Config error: rag.max_chunk_size must be a positive integer")
+            config.rag.max_chunk_size = val
+        if "chunk_overlap" in rag:
+            val = rag["chunk_overlap"]
+            if not isinstance(val, int) or val < 0:
+                raise SystemExit("Config error: rag.chunk_overlap must be a non-negative integer")
+            config.rag.chunk_overlap = val
+        if "top_k" in rag:
+            val = rag["top_k"]
+            if not isinstance(val, int) or val <= 0:
+                raise SystemExit("Config error: rag.top_k must be a positive integer")
+            config.rag.top_k = val
+        if "index_path" in rag:
+            val = rag["index_path"]
+            if not isinstance(val, str):
+                raise SystemExit("Config error: rag.index_path must be a string")
+            config.rag.index_path = val
+
 
 # 用 IWAN_* 环境变量覆盖 config 中对应字段（若变量已设置）
 def _apply_env(config: IwanConfig) -> None:
@@ -574,3 +623,69 @@ def _apply_env(config: IwanConfig) -> None:
     sandbox_ask_on_access_denied = os.environ.get("IWAN_SANDBOX_ASK_ON_ACCESS_DENIED")
     if sandbox_ask_on_access_denied is not None:
         config.sandbox.ask_on_access_denied = sandbox_ask_on_access_denied.lower() not in ("0", "false", "no")
+
+    rag_enabled = os.environ.get("IWAN_RAG_ENABLED")
+    if rag_enabled is not None:
+        config.rag.enabled = rag_enabled.lower() not in ("0", "false", "no")
+
+    rag_embedding_model = os.environ.get("IWAN_RAG_EMBEDDING_MODEL")
+    if rag_embedding_model is not None:
+        config.rag.embedding_model = rag_embedding_model
+
+    rag_max_chunk_size = os.environ.get("IWAN_RAG_MAX_CHUNK_SIZE")
+    if rag_max_chunk_size is not None:
+        try:
+            val = int(rag_max_chunk_size)
+            if val <= 0:
+                raise SystemExit(
+                    f"Config error: IWAN_RAG_MAX_CHUNK_SIZE must be a positive integer, got: {rag_max_chunk_size!r}"
+                )
+            config.rag.max_chunk_size = val
+        except ValueError:
+            raise SystemExit(
+                f"Config error: IWAN_RAG_MAX_CHUNK_SIZE must be an integer, got: {rag_max_chunk_size!r}"
+            )
+
+    rag_chunk_overlap = os.environ.get("IWAN_RAG_CHUNK_OVERLAP")
+    if rag_chunk_overlap is not None:
+        try:
+            val = int(rag_chunk_overlap)
+            if val < 0:
+                raise SystemExit(
+                    f"Config error: IWAN_RAG_CHUNK_OVERLAP must be a non-negative integer, got: {rag_chunk_overlap!r}"
+                )
+            config.rag.chunk_overlap = val
+        except ValueError:
+            raise SystemExit(
+                f"Config error: IWAN_RAG_CHUNK_OVERLAP must be an integer, got: {rag_chunk_overlap!r}"
+            )
+
+    rag_top_k = os.environ.get("IWAN_RAG_TOP_K")
+    if rag_top_k is not None:
+        try:
+            val = int(rag_top_k)
+            if val <= 0:
+                raise SystemExit(
+                    f"Config error: IWAN_RAG_TOP_K must be a positive integer, got: {rag_top_k!r}"
+                )
+            config.rag.top_k = val
+        except ValueError:
+            raise SystemExit(
+                f"Config error: IWAN_RAG_TOP_K must be an integer, got: {rag_top_k!r}"
+            )
+
+    rag_index_path = os.environ.get("IWAN_RAG_INDEX_PATH")
+    if rag_index_path is not None:
+        config.rag.index_path = rag_index_path
+
+    agent_engine = os.environ.get("IWAN_AGENT_ENGINE")
+    if agent_engine is not None:
+        config.agent.engine = agent_engine
+
+    checkpoint_backend = os.environ.get("IWAN_AGENT_CHECKPOINT_BACKEND")
+    if checkpoint_backend is not None:
+        config.agent.checkpoint_backend = checkpoint_backend
+
+    checkpoint_db_path = os.environ.get("IWAN_AGENT_CHECKPOINT_DB_PATH")
+    if checkpoint_db_path is not None:
+        config.agent.checkpoint_db_path = checkpoint_db_path

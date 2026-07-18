@@ -517,6 +517,8 @@ class IwanTuiApp(App[None]):
         self._slash_items: list[tuple[str, str]] = []
         self._subagent_run_ids: dict[str, str] = {}  # child run_id -> description
         self._subagent_start_times: dict[str, float] = {}  # child run_id -> start time
+        self._engine_type: str = "legacy"
+        self._checkpoint_backend: str = "none"
 
     def compose(self) -> ComposeResult:
         yield Label("[bold]IwanClaude[/bold]  [dim]connecting...[/dim]", id="header")
@@ -534,6 +536,8 @@ class IwanTuiApp(App[None]):
     # 构建斜杠命令候选列表：内建命令 + 所有已注册 skill
     def _build_slash_items(self) -> list[tuple[str, str]]:
         items: list[tuple[str, str]] = [("compact", "compress context window")]
+        if self._engine_type == "langgraph":
+            items.append(("checkpoint", "list or restore checkpoints"))
         try:
             loader = SkillLoader()
             for skill in loader.list_all_skills():
@@ -621,6 +625,19 @@ class IwanTuiApp(App[None]):
             if self._client is not None and self._session_id is not None and not self._busy:
                 self.run_worker(self._do_compact(), name="compact", exclusive=False)
             return
+        
+        # 检测 /checkpoint 指令
+        if content.startswith("/checkpoint"):
+            event.text_area.text = ""
+            if self._client is not None and self._session_id is not None and not self._busy:
+                parts = content.split()
+                if len(parts) >= 2:
+                    cmd = parts[1]
+                    arg = parts[2] if len(parts) >= 3 else ""
+                    self.run_worker(self._do_checkpoint(cmd, arg), name="checkpoint", exclusive=False)
+                else:
+                    self._append(Static("[yellow]usage: /checkpoint list | /checkpoint restore <id>[/yellow]", classes="log-line"))
+            return
         if self._client is None or self._session_id is None or self._busy:
             self._append(Static("[yellow]agent busy or disconnected[/yellow]", classes="log-line"))
             return
@@ -654,6 +671,63 @@ class IwanTuiApp(App[None]):
             ))
         except (IpcError, RuntimeError, OSError) as e:
             self._append(Static(f"[red]compact error: {e}[/red]", classes="log-line"))
+
+    async def _do_checkpoint(self, cmd: str, arg: str) -> None:
+        if self._client is None or self._session_id is None:
+            return
+        
+        if cmd == "list":
+            self._append(Static("[dim]📋 listing checkpoints...[/dim]", classes="log-line"))
+            try:
+                result = await self._client.send_command(
+                    "session.checkpoint.list",
+                    {"session_id": self._session_id},
+                )
+                checkpoints = result.get("checkpoints", [])
+                thread_id = result.get("thread_id", "")
+                if not checkpoints:
+                    self._append(Static("[dim]  (no checkpoints found)[/dim]", classes="log-line"))
+                else:
+                    for i, cp in enumerate(reversed(checkpoints)):
+                        ts = cp.get("timestamp", "")
+                        summary = cp.get("summary", "")
+                        node = cp.get("node", "")
+                        self._append(Static(
+                            f"  [{i}] [cyan]step={cp['step']}[/cyan]  {ts}  {summary}",
+                            classes="log-line",
+                        ))
+                        self._append(Static(
+                            f"     id: {cp['checkpoint_id']}",
+                            classes="log-line",
+                        ))
+            except (IpcError, RuntimeError, OSError) as e:
+                self._append(Static(f"[red]checkpoint list error: {e}[/red]", classes="log-line"))
+        
+        elif cmd == "restore":
+            if not arg:
+                self._append(Static("[yellow]usage: /checkpoint restore <index_or_id>[/yellow]", classes="log-line"))
+                return
+            self._append(Static(f"[dim]🔄 restoring checkpoint {arg}...[/dim]", classes="log-line"))
+            try:
+                result = await self._client.send_command(
+                    "session.checkpoint.restore",
+                    {"session_id": self._session_id, "checkpoint_id": arg},
+                )
+                if result.get("success"):
+                    self._append(Static(
+                        f"[bold green]✓[/bold green] restored to step {result['step']}: {result['message']}",
+                        classes="log-line",
+                    ))
+                else:
+                    self._append(Static(
+                        f"[red]✗ restore failed: {result['message']}[/red]",
+                        classes="log-line",
+                    ))
+            except (IpcError, RuntimeError, OSError) as e:
+                self._append(Static(f"[red]checkpoint restore error: {e}[/red]", classes="log-line"))
+        
+        else:
+            self._append(Static("[yellow]usage: /checkpoint list | /checkpoint restore <id>[/yellow]", classes="log-line"))
 
     # 在 worker 中执行 IPC 发送，使 App 消息泵在 agent 运行期间仍能处理键盘/焦点等消息
     async def _do_send_message(self, content: str) -> None:
@@ -751,9 +825,15 @@ class IwanTuiApp(App[None]):
             "disconnected": "red",
             "connecting": "dim",
         }.get(state, "dim")
+        
+        engine_color = "cyan" if self._engine_type == "langgraph" else "dim"
+        engine_info = f"  [{engine_color}]{self._engine_type}[/{engine_color}]"
+        if self._engine_type == "langgraph" and self._checkpoint_backend != "none":
+            engine_info += f"  [dim]({self._checkpoint_backend})[/dim]"
+        
         header.update(
             f"[bold]IwanClaude[/bold]  [dim]{self._host}:{self._port}[/dim]"
-            f"{session}  [{color}]{state}[/{color}]"
+            f"{session}{engine_info}  [{color}]{state}[/{color}]"
         )
 
     # 管理 SocketClient 生命周期：连接、订阅事件、断线重连
@@ -809,6 +889,11 @@ class IwanTuiApp(App[None]):
                 created = await client.send_command("session.create", {"mode": "chat"})
                 self._session_id = str(created["session_id"])
                 log.info("session created session_id=%s", self._session_id)
+                
+                engine_info = await client.send_command("session.engine_info", {})
+                self._engine_type = engine_info.get("engine", "legacy")
+                self._checkpoint_backend = engine_info.get("checkpoint_backend", "none")
+                
                 prompt = self._prompt()
                 if prompt is not None:
                     prompt.disabled = False

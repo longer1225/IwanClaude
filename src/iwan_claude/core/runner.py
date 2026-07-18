@@ -5,6 +5,7 @@ import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from iwan_claude.core.bus.events import RunFinishedEvent, RunStartedEvent
 from iwan_claude.core.compact.compactor import Compactor
@@ -30,29 +31,67 @@ from iwan_claude.core.subagent.tool import (
     SpawnAgentTool,
     SpawnAgentsTool,
 )
+from iwan_claude.core.rag.chunker import DocumentChunker
+from iwan_claude.core.rag.embedding import get_embedding_provider
+from iwan_claude.core.rag.index import KnowledgeIndexManager
+from iwan_claude.core.rag.tools import (
+    ForgetKnowledgeTool,
+    IndexKnowledgeTool,
+    SearchKnowledgeTool,
+)
+from iwan_claude.core.rag.vectorstore import get_vector_store
 from iwan_claude.core.task.manager import TaskManager
 from iwan_claude.core.tools.builtin import (
+    AddContextTool,
+    AssignRoleTool,
     BashTool,
+    CacheDeleteTool,
+    CacheGetTool,
+    CacheInvalidateTool,
+    CacheSetTool,
+    CacheStatsTool,
+    ChangelogTool,
     CopyFileTool,
     DeleteFileTool,
     DeleteLinesTool,
+    DependencyCheckTool,
     EditByLinesTool,
     EditBySearchTool,
     FileExistsTool,
     FileStatTool,
     FindFilesTool,
+    GenerateDocsTool,
+    GitCheckoutTool,
+    GitCommitTool,
+    GitDiffTool,
+    GitLogTool,
+    GitStatusTool,
     GrepSearchTool,
+    HttpRequestTool,
     InsertAtLineTool,
+    LintCodeTool,
     ListDirTool,
+    ListRolesTool,
     MkdirTool,
     NoteSaveTool,
+    PipManageTool,
+    ProcessListTool,
     ReadFileTool,
     RenameFileTool,
+    ReviewCodeTool,
     RunPythonTool,
+    SecurityScanTool,
+    ShareKnowledgeTool,
+    SkillCreateTool,
+    SkillDeleteTool,
+    SkillInfoTool,
+    SkillInstallTool,
+    SkillListTool,
     TaskCreateTool,
     TaskGetTool,
     TaskListTool,
     TaskUpdateTool,
+    UpdateReadmeTool,
     ViewFileTool,
     WriteFileTool,
 )
@@ -121,7 +160,7 @@ class AgentRunner:
             db_path = Path(self._config.agent.checkpoint_db_path)
             db_path.parent.mkdir(parents=True, exist_ok=True)
             conn_str = str(db_path.resolve())
-            ctx = await AsyncSqliteSaver.from_conn_string(conn_str)
+            ctx = AsyncSqliteSaver.from_conn_string(conn_str)
             saver = await ctx.__aenter__()
             self._checkpointer_ctx = ctx
             self._checkpointer = saver
@@ -255,6 +294,30 @@ class AgentRunner:
             EditBySearchTool(),
             InsertAtLineTool(),
             DeleteLinesTool(),
+            GitStatusTool(),
+            GitLogTool(),
+            GitDiffTool(),
+            GitCommitTool(),
+            GitCheckoutTool(),
+            ProcessListTool(),
+            HttpRequestTool(),
+            AddContextTool(),
+            ReviewCodeTool(),
+            LintCodeTool(),
+            SecurityScanTool(),
+            PipManageTool(),
+            DependencyCheckTool(),
+            GenerateDocsTool(),
+            UpdateReadmeTool(),
+            ChangelogTool(),
+            CacheGetTool(),
+            CacheSetTool(),
+            CacheDeleteTool(),
+            CacheInvalidateTool(),
+            CacheStatsTool(),
+            AssignRoleTool(),
+            ListRolesTool(),
+            ShareKnowledgeTool(),
         ]:
             if _ok(t.name):
                 registry.register(t)
@@ -263,6 +326,18 @@ class AgentRunner:
             TaskUpdateTool(task_manager),
             TaskListTool(task_manager),
             TaskGetTool(task_manager),
+        ]:
+            if _ok(t.name):
+                registry.register(t)
+        from iwan_claude.core.skills.loader import SkillLoader
+
+        skill_loader = SkillLoader()
+        for t in [
+            SkillListTool(skill_loader),
+            SkillInfoTool(skill_loader),
+            SkillInstallTool(skill_loader),
+            SkillCreateTool(),
+            SkillDeleteTool(),
         ]:
             if _ok(t.name):
                 registry.register(t)
@@ -312,6 +387,37 @@ class AgentRunner:
             for mcp_tool in self._mcp_manager.get_tools():
                 if _ok(mcp_tool.name):
                     registry.register(mcp_tool)
+
+        if self._config.rag.enabled:
+            try:
+                vector_store = get_vector_store()
+                embedding_provider = get_embedding_provider(
+                    self._config.rag,
+                    self._config.llm.base_url,
+                )
+                chunker = DocumentChunker(
+                    chunk_size=self._config.rag.max_chunk_size,
+                    chunk_overlap=self._config.rag.chunk_overlap,
+                )
+                index_manager = KnowledgeIndexManager(
+                    vector_store=vector_store,
+                    embedding_provider=embedding_provider,
+                    chunker=chunker,
+                    index_path=self._config.rag.index_path,
+                )
+                index_manager.load()
+
+                if _ok("search_knowledge"):
+                    registry.register(SearchKnowledgeTool(index_manager))
+                if _ok("index_knowledge"):
+                    registry.register(IndexKnowledgeTool(index_manager))
+                if _ok("forget_knowledge"):
+                    registry.register(ForgetKnowledgeTool(index_manager))
+            except Exception as exc:
+                logging.getLogger(__name__).warning(
+                    "Failed to initialize RAG tools: %s", exc
+                )
+
         return registry
 
     # 执行一次完整的 agent run（委托给 run_and_capture，忽略返回值）

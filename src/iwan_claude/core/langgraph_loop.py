@@ -219,7 +219,7 @@ class LangGraphAgentLoop:
                 permission_manager=self._permission_manager,
                 session_id=self._session_id,
             )
-            new_messages = new_messages + [_tool_result_msg(tc.id, result)]
+            new_messages = _add_tool_result_to_messages(new_messages, tc.id, result)
 
         return {**state, "messages": new_messages}
 
@@ -293,16 +293,28 @@ def _assistant_msg_from_response(response: LlmResponse) -> dict[str, Any]:
         return {"role": "assistant", "content": content}
 
 
-def _tool_result_msg(tool_use_id: str, result: Any) -> dict[str, Any]:
-    return {
-        "role": "user",
-        "content": [{
-            "type": "tool_result",
-            "tool_use_id": tool_use_id,
-            "content": result.content if hasattr(result, "content") else str(result),
-            "is_error": result.is_error if hasattr(result, "is_error") else False,
-        }],
+def _add_tool_result_to_messages(messages: list[dict[str, Any]], tool_use_id: str, result: Any) -> list[dict[str, Any]]:
+    block: dict[str, Any] = {
+        "type": "tool_result",
+        "tool_use_id": tool_use_id,
+        "content": result.content if hasattr(result, "content") else str(result),
     }
+    if result.is_error if hasattr(result, "is_error") else False:
+        block["is_error"] = True
+
+    last = messages[-1] if messages else None
+    if (
+        last is not None
+        and last["role"] == "user"
+        and isinstance(last["content"], list)
+        and last["content"]
+        and all(b.get("type") == "tool_result" for b in last["content"])
+    ):
+        new_messages = messages[:-1] + [{**last, "content": last["content"] + [block]}]
+    else:
+        new_messages = messages + [{"role": "user", "content": [block]}]
+
+    return new_messages
 
 
 def _extract_last_assistant_text(messages: list[dict[str, Any]]) -> str:
@@ -316,6 +328,8 @@ def _extract_last_assistant_text(messages: list[dict[str, Any]]) -> str:
                         if block.get("type") == "text":
                             text_parts.append(block.get("text", ""))
                         elif block.get("type") == "tool_use":
+                            continue
+                        elif block.get("type") == "tool_result":
                             continue
                     else:
                         text_parts.append(str(block))
