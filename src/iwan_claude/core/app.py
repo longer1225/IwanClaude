@@ -5,6 +5,7 @@ import datetime
 import fnmatch
 import json
 import logging
+import os
 import signal
 import sys
 import time
@@ -76,6 +77,32 @@ class CoreApp:
         self._sessions: SessionManager | None = None
         self._permission_manager: PermissionManager | None = None
         self._mcp_manager: McpServerManager | None = None
+        self._checkpointer: Any | None = None
+        self._checkpointer_ctx: Any | None = None
+
+    async def _init_checkpointer(self) -> None:
+        assert self._config is not None
+        backend = self._config.agent.checkpoint_backend
+        if backend == "none":
+            self._checkpointer = None
+            return
+        elif backend == "memory":
+            from langgraph.checkpoint.memory import InMemorySaver
+            self._checkpointer = InMemorySaver()
+            logger.info("checkpointer: using memory backend")
+        elif backend == "sqlite":
+            from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+            db_path = Path(self._config.agent.checkpoint_db_path)
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+            conn_str = str(db_path.resolve())
+            ctx = AsyncSqliteSaver.from_conn_string(conn_str)
+            saver = await ctx.__aenter__()
+            self._checkpointer_ctx = ctx
+            self._checkpointer = saver
+            logger.info("checkpointer: using sqlite backend at %s", conn_str)
+        else:
+            logger.warning("Unknown checkpoint_backend=%r, using none", backend)
+            self._checkpointer = None
 
     # 处理 core.ping 请求，返回服务版本、运行时长和接收时间
     async def _ping_handler(self, params: dict[str, Any]) -> PongResult:
@@ -272,7 +299,8 @@ class CoreApp:
 
         self._broadcaster = IpcEventBroadcaster(trace=self._trace)
         self._bus.subscribe(self._broadcaster.handle)
-        sessions_root = Path("~/.iwan/sessions").expanduser()
+        sessions_root = Path(os.environ.get("IWAN_SESSIONS_DIR", "~/.iwan/sessions")).expanduser()
+        sessions_root.mkdir(parents=True, exist_ok=True)
         store = SessionStore(sessions_root)
         assert self._config is not None
         # compact 使用的 provider：和主 agent 一样按配置选 Anthropic 或 OpenAI 兼容
@@ -283,6 +311,8 @@ class CoreApp:
             logger.info("mcp: starting %d server(s)", len(self._config.mcp.servers))
             await self._mcp_manager.start_all(self._config.mcp.servers)
 
+        await self._init_checkpointer()
+
         self._sessions = SessionManager(
             store,
             runner_factory=lambda: AgentRunner(
@@ -291,6 +321,7 @@ class CoreApp:
                 trace=self._trace,
                 permission_manager=self._permission_manager,
                 mcp_manager=self._mcp_manager,
+                checkpointer=self._checkpointer,
             ),
             bus=self._bus,
             provider=compact_provider,
@@ -354,6 +385,12 @@ class CoreApp:
         if self._mcp_manager is not None:
             await self._mcp_manager.stop_all()
         await server.stop()
+        if self._checkpointer_ctx is not None:
+            try:
+                if hasattr(self._checkpointer_ctx, "__aexit__"):
+                    await self._checkpointer_ctx.__aexit__(None, None, None)
+            except Exception:
+                logger.exception("Error closing checkpointer context")
         if self._trace is not None:
             await self._trace.stop()
 

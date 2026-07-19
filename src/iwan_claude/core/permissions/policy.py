@@ -41,11 +41,13 @@ class ToolPolicy:
 
 
 DEFAULT_POLICIES: dict[str, ToolPolicy] = {
-    "bash":       ToolPolicy(default=PermissionDecision.ASK),
-    "write_file": ToolPolicy(default=PermissionDecision.ASK),
-    "read_file":  ToolPolicy(default=PermissionDecision.ALLOW),
-    "list_dir":   ToolPolicy(default=PermissionDecision.ALLOW),
-    "note_save":  ToolPolicy(default=PermissionDecision.ALLOW),
+    "bash":              ToolPolicy(default=PermissionDecision.ASK),
+    "write_file":        ToolPolicy(default=PermissionDecision.ASK),
+    "read_file":         ToolPolicy(default=PermissionDecision.ALLOW),
+    "list_dir":          ToolPolicy(default=PermissionDecision.ALLOW),
+    "note_save":         ToolPolicy(default=PermissionDecision.ALLOW),
+    "list_checkpoints":  ToolPolicy(default=PermissionDecision.ALLOW),
+    "restore_checkpoint": ToolPolicy(default=PermissionDecision.ALLOW),
 }
 
 # 未在 DEFAULT_POLICIES 中登记的工具的兜底策略

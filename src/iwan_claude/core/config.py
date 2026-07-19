@@ -133,7 +133,14 @@ def get_config() -> IwanConfig:
     config = IwanConfig()
 
     # .env 必须在读取 IWAN_CONFIG 之前加载，以便 .env 中的 IWAN_CONFIG 能影响 TOML 路径
+    # 优先从当前工作目录加载 .env，其次从包所在目录加载
+    import iwan_claude
+    pkg_dir = Path(iwan_claude.__file__).parent.parent.parent
     load_dotenv(".env", override=False)
+    if not os.path.exists(".env"):
+        env_path = pkg_dir / ".env"
+        if env_path.exists():
+            load_dotenv(env_path, override=False)
 
     # 若显式指定 IWAN_CONFIG，只读该文件；否则按优先级叠加：全局 → 项目本地
     explicit = os.environ.get("IWAN_CONFIG")

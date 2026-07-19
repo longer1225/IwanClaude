@@ -41,9 +41,13 @@ class ListCheckpointsTool(BaseTool):
             )
 
         try:
-            checkpoints = await checkpointer.alist(
+            checkpoints_iter = checkpointer.alist(
                 {"configurable": {"thread_id": session_id}}
             )
+            checkpoints = []
+            async for cp_tuple in checkpoints_iter:
+                checkpoints.append(cp_tuple)
+            
             if not checkpoints:
                 return ToolResult(content="No checkpoints found.")
 

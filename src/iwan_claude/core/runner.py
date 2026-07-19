@@ -94,6 +94,8 @@ from iwan_claude.core.tools.builtin import (
     UpdateReadmeTool,
     ViewFileTool,
     WriteFileTool,
+    ListCheckpointsTool,
+    RestoreCheckpointTool,
 )
 from iwan_claude.core.tools.registry import ToolRegistry
 from iwan_claude.core.trace.provider import TracingProvider
@@ -124,6 +126,7 @@ class AgentRunner:
         trace: TraceWriter | None = None,
         permission_manager: PermissionManager | None = None,
         mcp_manager: McpServerManager | None = None,
+        checkpointer: Any | None = None,
     ) -> None:
         self._config = config
         self._bus = bus
@@ -135,10 +138,10 @@ class AgentRunner:
         self._mcp_manager = mcp_manager
         # 跨 run 共享的后台 subagent 任务注册表
         self._task_registry = BackgroundTaskRegistry()
+        # 外部传入的 checkpointer（跨 run 共享），如果没有传入则延迟初始化
+        self._checkpointer = checkpointer
         # 初始化沙箱配置
         init_sandbox(config.sandbox)
-        # LangGraph checkpointer (lazy initialized)
-        self._checkpointer: Any = None
         self._checkpointer_ctx: Any = None
 
     async def _init_checkpointer(self) -> Any:
@@ -192,14 +195,16 @@ class AgentRunner:
 
     async def list_checkpoints(self, thread_id: str) -> list[dict[str, Any]]:
         if self._checkpointer is None:
-            return []
+            await self._init_checkpointer()
+            if self._checkpointer is None:
+                return []
 
         result = []
         try:
-            checkpoints = await self._checkpointer.alist(
+            checkpoints_iter = self._checkpointer.alist(
                 {"configurable": {"thread_id": thread_id}}
             )
-            for cp_tuple in checkpoints:
+            async for cp_tuple in checkpoints_iter:
                 configurable = cp_tuple.config.get("configurable", {})
                 checkpoint_id = configurable.get("checkpoint_id", "")
                 step = cp_tuple.metadata.get("step", 0)
@@ -234,7 +239,9 @@ class AgentRunner:
 
     async def restore_checkpoint(self, thread_id: str, checkpoint_id: str) -> dict[str, Any] | None:
         if self._checkpointer is None:
-            return None
+            await self._init_checkpointer()
+            if self._checkpointer is None:
+                return None
 
         try:
             checkpoint_tuple = await self._checkpointer.aget_tuple(
@@ -421,9 +428,9 @@ class AgentRunner:
 
         if checkpointer is not None:
             if _ok("list_checkpoints"):
-                registry.register(ListCheckpointsTool(lambda: checkpointer, lambda: session_id_str))
+                registry.register(ListCheckpointsTool(lambda: checkpointer, lambda: session_id))
             if _ok("restore_checkpoint"):
-                registry.register(RestoreCheckpointTool(lambda: checkpointer, lambda: session, lambda: session_id_str))
+                registry.register(RestoreCheckpointTool(lambda: checkpointer, lambda: session, lambda: session_id))
 
         return registry
 
