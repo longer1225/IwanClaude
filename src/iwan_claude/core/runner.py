@@ -268,6 +268,7 @@ class AgentRunner:
         child_runs_dir: Path | None = None,
         session_id: str = "",
         tool_whitelist: list[str] | None = None,
+        checkpointer: Any | None = None,
     ) -> ToolRegistry:
         allowed: set[str] | None = set(tool_whitelist) if tool_whitelist else None
 
@@ -418,6 +419,12 @@ class AgentRunner:
                     "Failed to initialize RAG tools: %s", exc
                 )
 
+        if checkpointer is not None:
+            if _ok("list_checkpoints"):
+                registry.register(ListCheckpointsTool(lambda: checkpointer, lambda: session_id_str))
+            if _ok("restore_checkpoint"):
+                registry.register(RestoreCheckpointTool(lambda: checkpointer, lambda: session, lambda: session_id_str))
+
         return registry
 
     # 执行一次完整的 agent run（委托给 run_and_capture，忽略返回值）
@@ -488,6 +495,7 @@ class AgentRunner:
                     if session is not None and store is not None
                     else self._runs_dir
                 )
+                checkpointer = await self._init_checkpointer()
                 registry = self._build_registry(
                     task_manager,
                     session=session,
@@ -498,6 +506,7 @@ class AgentRunner:
                     child_runs_dir=child_runs_dir,
                     session_id=session_id_str,
                     tool_whitelist=tool_whitelist,
+                    checkpointer=checkpointer,
                 )
                 session_dir = (
                     store.session_dir(session.id)
@@ -508,7 +517,6 @@ class AgentRunner:
                 if self._config.agent.engine == "langgraph":
                     from iwan_claude.core.langgraph_loop import LangGraphAgentLoop
 
-                    checkpointer = await self._init_checkpointer()
                     loop = LangGraphAgentLoop(
                         provider, registry, bus,
                         llm_model_name=self._config.llm.default_model,

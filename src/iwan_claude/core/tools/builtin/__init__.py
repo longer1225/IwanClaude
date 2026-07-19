@@ -59,6 +59,7 @@ from iwan_claude.core.tools.builtin.skill import (
     SkillListTool,
 )
 from iwan_claude.core.tools.builtin.system import ProcessListTool
+from iwan_claude.core.tools.builtin.checkpoint import ListCheckpointsTool, RestoreCheckpointTool
 from iwan_claude.core.tools.builtin.task_create import TaskCreateTool
 from iwan_claude.core.tools.builtin.task_get import TaskGetTool
 from iwan_claude.core.tools.builtin.task_list import TaskListTool
@@ -104,6 +105,8 @@ __all__ = [
     "MkdirTool",
     "NoteSaveTool",
     "ProcessListTool",
+    "ListCheckpointsTool",
+    "RestoreCheckpointTool",
     "ReadFileTool",
     "RenameFileTool",
     "RunPythonTool",

@@ -123,7 +123,8 @@ class LangGraphAgentLoop:
             "_usage": None,
         }
 
-        config = {"configurable": {"thread_id": context.run_id}}
+        thread_id = self._session_id if self._session_id else context.run_id
+        config = {"configurable": {"thread_id": thread_id}}
 
         try:
             final_state = await self._graph.ainvoke(initial_state, config)
