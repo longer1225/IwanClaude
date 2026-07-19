@@ -467,6 +467,7 @@ class IwanTuiApp(App[None]):
     TITLE = "IwanClaude"
     BINDINGS = [
         Binding("ctrl+q", "quit", "quit"),
+        Binding("ctrl+p", "checkpoint_list", "list checkpoints"),
     ]
     CSS = """
     Screen { background: $background; }
@@ -498,7 +499,7 @@ class IwanTuiApp(App[None]):
         "[bold cyan]██║██║███╗██║██╔══██║██║╚██╗██║██║     ██║     ██╔══██║██║   ██║██║  ██║██╔══╝  [/bold cyan]\n"
         "[bold cyan]██║╚███╔███╔╝██║  ██║██║ ╚████║╚██████╗███████╗██║  ██║╚██████╔╝██████╔╝███████╗[/bold cyan]\n"
         "[bold cyan]╚═╝ ╚══╝╚══╝ ╚═╝  ╚═╝╚═╝  ╚═══╝ ╚═════╝╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚═════╝ ╚══════╝[/bold cyan]\n"
-        "[dim]  输入消息开始对话  ·  键入 / 触发 skill  ·  Ctrl+C 退出[/dim]"
+        "[dim]  输入消息开始对话  ·  键入 / 触发 skill  ·  Ctrl+P 查看 checkpoint  ·  Ctrl+C 退出[/dim]"
     )
 
     # 初始化连接参数和 TUI 内部状态
@@ -614,6 +615,16 @@ class IwanTuiApp(App[None]):
                 self._append(Static("[yellow]warning: failed to close session[/yellow]"))
         self.exit()
 
+    # Ctrl+P 快捷键：列出 checkpoint
+    async def action_checkpoint_list(self) -> None:
+        if self._client is None or self._session_id is None or self._busy:
+            self._append(Static("[yellow]agent busy or disconnected[/yellow]", classes="log-line"))
+            return
+        if self._engine_type != "langgraph":
+            self._append(Static("[yellow]checkpoints only available in langgraph mode[/yellow]", classes="log-line"))
+            return
+        self.run_worker(self._do_checkpoint("list", ""), name="checkpoint", exclusive=False)
+
     # 将输入框提交内容发送给当前 chat session；用 worker 发送，避免 await 阻塞 App 消息泵
     async def on_chat_text_area_submitted(self, event: ChatTextArea.Submitted) -> None:
         content = event.value.strip()
@@ -685,21 +696,33 @@ class IwanTuiApp(App[None]):
                 )
                 checkpoints = result.get("checkpoints", [])
                 thread_id = result.get("thread_id", "")
+                
                 if not checkpoints:
                     self._append(Static("[dim]  (no checkpoints found)[/dim]", classes="log-line"))
+                    self._append(Static("[dim]  Tip: Checkpoints are created automatically during agent runs[/dim]", classes="log-line"))
                 else:
+                    self._append(Static(f"[bold cyan]===== Checkpoints ({len(checkpoints)}) =====[/bold cyan]", classes="log-line"))
                     for i, cp in enumerate(reversed(checkpoints)):
                         ts = cp.get("timestamp", "")
                         summary = cp.get("summary", "")
-                        node = cp.get("node", "")
+                        cp_id = cp.get("checkpoint_id", "")
+                        
+                        ts_display = ts.split("T")[1][:8] if "T" in ts else ts
+                        
                         self._append(Static(
-                            f"  [{i}] [cyan]step={cp['step']}[/cyan]  {ts}  {summary}",
+                            f"  [bold green][{i}][/bold green]  "
+                            f"[cyan]step={cp['step']}[/cyan]  "
+                            f"[dim]{ts_display}[/dim]  "
+                            f"{summary}",
                             classes="log-line",
                         ))
-                        self._append(Static(
-                            f"     id: {cp['checkpoint_id']}",
-                            classes="log-line",
-                        ))
+                        if cp_id:
+                            self._append(Static(
+                                f"     [dim]id: {_preview(cp_id, 32)}[/dim]",
+                                classes="log-line",
+                            ))
+                    self._append(Static(f"[bold cyan]====================================[/bold cyan]", classes="log-line"))
+                    self._append(Static(f"[dim]Restore with: /checkpoint restore <index>[/dim]", classes="log-line"))
             except (IpcError, RuntimeError, OSError) as e:
                 self._append(Static(f"[red]checkpoint list error: {e}[/red]", classes="log-line"))
         
@@ -707,11 +730,32 @@ class IwanTuiApp(App[None]):
             if not arg:
                 self._append(Static("[yellow]usage: /checkpoint restore <index_or_id>[/yellow]", classes="log-line"))
                 return
-            self._append(Static(f"[dim]🔄 restoring checkpoint {arg}...[/dim]", classes="log-line"))
+            
+            checkpoint_id = arg
+            
+            if arg.isdigit():
+                index = int(arg)
+                self._append(Static(f"[dim]🔄 looking up checkpoint index {index}...[/dim]", classes="log-line"))
+                try:
+                    list_result = await self._client.send_command(
+                        "session.checkpoint.list",
+                        {"session_id": self._session_id},
+                    )
+                    checkpoints = list_result.get("checkpoints", [])
+                    if index < 0 or index >= len(checkpoints):
+                        self._append(Static(f"[red]✗ index {index} out of range (0-{len(checkpoints)-1})[/red]", classes="log-line"))
+                        return
+                    checkpoint_id = checkpoints[-(index + 1)]["checkpoint_id"]
+                    self._append(Static(f"[dim]  -> checkpoint_id: {_preview(checkpoint_id, 32)}[/dim]", classes="log-line"))
+                except (IpcError, RuntimeError, OSError) as e:
+                    self._append(Static(f"[red]checkpoint list error: {e}[/red]", classes="log-line"))
+                    return
+            
+            self._append(Static(f"[dim]🔄 restoring checkpoint...[/dim]", classes="log-line"))
             try:
                 result = await self._client.send_command(
                     "session.checkpoint.restore",
-                    {"session_id": self._session_id, "checkpoint_id": arg},
+                    {"session_id": self._session_id, "checkpoint_id": checkpoint_id},
                 )
                 if result.get("success"):
                     self._append(Static(
@@ -727,7 +771,7 @@ class IwanTuiApp(App[None]):
                 self._append(Static(f"[red]checkpoint restore error: {e}[/red]", classes="log-line"))
         
         else:
-            self._append(Static("[yellow]usage: /checkpoint list | /checkpoint restore <id>[/yellow]", classes="log-line"))
+            self._append(Static("[yellow]usage: /checkpoint list | /checkpoint restore <index>[/yellow]", classes="log-line"))
 
     # 在 worker 中执行 IPC 发送，使 App 消息泵在 agent 运行期间仍能处理键盘/焦点等消息
     async def _do_send_message(self, content: str) -> None:
