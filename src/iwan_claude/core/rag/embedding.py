@@ -60,7 +60,15 @@ class EmbeddingProvider:
 
 
 def get_embedding_provider(config: RagConfig, llm_base_url: str) -> EmbeddingProvider:
+    base_url = config.embedding_base_url
+    if not base_url and llm_base_url:
+        base_url = llm_base_url.rstrip("/")
+        if base_url.endswith("/anthropic"):
+            base_url = base_url[:-len("/anthropic")] + "/v1"
+        elif not base_url.endswith("/v1"):
+            base_url = base_url + "/v1"
+
     return EmbeddingProvider(
         model=config.embedding_model,
-        base_url=llm_base_url,
+        base_url=base_url,
     )

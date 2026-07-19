@@ -51,6 +51,7 @@ class LangGraphAgentLoop:
         compact_threshold: float = 0.0,
         session_id: str = "",
         checkpointer: Any = None,
+        has_rag: bool = False,
     ) -> None:
         self._provider = provider
         self._registry = registry
@@ -61,6 +62,7 @@ class LangGraphAgentLoop:
         self._compact_threshold = compact_threshold
         self._session_id = session_id
         self._checkpointer = checkpointer
+        self._has_rag = has_rag
         self._graph = self._build_graph()
 
     def _build_graph(self) -> StateGraph:
@@ -109,7 +111,7 @@ class LangGraphAgentLoop:
         return workflow.compile(checkpointer=self._checkpointer)
 
     async def run(self, context: ExecutionContext) -> None:
-        system_prompt = build_base_system_prompt(self._llm_model_name)
+        system_prompt = build_base_system_prompt(self._llm_model_name, has_rag=self._has_rag)
 
         initial_state: AgentState = {
             "messages": context.messages,

@@ -514,6 +514,7 @@ class AgentRunner:
                     else run_path
                 )
                 compactor = Compactor(bus, session_dir, session_id_str)
+                has_rag = self._config.rag.enabled and registry.get("search_knowledge") is not None
                 if self._config.agent.engine == "langgraph":
                     from iwan_claude.core.langgraph_loop import LangGraphAgentLoop
 
@@ -525,6 +526,7 @@ class AgentRunner:
                         compact_threshold=self._config.compaction.auto_threshold,
                         session_id=session_id_str,
                         checkpointer=checkpointer,
+                        has_rag=has_rag,
                     )
                 else:
                     loop = AgentLoop(
@@ -534,6 +536,7 @@ class AgentRunner:
                         compactor=compactor,
                         compact_threshold=self._config.compaction.auto_threshold,
                         session_id=session_id_str,
+                        has_rag=has_rag,
                     )
                 await loop.run(context)
             except asyncio.CancelledError:

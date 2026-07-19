@@ -104,6 +104,7 @@ class SandboxConfig:
 class RagConfig:
     enabled: bool = False
     embedding_model: str = "deepseek-embed-v3"
+    embedding_base_url: str = ""
     max_chunk_size: int = 512
     chunk_overlap: int = 64
     top_k: int = 5
@@ -401,7 +402,7 @@ def _apply_toml(config: IwanConfig, data: dict[str, Any]) -> None:
         rag = data["rag"]
         if not isinstance(rag, dict):
             raise SystemExit("Config error: [rag] must be a table")
-        unknown_rag: set[str] = set(rag.keys()) - {"enabled", "embedding_model", "max_chunk_size", "chunk_overlap", "top_k", "index_path"}
+        unknown_rag: set[str] = set(rag.keys()) - {"enabled", "embedding_model", "embedding_base_url", "max_chunk_size", "chunk_overlap", "top_k", "index_path"}
         if unknown_rag:
             raise SystemExit(f"Unknown [rag] keys: {', '.join(sorted(unknown_rag))}")
         if "enabled" in rag:
@@ -414,6 +415,11 @@ def _apply_toml(config: IwanConfig, data: dict[str, Any]) -> None:
             if not isinstance(val, str):
                 raise SystemExit("Config error: rag.embedding_model must be a string")
             config.rag.embedding_model = val
+        if "embedding_base_url" in rag:
+            val = rag["embedding_base_url"]
+            if not isinstance(val, str):
+                raise SystemExit("Config error: rag.embedding_base_url must be a string")
+            config.rag.embedding_base_url = val
         if "max_chunk_size" in rag:
             val = rag["max_chunk_size"]
             if not isinstance(val, int) or val <= 0:
@@ -677,6 +683,10 @@ def _apply_env(config: IwanConfig) -> None:
     rag_index_path = os.environ.get("IWAN_RAG_INDEX_PATH")
     if rag_index_path is not None:
         config.rag.index_path = rag_index_path
+
+    rag_embedding_base_url = os.environ.get("IWAN_RAG_EMBEDDING_BASE_URL")
+    if rag_embedding_base_url is not None:
+        config.rag.embedding_base_url = rag_embedding_base_url
 
     agent_engine = os.environ.get("IWAN_AGENT_ENGINE")
     if agent_engine is not None:

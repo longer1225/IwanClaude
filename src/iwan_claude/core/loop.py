@@ -38,6 +38,7 @@ class AgentLoop:
         compactor: Compactor | None = None,
         compact_threshold: float = 0.0,
         session_id: str = "",
+        has_rag: bool = False,
     ) -> None:
         self._provider = provider
         self._registry = registry
@@ -47,6 +48,7 @@ class AgentLoop:
         self._compactor = compactor
         self._compact_threshold = compact_threshold
         self._session_id = session_id
+        self._has_rag = has_rag
 
     # 驱动 plan→act→observe 循环直到上下文终止；CancelledError 向上传播
     async def run(self, context: ExecutionContext) -> None:
@@ -65,8 +67,8 @@ class AgentLoop:
                     run_id=context.run_id,
                     step=context.step,
                     system=context.system_prompt(
-                        build_base_system_prompt(self._llm_model_name)
-                    ),
+                            build_base_system_prompt(self._llm_model_name, has_rag=self._has_rag)
+                        ),
                 )
             except asyncio.CancelledError:
                 context.mark_failed("cancelled")
