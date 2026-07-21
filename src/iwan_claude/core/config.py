@@ -1,5 +1,40 @@
+"""
+配置模块 - 管理整个系统的配置加载和验证
+
+【学习要点】
+1. Dataclasses：Python 的数据类装饰器，用于创建简单的数据容器
+2. 配置优先级：默认值 → TOML 文件 → .env → 环境变量（后者优先级最高）
+3. 配置验证：在加载配置时进行类型检查和值范围验证
+4. 配置热加载：通过环境变量可以动态覆盖配置，无需修改配置文件
+
+【配置来源（优先级从低到高）】
+1. 默认值：在 dataclass 字段定义中指定
+2. 全局 TOML：~/.iwan/config.toml
+3. 项目本地 TOML：./.iwan/config.toml
+4. .env 文件：./.env 或包目录下的 .env
+5. 环境变量：IWAN_* 格式的环境变量
+
+【配置文件格式（TOML）】
+```toml
+[core]
+host = "127.0.0.1"
+port = 7437
+
+[llm]
+provider = "anthropic"
+base_url = "https://api.deepseek.com/anthropic"
+api_key_env = "DEEPSEEK_API_KEY"
+default_model = "claude-sonnet-4-6"
+```
+"""
 from __future__ import annotations
 
+# os：操作系统相关功能，用于读取环境变量
+# tomllib：TOML 文件解析（Python 3.11+ 内置）
+# dataclasses：数据类装饰器
+# pathlib：路径操作
+# typing：类型提示
+# dotenv：加载 .env 文件中的环境变量
 import os
 import tomllib
 from dataclasses import dataclass, field
@@ -8,19 +43,32 @@ from typing import Any
 
 from dotenv import load_dotenv
 
-_DEFAULT_HOST = "127.0.0.1"
-_DEFAULT_PORT = 7437
-_DEFAULT_LOG_LEVEL = "INFO"
-_DEFAULT_LOG_FILE = "~/.iwan/logs/core.log"
-_DEFAULT_LOG_FORMAT = "text"
-_DEFAULT_CONFIG_PATH = "~/.iwan/config.toml"
-_DEFAULT_MAX_STEPS = 20
-_DEFAULT_MODEL = "claude-sonnet-4-6"
-_DEFAULT_TRACE_FILE = "~/.iwan/traces/daemon.jsonl"
+# ===== 默认配置值 =====
+# 这些常量定义了系统的默认配置值
+_DEFAULT_HOST = "127.0.0.1"                    # 默认绑定地址（本地回环）
+_DEFAULT_PORT = 7437                           # 默认端口号
+_DEFAULT_LOG_LEVEL = "INFO"                    # 默认日志级别
+_DEFAULT_LOG_FILE = "~/.iwan/logs/core.log"    # 默认日志文件路径
+_DEFAULT_LOG_FORMAT = "text"                   # 默认日志格式（text 或 json）
+_DEFAULT_CONFIG_PATH = "~/.iwan/config.toml"   # 默认配置文件路径
+_DEFAULT_MAX_STEPS = 20                        # Agent 最大步骤数
+_DEFAULT_MODEL = "claude-sonnet-4-6"           # 默认 LLM 模型
+_DEFAULT_TRACE_FILE = "~/.iwan/traces/daemon.jsonl"  # 默认 trace 文件路径
 
+
+# ===== 配置数据类 =====
+# 使用 @dataclass 装饰器创建配置类，每个类对应配置文件中的一个 section
 
 @dataclass
 class LoggingConfig:
+    """
+    日志配置类 - 对应 [logging] section
+    
+    属性：
+        level: 日志级别（DEBUG, INFO, WARNING, ERROR）
+        file: 日志文件路径（支持 ~ 表示用户主目录）
+        format: 日志格式（text 或 json）
+    """
     level: str = _DEFAULT_LOG_LEVEL
     file: str = _DEFAULT_LOG_FILE
     format: str = _DEFAULT_LOG_FORMAT  # "text" | "json"
@@ -28,6 +76,15 @@ class LoggingConfig:
 
 @dataclass
 class AgentConfig:
+    """
+    Agent 配置类 - 对应 [agent] section
+    
+    属性：
+        max_steps: Agent 执行的最大步骤数（防止无限循环）
+        engine: Agent 引擎类型（legacy 或 langgraph）
+        checkpoint_backend: 检查点存储后端（none, memory, sqlite）
+        checkpoint_db_path: SQLite 检查点数据库路径
+    """
     max_steps: int = _DEFAULT_MAX_STEPS
     engine: str = "legacy"
     checkpoint_backend: str = "none"  # "none" | "memory" | "sqlite"
@@ -36,28 +93,58 @@ class AgentConfig:
 
 @dataclass
 class LlmConfig:
-    # provider 类型：
-    #   "anthropic"       — 走 Anthropic Messages SDK；DeepSeek 用这个最简单（官方提供 Anthropic 兼容端点）
-    #   "openai_compatible" — 走 OpenAI /chat/completions 协议；给通义兼容模式、智谱、Ollama 等没有 Anthropic 端点的厂商用
+    """
+    LLM 配置类 - 对应 [llm] section
+    
+    核心配置说明：
+    
+    provider（提供商）：
+        - "anthropic"：使用 Anthropic Messages SDK
+          - DeepSeek 推荐使用此模式，官方提供 Anthropic 兼容端点
+        - "openai_compatible"：使用 OpenAI /chat/completions 协议
+          - 适用于通义、智谱、Ollama 等没有 Anthropic 端点的厂商
+    
+    base_url（基础 URL）：
+        - provider=anthropic：填 Anthropic 兼容端点
+          - DeepSeek: https://api.deepseek.com/anthropic
+        - provider=openai_compatible：填 OpenAI 兼容端点（带 /v1 前缀）
+          - DeepSeek: https://api.deepseek.com/v1
+    
+    api_key_env（API Key 环境变量名）：
+        - DeepSeek: DEEPSEEK_API_KEY（anthropic 和 openai_compatible 都能用）
+        - Anthropic: ANTHROPIC_API_KEY
+        - 通义: DASHSCOPE_API_KEY
+        - 智谱: ZHIPU_API_KEY
+    
+    router（模型路由策略）：
+        - "static"：始终使用 default_model
+        - "rule_based"：基于规则选择模型（如简单任务用 S4）
+        - "cost_budget"：基于成本预算选择模型
+    """
+    # provider 类型
     provider: str = "anthropic"
-    # base_url 用途取决于 provider：
-    #   provider=anthropic：填 Anthropic 兼容端点。DeepSeek 填 https://api.deepseek.com/anthropic
-    #   provider=openai_compatible：填 OpenAI 兼容端点 /v1 前缀，如 https://api.deepseek.com/v1
+    # base_url 用途取决于 provider
     base_url: str = ""
     # API Key 从哪个环境变量里读
-    #   DeepSeek：建议 DEEPSEEK_API_KEY（anthropic 和 openai_compatible 都能用）
-    #   Anthropic：ANTHROPIC_API_KEY
-    #   通义：DASHSCOPE_API_KEY
     api_key_env: str = "ANTHROPIC_API_KEY"
     # 模型名
     default_model: str = _DEFAULT_MODEL
-    # 模型 context window（用于算 context_pct）
+    # 模型 context window（用于计算 context_pct）
     context_window: int = 128_000
+    # 模型路由策略
     router: str = "static"  # "static" | "rule_based" (S4) | "cost_budget" (S6)
 
 
 @dataclass
 class TraceConfig:
+    """
+    Trace 配置类 - 对应 [trace] section
+    
+    属性：
+        enabled: 是否启用 trace（记录系统运行日志）
+        file: trace 文件路径（JSONL 格式）
+        include_llm_payload: 是否包含完整的 LLM 请求/响应（false 时只保留摘要）
+    """
     enabled: bool = True
     file: str = _DEFAULT_TRACE_FILE
     include_llm_payload: bool = True  # false 时 LLM 记录只保留摘要
@@ -65,11 +152,25 @@ class TraceConfig:
 
 @dataclass
 class PermissionConfig:
+    """
+    权限配置类 - 对应 [permission] section
+    
+    属性：
+        timeout_s: 权限审批超时时间（秒），0 表示不超时
+    """
     timeout_s: float = 60.0  # 审批超时秒数；0 表示不超时
 
 
 @dataclass
 class CompactionConfig:
+    """
+    会话压缩配置类 - 对应 [compaction] section
+    
+    属性：
+        auto_threshold: context_pct 触发自动压缩的阈值（0 表示禁用，推荐用手动 /compact）
+        tool_result_limit: tool_result 截断触发字符数
+        tool_result_keep: 截断后保留的前缀字符数
+    """
     auto_threshold: float = 0.0    # context_pct 触发自动压缩的阈值（0 表示禁用，推荐用手动 /compact）
     tool_result_limit: int = 8_000  # tool_result 截断触发字符数
     tool_result_keep: int = 4_000   # 截断后保留的前缀字符数
@@ -77,6 +178,21 @@ class CompactionConfig:
 
 @dataclass
 class McpServerConfig:
+    """
+    MCP 服务器配置类 - 对应 [mcp.servers] 数组中的每个元素
+    
+    MCP（Model Context Protocol）是 Anthropic 定义的协议，
+    允许外部工具服务器向 LLM 暴露工具。
+    
+    属性：
+        name: 服务器名称（用于标识）
+        transport: 传输方式（stdio 或 tcp）
+        command: stdio 模式下的可执行文件路径
+        args: 命令行参数列表
+        env: 额外的环境变量
+        host: tcp 模式下的主机地址
+        port: tcp 模式下的端口号
+    """
     name: str
     transport: str = "stdio"       # "stdio" | "tcp"
     command: str = ""              # stdio 专用：可执行文件路径
@@ -88,20 +204,55 @@ class McpServerConfig:
 
 @dataclass
 class McpConfig:
+    """
+    MCP 配置类 - 对应 [mcp] section
+    
+    属性：
+        servers: MCP 服务器配置列表
+    """
     servers: list[McpServerConfig] = field(default_factory=list)
 
 
 @dataclass
 class SandboxConfig:
+    """
+    沙箱配置类 - 对应 [sandbox] section
+    
+    沙箱是一个受限的文件系统环境，用于限制 Agent 的文件操作范围。
+    
+    属性：
+        enabled: 是否启用沙箱
+        root: 沙箱根目录
+        allow_parent_dirs: 是否允许访问父目录（突破沙箱限制）
+        max_file_size: 单个文件最大大小（字节）
+        max_total_size: 沙箱总大小限制（字节）
+    """
     enabled: bool = True
     root: str = "./sandbox"
     allow_parent_dirs: bool = False
-    max_file_size: int = 10 * 1024 * 1024
-    max_total_size: int = 100 * 1024 * 1024
+    max_file_size: int = 10 * 1024 * 1024  # 10MB
+    max_total_size: int = 100 * 1024 * 1024  # 100MB
 
 
 @dataclass
 class RagConfig:
+    """
+    RAG 配置类 - 对应 [rag] section
+    
+    RAG（Retrieval-Augmented Generation）是检索增强生成技术，
+    允许 Agent 从本地文档中检索信息。
+    
+    属性：
+        enabled: 是否启用 RAG
+        embedding_model: 嵌入模型名称
+        embedding_base_url: 嵌入模型 API 基础 URL
+        max_chunk_size: 文档分块最大大小（字符数）
+        chunk_overlap: 分块重叠大小（字符数）
+        top_k: 检索时返回的最相关文档数
+        index_path: 向量索引存储路径
+        search_limited: 是否限制搜索范围（在沙箱内）
+        ask_on_access_denied: 访问被拒绝时是否询问用户
+    """
     enabled: bool = False
     embedding_model: str = "deepseek-embed-v3"
     embedding_base_url: str = ""
@@ -115,6 +266,25 @@ class RagConfig:
 
 @dataclass
 class IwanConfig:
+    """
+    主配置类 - 整合所有子配置类
+    
+    这是整个系统的配置入口，包含所有子系统的配置。
+    使用 field(default_factory=...) 创建子配置实例，确保每个实例独立。
+    
+    属性：
+        host: 服务绑定地址
+        port: 服务绑定端口
+        logging: 日志配置
+        agent: Agent 配置
+        llm: LLM 配置
+        trace: Trace 配置
+        permission: 权限配置
+        compaction: 压缩配置
+        mcp: MCP 配置
+        sandbox: 沙箱配置
+        rag: RAG 配置
+    """
     host: str = _DEFAULT_HOST
     port: int = _DEFAULT_PORT
     logging: LoggingConfig = field(default_factory=LoggingConfig)
@@ -130,38 +300,66 @@ class IwanConfig:
 
 # 构建并返回运行时配置：默认值 → 全局 TOML → 项目本地 TOML → .env → 系统环境变量（后者优先级最高）
 def get_config() -> IwanConfig:
+    """
+    加载并返回完整的运行时配置
+    
+    配置加载流程（优先级从低到高）：
+    1. 创建默认配置（IwanConfig()）
+    2. 加载 .env 文件（如果存在）
+    3. 加载 TOML 配置文件（全局 → 项目本地）
+    4. 应用环境变量覆盖
+    
+    返回：
+        IwanConfig: 完整的配置对象
+    """
+    # 创建默认配置对象（所有字段使用默认值）
     config = IwanConfig()
 
-    # .env 必须在读取 IWAN_CONFIG 之前加载，以便 .env 中的 IWAN_CONFIG 能影响 TOML 路径
-    # 优先从当前工作目录加载 .env，其次从包所在目录加载
+    # ===== 加载 .env 文件 =====
+    # .env 必须在读取 IWAN_CONFIG 之前加载，
+    # 以便 .env 中的 IWAN_CONFIG 环境变量能影响 TOML 路径
     import iwan_claude
     pkg_dir = Path(iwan_claude.__file__).parent.parent.parent
+    
+    # 优先从当前工作目录加载 .env
     load_dotenv(".env", override=False)
+    
+    # 如果当前目录没有 .env，尝试从包目录加载
     if not os.path.exists(".env"):
         env_path = pkg_dir / ".env"
         if env_path.exists():
             load_dotenv(env_path, override=False)
 
-    # 若显式指定 IWAN_CONFIG，只读该文件；否则按优先级叠加：全局 → 项目本地
+    # ===== 确定 TOML 配置文件路径 =====
+    # 如果显式指定了 IWAN_CONFIG 环境变量，只加载该文件
+    # 否则按优先级加载：全局配置 → 项目本地配置
     explicit = os.environ.get("IWAN_CONFIG")
     if explicit:
         config_paths = [Path(explicit).expanduser()]
     else:
         config_paths = [
-            Path(_DEFAULT_CONFIG_PATH).expanduser(),
-            Path(".iwan/config.toml"),
+            Path(_DEFAULT_CONFIG_PATH).expanduser(),  # 全局配置：~/.iwan/config.toml
+            Path(".iwan/config.toml"),                # 项目本地配置
         ]
 
+    # ===== 加载 TOML 配置文件 =====
     for config_path in config_paths:
         if config_path.exists():
             try:
+                # 以二进制模式打开，tomllib 需要字节输入
                 with open(config_path, "rb") as f:
                     data = tomllib.load(f)
             except tomllib.TOMLDecodeError as e:
+                # TOML 解析错误，退出进程并显示错误信息
                 raise SystemExit(f"Config parse error ({config_path}): {e}") from e
+            # 将 TOML 数据应用到配置对象
             _apply_toml(config, data)
 
+    # ===== 应用环境变量覆盖 =====
+    # 环境变量优先级最高，可以覆盖 TOML 配置
     _apply_env(config)
+    
+    # 返回完整配置
     return config
 
 

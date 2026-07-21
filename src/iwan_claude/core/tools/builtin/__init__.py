@@ -1,3 +1,38 @@
+"""
+内置工具模块 - 所有内置工具的统一导出入口
+
+【学习要点】
+1. 模块聚合模式：将分散在多个文件中的工具类统一在此处导出
+2. __all__ 控制公开接口：明确列出所有可被外部导入的工具类
+3. 工具分类组织：按功能类别分组导入，便于维护和查找
+
+【工具分类】
+- 文件操作：ReadFileTool, WriteFileTool, ListDirTool, fs_ops 中的工具
+- 文本编辑：editor 中的工具（ViewFileTool, EditByLinesTool 等）
+- 搜索：FindFilesTool, GrepSearchTool
+- Git：GitStatusTool, GitDiffTool, GitCommitTool, GitLogTool, GitCheckoutTool
+- 代码质量：LintCodeTool, ReviewCodeTool, SecurityScanTool
+- 依赖管理：PipManageTool, DependencyCheckTool
+- 文档：GenerateDocsTool, UpdateReadmeTool, ChangelogTool
+- 缓存：CacheGetTool, CacheSetTool, CacheDeleteTool, CacheInvalidateTool, CacheStatsTool
+- 协作：AssignRoleTool, ListRolesTool, ShareKnowledgeTool
+- HTTP：HttpRequestTool
+- 系统：ProcessListTool, BashTool
+- Checkpoint：ListCheckpointsTool, RestoreCheckpointTool
+- Skill：SkillListTool, SkillInstallTool, SkillCreateTool, SkillDeleteTool, SkillInfoTool
+- 任务管理：TaskCreateTool, TaskListTool, TaskGetTool, TaskUpdateTool
+- 其他：AddContextTool, NoteSaveTool, RunPythonTool
+
+【使用示例】
+```python
+from iwan_claude.core.tools.builtin import ReadFileTool, WriteFileTool
+
+# 注册工具到注册表
+registry = ToolRegistry()
+registry.register(ReadFileTool())
+registry.register(WriteFileTool())
+```
+"""
 from iwan_claude.core.tools.builtin.bash import BashTool
 from iwan_claude.core.tools.builtin.editor import (
     DeleteLinesTool,

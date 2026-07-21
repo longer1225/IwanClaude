@@ -1,6 +1,14 @@
 ---
 name: summarize
 description: 将当前 session 对话压缩为人类可读摘要
+invocation: both
+icon: 📝
+keywords:
+  - 总结
+  - 摘要
+  - summarize
+  - 回顾
+  - 记录
 allowed_tools:
   - note_save
 ---
