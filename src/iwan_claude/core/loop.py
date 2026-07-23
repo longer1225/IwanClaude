@@ -34,6 +34,7 @@ from iwan_claude.core.bus.events import StepFinishedEvent, StepStartedEvent
 # 导入核心组件
 from iwan_claude.core.compact.compactor import Compactor       # 会话压缩器
 from iwan_claude.core.context import ExecutionContext           # 执行上下文
+from iwan_claude.core.effort import get_effort_params           # 努力等级参数查询
 from iwan_claude.core.events.bus import EventBus                # 事件总线
 from iwan_claude.core.llm.base import LLMProvider               # LLM 提供者接口
 from iwan_claude.core.permissions.manager import PermissionManager  # 权限管理器
@@ -90,10 +91,11 @@ class AgentLoop:
         compact_threshold: float = 0.0,
         session_id: str = "",
         has_rag: bool = False,
+        effort_level: str = "medium",
     ) -> None:
         """
         构造函数 - 注入执行循环所需的所有依赖
-        
+
         参数：
             provider: LLM 提供者，负责调用 LLM API
             registry: 工具注册表，管理可用工具
@@ -104,33 +106,37 @@ class AgentLoop:
             compact_threshold: 压缩阈值（0.0-1.0），当上下文占用率超过此值时触发压缩
             session_id: 会话 ID，用于权限检查和会话压缩（可选）
             has_rag: 是否启用 RAG 功能，影响 system prompt 的构建
+            effort_level: 努力等级（minimal / low / medium / high / max），控制执行深度
         """
         # LLM 提供者：负责调用 LLM API
         self._provider = provider
-        
+
         # 工具注册表：管理所有可用工具
         self._registry = registry
-        
+
         # 事件总线：用于发布步骤开始和结束事件
         self._bus = bus
-        
+
         # LLM 模型名称：用于构建 system prompt
         self._llm_model_name = llm_model_name
-        
+
         # 权限管理器：控制工具调用权限
         self._permission_manager = permission_manager
-        
+
         # 会话压缩器：自动压缩过长的会话历史
         self._compactor = compactor
-        
+
         # 压缩阈值：当上下文占用率超过此值时触发压缩
         self._compact_threshold = compact_threshold
-        
+
         # 会话 ID：用于权限检查和会话压缩
         self._session_id = session_id
-        
+
         # 是否启用 RAG：影响 system prompt 的构建
         self._has_rag = has_rag
+
+        # 努力等级参数：控制文件读取数、验证轮数、搜索深度等
+        self._effort_params = get_effort_params(effort_level)
 
     async def run(self, context: ExecutionContext) -> None:
         """
@@ -161,6 +167,12 @@ class AgentLoop:
         9. 重复循环
         """
         # 主循环：直到上下文达到终止条件
+        # 如果努力等级指定了 max_steps_override，使用它替换 context 的 max_steps
+        if self._effort_params.max_steps_override > 0:
+            context.max_steps = self._effort_params.max_steps_override
+        # 记录已读取的文件数（用于努力等级限制）
+        files_read_count = 0
+
         while not context.is_done():
             # 增加步骤计数器
             context.step += 1
@@ -216,6 +228,17 @@ class AgentLoop:
             if response.stop_reason == "tool_use":
                 # LLM 返回了工具调用，执行每个工具
                 for tc in response.tool_calls:
+                    # 努力等级限制：如果达到最大文件读取数，跳过后续读操作
+                    if self._effort_params.max_files_read > 0 and tc.name in ("read_file", "list_dir", "file_exists", "file_stat"):
+                        if files_read_count >= self._effort_params.max_files_read:
+                            context.add_tool_result(
+                                tc.id,
+                                f"Error: effort level limit reached ({self._effort_params.max_files_read} files max). "
+                                "Increase effort level to read more files.",
+                                is_error=True,
+                            )
+                            continue
+                        files_read_count += 1
                     result = await invoke_tool(
                         self._registry,              # 工具注册表
                         tc,                          # 工具调用请求

@@ -39,6 +39,7 @@ import asyncio
 import json
 import logging
 import time
+from dataclasses import dataclass, field
 from typing import Any
 
 log = logging.getLogger(__name__)
@@ -47,7 +48,7 @@ from rich.markdown import Markdown
 from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import VerticalScroll
+from textual.containers import Horizontal, VerticalScroll
 from textual.css.query import NoMatches
 from textual.message import Message
 from textual.widget import Widget
@@ -1064,6 +1065,45 @@ class ChatTextArea(TextArea):
         await super()._on_key(event)
 
 
+@dataclass
+class _SessionState:
+    """
+    会话 UI 状态 - 保存单个会话的 TUI 状态
+
+    【字段说明】
+    - session_id: str - 会话 ID
+    - title: str - 会话标题
+    - widgets: list[Widget] - 该会话的日志 widget 列表（用于切换时恢复）
+    - auto_mode: str - 自动模式（off / read_only / on）
+    - effort_level: str - 努力等级（minimal / low / medium / high / max）
+    - model_preset: str - 模型预设（fast / balanced / powerful）
+    - busy: bool - 是否正在运行
+    - last_context_pct: float - 上次上下文占用率
+    - current_llm: LLMStreamBlock | None - 当前 LLM 流式输出块
+    - pending_tool_blocks: dict - 待完成的工具调用块
+    - pending_permission_blocks: dict - 待处理的权限审批块
+    - subagent_run_ids: dict - 子 Agent 运行 ID 映射
+    - subagent_start_times: dict - 子 Agent 开始时间映射
+
+    【设计目的】
+    每个会话有独立的 UI 状态，切换会话时保存当前状态并恢复目标会话状态。
+    这样可以支持多标签页并行，每个会话独立运行。
+    """
+    session_id: str
+    title: str = ""
+    widgets: list[Widget] = field(default_factory=list)
+    auto_mode: str = "off"
+    effort_level: str = "medium"
+    model_preset: str = "balanced"
+    busy: bool = False
+    last_context_pct: float = 0.0
+    current_llm: Any = None  # LLMStreamBlock | None
+    pending_tool_blocks: dict[str, Any] = field(default_factory=dict)
+    pending_permission_blocks: dict[str, Any] = field(default_factory=dict)
+    subagent_run_ids: dict[str, str] = field(default_factory=dict)
+    subagent_start_times: dict[str, float] = field(default_factory=dict)
+
+
 class IwanTuiApp(App[None]):
     """
     IwanClaude TUI 主应用类
@@ -1102,9 +1142,38 @@ class IwanTuiApp(App[None]):
         Binding("f6", "checkpoint_list", "列出检查点"),
         Binding("ctrl+p", "app_command", "命令面板"),
         Binding("ctrl+r", "search_history", "搜索历史"),
+        Binding("ctrl+t", "new_session", "新建会话"),
+        Binding("ctrl+w", "close_session", "关闭会话"),
+        Binding("alt+1", "switch_session(1)", "切换到会话1"),
+        Binding("alt+2", "switch_session(2)", "切换到会话2"),
+        Binding("alt+3", "switch_session(3)", "切换到会话3"),
+        Binding("alt+4", "switch_session(4)", "切换到会话4"),
+        Binding("alt+5", "switch_session(5)", "切换到会话5"),
+        Binding("alt+6", "switch_session(6)", "切换到会话6"),
+        Binding("alt+7", "switch_session(7)", "切换到会话7"),
+        Binding("alt+8", "switch_session(8)", "切换到会话8"),
+        Binding("alt+9", "switch_session(9)", "切换到会话9"),
     ]
     CSS = """
     Screen { background: $background; }
+    #tabbar {
+        height: 1;
+        background: $surface;
+        dock: top;
+    }
+    .tab {
+        padding: 0 1;
+        height: 1;
+        color: $text-muted;
+    }
+    .tab.active {
+        background: $background;
+        color: $text;
+        text-style: bold;
+    }
+    .tab.busy {
+        color: $warning;
+    }
     #header {
         height: 1;
         background: $surface;
@@ -1133,7 +1202,7 @@ class IwanTuiApp(App[None]):
         "[bold cyan]██║██║███╗██║██╔══██║██║╚██╗██║██║     ██║     ██╔══██║██║   ██║██║  ██║██╔══╝  [/bold cyan]\n"
         "[bold cyan]██║╚███╔███╔╝██║  ██║██║ ╚████║╚██████╗███████╗██║  ██║╚██████╔╝██████╔╝███████╗[/bold cyan]\n"
         "[bold cyan]╚═╝ ╚══╝╚══╝ ╚═╝  ╚═╝╚═╝  ╚═══╝ ╚═════╝╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚═════╝ ╚══════╝[/bold cyan]\n"
-        "[dim]  输入消息开始对话  ·  键入 / 查看命令  ·  F6 列出检查点  ·  Ctrl+Q 退出[/dim]"
+        "[dim]  输入消息开始对话  ·  键入 / 查看命令  ·  F6 检查点  ·  Ctrl+T/W 新建/关闭会话  ·  Alt+1~9 切换会话  ·  Ctrl+Q 退出[/dim]"
     )
 
     def __init__(self, host: str, port: int, replay_run_id: str | None = None) -> None:
@@ -1150,17 +1219,11 @@ class IwanTuiApp(App[None]):
             _port: 端口号
             _replay_run_id: 回放运行 ID（可选）
             _client: SocketClient 实例，用于与 core 服务通信
-            _current_llm: 当前 LLM 流式输出块
-            _pending_tool_blocks: 待完成的工具调用块字典（tool_use_id -> ToolCallBlock）
-            _pending_permission_blocks: 待处理的权限审批块字典（tool_use_id -> PermissionBlock）
-            _session_id: 当前会话 ID
-            _busy: Agent 是否正在运行
-            _last_context_pct: 上次上下文占用率
-            _slash_items: 斜杠命令候选列表
-            _subagent_run_ids: 子 Agent 运行 ID 映射（run_id -> description）
-            _subagent_start_times: 子 Agent 开始时间映射（run_id -> start_time）
+            _sessions: 所有会话的 UI 状态（session_id -> _SessionState）
+            _session_order: 会话顺序列表（用于标签页排序和 Alt+数字切换）
             _engine_type: 引擎类型（legacy/langgraph）
             _checkpoint_backend: 检查点后端（none/memory/sqlite）
+            _slash_items: 斜杠命令候选列表
             _history: 搜索历史列表（最多 100 条）
         """
         super().__init__()
@@ -1168,34 +1231,344 @@ class IwanTuiApp(App[None]):
         self._port = port
         self._replay_run_id = replay_run_id
         self._client: SocketClient | None = None
-        self._current_llm: LLMStreamBlock | None = None
-        self._pending_tool_blocks: dict[str, ToolCallBlock] = {}
-        self._pending_permission_blocks: dict[str, PermissionBlock] = {}
-        self._session_id: str | None = None
-        self._busy = False
-        self._last_context_pct: float = 0.0
-        self._slash_items: list[tuple[str, str]] = []
-        self._subagent_run_ids: dict[str, str] = {}
-        self._subagent_start_times: dict[str, float] = {}
+        # 多会话状态管理
+        self._sessions: dict[str, _SessionState] = {}
+        self._session_order: list[str] = []
+        # 全局配置
         self._engine_type: str = "legacy"
         self._checkpoint_backend: str = "none"
+        self._slash_items: list[tuple[str, str]] = []
         self._history: list[str] = []
+
+    @property
+    def _session_id(self) -> str | None:
+        """当前会话 ID（从会话顺序列表取第一个）"""
+        return self._session_order[0] if self._session_order else None
+
+    @_session_id.setter
+    def _session_id(self, value: str | None) -> None:
+        """设置当前会话 ID，或清空会话列表（value=None 时）"""
+        if value is None:
+            # 清空所有会话
+            self._session_order = []
+            self._sessions = {}
+            self._refresh_tabbar()
+        elif value in self._sessions:
+            # 将指定会话移到第一个位置
+            if value in self._session_order:
+                self._session_order.remove(value)
+            self._session_order.insert(0, value)
+            self._refresh_tabbar()
+
+    @property
+    def _state(self) -> _SessionState | None:
+        """当前会话的状态对象"""
+        if not self._session_id:
+            return None
+        return self._sessions.get(self._session_id)
+
+    @property
+    def _busy(self) -> bool:
+        """当前会话是否正在运行"""
+        return self._state.busy if self._state else False
+
+    @_busy.setter
+    def _busy(self, value: bool) -> None:
+        """设置当前会话的 busy 状态，同时刷新标签栏"""
+        if self._state:
+            self._state.busy = value
+            self._refresh_tabbar()
+
+    @property
+    def _auto_mode(self) -> str:
+        """当前会话的自动模式"""
+        return self._state.auto_mode if self._state else "off"
+
+    @_auto_mode.setter
+    def _auto_mode(self, value: str) -> None:
+        if self._state:
+            self._state.auto_mode = value
+
+    @property
+    def _effort_level(self) -> str:
+        """当前会话的努力等级"""
+        return self._state.effort_level if self._state else "medium"
+
+    @_effort_level.setter
+    def _effort_level(self, value: str) -> None:
+        if self._state:
+            self._state.effort_level = value
+
+    @property
+    def _model_preset(self) -> str:
+        """当前会话的模型预设"""
+        return self._state.model_preset if self._state else "balanced"
+
+    @_model_preset.setter
+    def _model_preset(self, value: str) -> None:
+        if self._state:
+            self._state.model_preset = value
+
+    @property
+    def _last_context_pct(self) -> float:
+        """当前会话的上次上下文占用率"""
+        return self._state.last_context_pct if self._state else 0.0
+
+    @_last_context_pct.setter
+    def _last_context_pct(self, value: float) -> None:
+        if self._state:
+            self._state.last_context_pct = value
+
+    @property
+    def _current_llm(self) -> Any:
+        """当前会话的 LLM 流式输出块"""
+        return self._state.current_llm if self._state else None
+
+    @_current_llm.setter
+    def _current_llm(self, value: Any) -> None:
+        if self._state:
+            self._state.current_llm = value
+
+    @property
+    def _pending_tool_blocks(self) -> dict[str, Any]:
+        """当前会话的待完成工具调用块"""
+        return self._state.pending_tool_blocks if self._state else {}
+
+    @property
+    def _pending_permission_blocks(self) -> dict[str, Any]:
+        """当前会话的待处理权限审批块"""
+        return self._state.pending_permission_blocks if self._state else {}
+
+    @property
+    def _subagent_run_ids(self) -> dict[str, str]:
+        """当前会话的子 Agent 运行 ID 映射"""
+        return self._state.subagent_run_ids if self._state else {}
+
+    @property
+    def _subagent_start_times(self) -> dict[str, float]:
+        """当前会话的子 Agent 开始时间映射"""
+        return self._state.subagent_start_times if self._state else {}
 
     def compose(self) -> ComposeResult:
         """
         组合 TUI 界面组件
 
-        创建三个核心组件：
-        - #header：顶部状态栏，显示连接状态
+        创建四个核心组件：
+        - #tabbar：顶部标签栏，显示所有会话标签
+        - #header：状态栏，显示连接状态、引擎、自动模式等
         - #log-view：日志滚动区域，显示运行日志和输出
         - #prompt：聊天输入框，支持 Enter 提交
 
         返回：
             ComposeResult: 子 widget 生成器
         """
+        yield Horizontal(id="tabbar")
         yield Label("[bold]IwanClaude[/bold]  [dim]connecting...[/dim]", id="header")
         yield VerticalScroll(id="log-view")
         yield ChatTextArea(id="prompt", show_line_numbers=False)
+
+    def _add_session(self, session_id: str, title: str = "") -> None:
+        """
+        添加一个新会话到状态管理
+
+        参数：
+            session_id: str - 会话 ID
+            title: str - 会话标题（可选）
+
+        实现细节：
+        - 创建 _SessionState 实例
+        - 添加到 _sessions 字典
+        - 添加到 _session_order 列表头部（最新的在最前）
+        - 刷新标签栏
+        """
+        if session_id in self._sessions:
+            return
+        state = _SessionState(session_id=session_id, title=title or session_id)
+        self._sessions[session_id] = state
+        self._session_order.insert(0, session_id)
+        self._refresh_tabbar()
+
+    def _switch_session(self, session_id: str) -> None:
+        """
+        切换到指定会话
+
+        参数：
+            session_id: str - 目标会话 ID
+
+        实现细节：
+        1. 如果目标就是当前会话，直接返回
+        2. 保存当前会话的 UI 状态（widgets、busy 等）
+        3. 将目标会话移到 _session_order 头部
+        4. 清空 log-view 并加载目标会话的 widgets
+        5. 更新状态栏
+        6. 刷新标签栏
+
+        注意：
+            切换不会影响后台会话的运行，事件会继续路由到对应会话的状态。
+        """
+        if not self._sessions or session_id == self._session_id:
+            return
+        if session_id not in self._sessions:
+            return
+
+        # 1. 保存当前会话的状态
+        self._save_current_state()
+
+        # 2. 将目标会话移到头部
+        self._session_order.remove(session_id)
+        self._session_order.insert(0, session_id)
+
+        # 3. 清空 log-view 并加载目标会话的 widgets
+        self._load_session_state(session_id)
+
+        # 4. 更新状态栏和标签栏
+        self._update_header("ready")
+        self._refresh_tabbar()
+
+    def _close_current_session(self) -> None:
+        """
+        关闭当前会话
+
+        实现细节：
+        1. 如果只有一个会话，不关闭（至少保留一个）
+        2. 向服务器发送 session.close 命令
+        3. 从 _sessions 和 _session_order 移除
+        4. 切换到下一个会话
+        5. 刷新标签栏
+        """
+        if len(self._session_order) <= 1:
+            self._append(Static("[yellow]至少保留一个会话[/yellow]", classes="log-line"))
+            return
+
+        current_id = self._session_id
+        if current_id is None:
+            return
+
+        # 发送关闭命令
+        if self._client is not None:
+            try:
+                self.run_worker(
+                    self._client.send_command("session.close", {"session_id": current_id}),
+                    exclusive=False,
+                )
+            except Exception:
+                pass
+
+        # 从状态中移除
+        self._sessions.pop(current_id, None)
+        self._session_order.remove(current_id)
+
+        # 加载下一个会话
+        if self._session_order:
+            self._load_session_state(self._session_order[0])
+
+        self._update_header("ready")
+        self._refresh_tabbar()
+
+    def _refresh_tabbar(self) -> None:
+        """
+        刷新标签栏显示
+
+        实现细节：
+        - 清空 #tabbar 容器
+        - 为每个会话创建一个 Label 作为标签
+        - 当前会话添加 .active class
+        - 正在运行的会话添加 .busy class
+        """
+        try:
+            tabbar = self.query_one("#tabbar", Horizontal)
+        except NoMatches:
+            return
+
+        # 清空标签栏
+        tabbar.remove_children()
+
+        # 为每个会话创建标签
+        for idx, sid in enumerate(self._session_order):
+            state = self._sessions.get(sid)
+            if state is None:
+                continue
+
+            # 标签显示文本：序号 + 标题（截断）
+            display_title = state.title or "(untitled)"
+            if len(display_title) > 20:
+                display_title = display_title[:18] + "…"
+            label_text = f"{idx + 1} {display_title}"
+
+            # 构建 class 列表
+            classes = ["tab"]
+            if sid == self._session_id:
+                classes.append("active")
+            if state.busy:
+                classes.append("busy")
+
+            label = Label(label_text, classes=" ".join(classes))
+            # 保存 session_id 到 label，便于点击识别
+            label.session_id = sid  # type: ignore[attr-defined]
+            tabbar.mount(label)
+
+    def _save_current_state(self) -> None:
+        """
+        保存当前会话的 UI 状态
+
+        实现细节：
+        - 收集 log-view 中的所有 widget
+        - 保存到当前会话的状态对象中
+        - 保存 busy、auto_mode、effort_level、model_preset 等状态
+        """
+        state = self._state
+        if state is None:
+            return
+
+        try:
+            log_view = self.query_one("#log-view", VerticalScroll)
+            # 收集所有子 widget
+            state.widgets = list(log_view.children)
+        except NoMatches:
+            pass
+
+    def _load_session_state(self, session_id: str) -> None:
+        """
+        加载指定会话的 UI 状态到 log-view
+
+        参数：
+            session_id: str - 目标会话 ID
+
+        实现细节：
+        - 清空 log-view
+        - 将目标会话的 widgets 挂载到 log-view
+        - 滚动到底部
+        """
+        state = self._sessions.get(session_id)
+        if state is None:
+            return
+
+        try:
+            log_view = self.query_one("#log-view", VerticalScroll)
+        except NoMatches:
+            return
+
+        # 清空当前内容
+        log_view.remove_children()
+
+        # 挂载该会话的所有 widgets
+        for widget in state.widgets:
+            log_view.mount(widget)
+
+        # 滚动到底部
+        log_view.scroll_end(animate=False)
+
+    def _get_state(self, session_id: str) -> _SessionState | None:
+        """
+        获取指定会话的状态对象
+
+        参数：
+            session_id: str - 会话 ID
+
+        返回：
+            _SessionState | None - 会话状态对象，不存在返回 None
+        """
+        return self._sessions.get(session_id)
 
     def on_mount(self) -> None:
         """
@@ -1248,6 +1621,8 @@ class IwanTuiApp(App[None]):
         """
         items: list[tuple[str, str]] = [
             ("help", "显示帮助信息"),
+            ("auto", "切换自动模式 (off|read_only|on)"),
+            ("effort", "切换努力等级 (minimal|low|medium|high|max)"),
             ("compact", "压缩上下文窗口"),
             ("checkpoint list", "列出所有检查点"),
             ("checkpoint restore <n>", "恢复到指定检查点"),
@@ -1324,6 +1699,29 @@ class IwanTuiApp(App[None]):
             self.query_one(SlashCompleteWidget).remove()
         except NoMatches:
             pass
+
+    def on_click(self, event: events.Click) -> None:
+        """
+        全局点击事件处理
+
+        处理标签栏的标签点击，切换到对应会话。
+
+        参数：
+            event: events.Click - 点击事件
+        """
+        # 检查点击的是否是标签
+        widget = event.control
+        if widget is None:
+            return
+        # 向上查找带 session_id 属性的 widget（可能是 Label 或其子元素）
+        current = widget
+        while current is not None:
+            sid = getattr(current, "session_id", None)
+            if sid is not None and sid in self._sessions:
+                if sid != self._session_id and not self._busy:
+                    self._switch_session(sid)
+                return
+            current = current.parent
 
     def on_key(self, event: events.Key) -> None:
         """
@@ -1438,6 +1836,90 @@ class IwanTuiApp(App[None]):
             return
         self.run_worker(self._do_checkpoint("list", ""), name="checkpoint", exclusive=False)
 
+    async def action_new_session(self) -> None:
+        """
+        新建会话（Ctrl+T）
+
+        实现细节：
+        - 如果未连接或 agent 正在运行，显示错误提示
+        - 发送 session.create 命令创建新会话
+        - 添加到会话管理并切换到新会话
+        """
+        if self._client is None:
+            self._append(Static("[yellow]not connected[/yellow]", classes="log-line"))
+            return
+        self.run_worker(self._do_new_session(), name="new_session", exclusive=False)
+
+    async def action_close_session(self) -> None:
+        """
+        关闭当前会话（Ctrl+W）
+
+        实现细节：
+        - 至少保留一个会话
+        - 调用 _close_current_session() 关闭
+        """
+        self._close_current_session()
+
+    async def action_switch_session(self, index_str: str) -> None:
+        """
+        切换到指定序号的会话（Alt+1~9）
+
+        参数：
+            index_str: str - 会话序号字符串（"1" 到 "9"）
+
+        实现细节：
+        - 解析序号（从 1 开始）
+        - 转换为 0 索引
+        - 如果序号有效，切换到对应会话
+        """
+        try:
+            idx = int(index_str) - 1
+        except ValueError:
+            return
+        if 0 <= idx < len(self._session_order):
+            self._switch_session(self._session_order[idx])
+
+    async def _do_new_session(self) -> None:
+        """
+        执行新建会话操作
+
+        实现细节：
+        - 发送 session.create 命令
+        - 添加到会话管理
+        - 切换到新会话
+        - 显示欢迎横幅
+        """
+        if self._client is None:
+            return
+        try:
+            result = await self._client.send_command(
+                "session.create", {"mode": "chat"}
+            )
+            new_sid = str(result["session_id"])
+            title = str(result.get("title", "")) or new_sid
+
+            # 保存当前会话状态
+            self._save_current_state()
+
+            # 添加新会话
+            self._add_session(new_sid, title)
+
+            # 新会话是第一个，添加 banner
+            state = self._sessions.get(new_sid)
+            if state is not None:
+                state.auto_mode = str(result.get("auto_mode", "off"))
+                state.effort_level = str(result.get("effort_level", "medium"))
+                state.model_preset = str(result.get("model_preset", "balanced"))
+
+            # 切换到新会话（_add_session 已经把新会话放到头部了）
+            self._load_session_state(new_sid)
+            self._append(Static(self._BANNER, id=f"banner-{new_sid}"))
+
+            self._update_header("ready")
+            self._refresh_tabbar()
+        except (IpcError, RuntimeError, OSError) as e:
+            self._append(Static(f"[red]new session error: {e}[/red]", classes="log-line"))
+
     async def on_chat_text_area_submitted(self, event: ChatTextArea.Submitted) -> None:
         """
         处理用户提交消息事件
@@ -1451,9 +1933,10 @@ class IwanTuiApp(App[None]):
         1. 检测 /compact 指令：压缩上下文窗口
         2. 检测 /checkpoint 指令：列出或恢复检查点
         3. 检测 /help 指令：显示帮助信息
-        4. 检测 /history 指令：查看会话历史
-        5. 检测 /close 指令：关闭当前会话
-        6. 普通消息：发送给 Agent 处理
+        4. 检测 /auto 指令：切换自动模式
+        5. 检测 /history 指令：查看会话历史
+        6. 检测 /close 指令：关闭当前会话
+        7. 普通消息：发送给 Agent 处理
 
         实现细节：
         - 使用 worker 执行异步操作，避免阻塞 UI 消息泵
@@ -1490,6 +1973,49 @@ class IwanTuiApp(App[None]):
         if content == "/help":
             event.text_area.text = ""
             self._show_help()
+            return
+
+        if content.startswith("/auto"):
+            event.text_area.text = ""
+            parts = content.split(None, 1)
+            mode = parts[1].strip() if len(parts) > 1 else ""
+            if self._client is not None and self._session_id is not None and not self._busy:
+                self.run_worker(self._do_set_auto_mode(mode), name="auto_mode", exclusive=False)
+            else:
+                self._append(Static("[yellow]agent busy or disconnected[/yellow]", classes="log-line"))
+            return
+
+        if content.startswith("/effort"):
+            event.text_area.text = ""
+            parts = content.split(None, 1)
+            level = parts[1].strip() if len(parts) > 1 else ""
+            if self._client is not None and self._session_id is not None and not self._busy:
+                self.run_worker(self._do_set_effort_level(level), name="effort_level", exclusive=False)
+            else:
+                self._append(Static("[yellow]agent busy or disconnected[/yellow]", classes="log-line"))
+            return
+
+        if content.startswith("/model"):
+            event.text_area.text = ""
+            parts = content.split(None, 1)
+            preset = parts[1].strip() if len(parts) > 1 else ""
+            if self._client is not None and self._session_id is not None and not self._busy:
+                self.run_worker(self._do_set_model(preset), name="model_preset", exclusive=False)
+            else:
+                self._append(Static("[yellow]agent busy or disconnected[/yellow]", classes="log-line"))
+            return
+
+        if content.startswith("/name"):
+            event.text_area.text = ""
+            parts = content.split(None, 1)
+            title = parts[1].strip() if len(parts) > 1 else ""
+            if not title:
+                self._append(Static("[yellow]usage: /name <title>[/yellow]", classes="log-line"))
+                return
+            if self._client is not None and self._session_id is not None:
+                self.run_worker(self._do_rename_session(title), name="rename", exclusive=False)
+            else:
+                self._append(Static("[yellow]agent busy or disconnected[/yellow]", classes="log-line"))
             return
 
         if content == "/history":
@@ -1555,6 +2081,160 @@ class IwanTuiApp(App[None]):
             ))
         except (IpcError, RuntimeError, OSError) as e:
             self._append(Static(f"[red]compact error: {e}[/red]", classes="log-line"))
+
+    async def _do_set_auto_mode(self, mode: str) -> None:
+        """
+        执行自动模式切换命令
+
+        参数：
+            mode: str - 目标自动模式（"off" / "read_only" / "on"）
+
+        实现细节：
+        - 如果 mode 为空，循环切换三种模式
+        - 发送 session.set_auto_mode 命令到 core 服务
+        - 成功后更新本地状态并刷新状态栏
+
+        使用示例：
+            >>> await self._do_set_auto_mode("read_only")  # 切换到只读自动模式
+        """
+        if self._client is None or self._session_id is None:
+            return
+
+        # 未指定模式时循环切换
+        if not mode:
+            cycle = {"off": "read_only", "read_only": "on", "on": "off"}
+            mode = cycle.get(self._auto_mode, "off")
+
+        if mode not in ("off", "read_only", "on"):
+            self._append(Static(f"[yellow]usage: /auto [off|read_only|on], got {mode!r}[/yellow]", classes="log-line"))
+            return
+
+        try:
+            result = await self._client.send_command(
+                "session.set_auto_mode",
+                {"session_id": self._session_id, "mode": mode},
+            )
+            self._auto_mode = result.get("mode", mode)
+            self._append(Static(
+                f"[bold cyan]⚡ Auto mode[/bold cyan]  [dim]{self._auto_mode}[/dim]",
+                classes="log-line",
+            ))
+            self._update_header("ready")
+        except (IpcError, RuntimeError, OSError) as e:
+            self._append(Static(f"[red]auto mode error: {e}[/red]", classes="log-line"))
+
+    async def _do_set_effort_level(self, level: str) -> None:
+        """
+        执行努力等级切换命令
+
+        参数：
+            level: str - 目标努力等级（"minimal" / "low" / "medium" / "high" / "max"）
+
+        实现细节：
+        - 如果 level 为空，循环切换五种等级
+        - 发送 session.set_effort_level 命令到 core 服务
+        - 成功后更新本地状态并刷新状态栏
+
+        使用示例：
+            >>> await self._do_set_effort_level("high")  # 切换到高努力等级
+        """
+        if self._client is None or self._session_id is None:
+            return
+
+        # 未指定等级时循环切换
+        if not level:
+            cycle = {"minimal": "low", "low": "medium", "medium": "high", "high": "max", "max": "minimal"}
+            level = cycle.get(self._effort_level, "medium")
+
+        if level not in ("minimal", "low", "medium", "high", "max"):
+            self._append(Static(f"[yellow]usage: /effort [minimal|low|medium|high|max], got {level!r}[/yellow]", classes="log-line"))
+            return
+
+        try:
+            result = await self._client.send_command(
+                "session.set_effort_level",
+                {"session_id": self._session_id, "level": level},
+            )
+            self._effort_level = result.get("level", level)
+            self._append(Static(
+                f"[bold cyan]🎯 Effort level[/bold cyan]  [dim]{self._effort_level}[/dim]",
+                classes="log-line",
+            ))
+            self._update_header("ready")
+        except (IpcError, RuntimeError, OSError) as e:
+            self._append(Static(f"[red]effort level error: {e}[/red]", classes="log-line"))
+
+    async def _do_set_model(self, preset: str) -> None:
+        """
+        执行模型预设切换命令
+
+        参数：
+            preset: str - 目标模型预设（"fast" / "balanced" / "powerful"）
+
+        实现细节：
+        - 如果 preset 为空，循环切换三种预设
+        - 发送 session.set_model 命令到 core 服务
+        - 成功后更新本地状态并刷新状态栏
+
+        使用示例：
+            >>> await self._do_set_model("powerful")  # 切换到强力模型
+        """
+        if self._client is None or self._session_id is None:
+            return
+
+        # 未指定预设时循环切换
+        if not preset:
+            cycle = {"fast": "balanced", "balanced": "powerful", "powerful": "fast"}
+            preset = cycle.get(self._model_preset, "balanced")
+
+        if preset not in ("fast", "balanced", "powerful"):
+            self._append(Static(f"[yellow]usage: /model [fast|balanced|powerful], got {preset!r}[/yellow]", classes="log-line"))
+            return
+
+        try:
+            result = await self._client.send_command(
+                "session.set_model",
+                {"session_id": self._session_id, "preset": preset},
+            )
+            self._model_preset = result.get("preset", preset)
+            self._append(Static(
+                f"[bold cyan]🧠 Model preset[/bold cyan]  [dim]{self._model_preset}[/dim]",
+                classes="log-line",
+            ))
+            self._update_header("ready")
+        except (IpcError, RuntimeError, OSError) as e:
+            self._append(Static(f"[red]model preset error: {e}[/red]", classes="log-line"))
+
+    async def _do_rename_session(self, title: str) -> None:
+        """
+        执行重命名会话操作
+
+        参数：
+            title: str - 新的会话标题
+
+        实现细节：
+        - 发送 session.rename 命令
+        - 更新当前会话的标题和标签栏
+        """
+        if self._client is None or self._session_id is None:
+            return
+        try:
+            result = await self._client.send_command(
+                "session.rename",
+                {"session_id": self._session_id, "title": title},
+            )
+            new_title = result.get("title", title)
+            state = self._state
+            if state is not None:
+                state.title = new_title
+            self._refresh_tabbar()
+            self._append(Static(
+                f"[bold cyan]📝 Renamed[/bold cyan]  [dim]{new_title}[/dim]",
+                classes="log-line",
+            ))
+            self._update_header("ready")
+        except (IpcError, RuntimeError, OSError) as e:
+            self._append(Static(f"[red]rename error: {e}[/red]", classes="log-line"))
 
     async def _do_checkpoint(self, cmd: str, arg: str) -> None:
         """
@@ -1680,7 +2360,7 @@ class IwanTuiApp(App[None]):
 
         帮助内容分类：
         1. 快捷键：Ctrl+Q、F6、Ctrl+P
-        2. 斜杠命令：/help、/compact、/checkpoint、/history、/close、/skill_list
+        2. 斜杠命令：/help、/auto、/compact、/checkpoint、/history、/close、/skill_list
         3. Skill 说明：手动触发方式、自动触发标记、内置技能列表
 
         使用示例：
@@ -1694,6 +2374,9 @@ class IwanTuiApp(App[None]):
         self._append(Static("", classes="log-line"))
         self._append(Static("[bold]斜杠命令（输入 / 查看）：[/bold]", classes="log-line"))
         self._append(Static("  [cyan]/help[/cyan]            显示此帮助信息", classes="log-line"))
+        self._append(Static("  [cyan]/auto [off|read_only|on][/cyan]  切换自动模式", classes="log-line"))
+        self._append(Static("  [cyan]/effort [minimal|low|medium|high|max][/cyan]  切换努力等级", classes="log-line"))
+        self._append(Static("  [cyan]/model [fast|balanced|powerful][/cyan]  切换模型预设", classes="log-line"))
         self._append(Static("  [cyan]/compact[/cyan]         压缩上下文窗口", classes="log-line"))
         self._append(Static("  [cyan]/checkpoint list[/cyan]  列出所有检查点", classes="log-line"))
         self._append(Static("  [cyan]/checkpoint restore <n>[/cyan]  恢复到指定检查点", classes="log-line"))
@@ -2004,9 +2687,18 @@ class IwanTuiApp(App[None]):
         if self._engine_type == "langgraph" and self._checkpoint_backend != "none":
             engine_info += f"  [dim]({self._checkpoint_backend})[/dim]"
 
+        auto_color = {"off": "dim", "read_only": "yellow", "on": "magenta"}.get(self._auto_mode, "dim")
+        auto_info = f"  [{auto_color}]auto:{self._auto_mode}[/{auto_color}]"
+
+        effort_color = {"minimal": "dim", "low": "cyan", "medium": "green", "high": "yellow", "max": "red"}.get(self._effort_level, "green")
+        effort_info = f"  [{effort_color}]effort:{self._effort_level}[/{effort_color}]"
+
+        model_color = {"fast": "cyan", "balanced": "green", "powerful": "magenta"}.get(self._model_preset, "green")
+        model_info = f"  [{model_color}]model:{self._model_preset}[/{model_color}]"
+
         header.update(
             f"[bold]IwanClaude[/bold]  [dim]{self._host}:{self._port}[/dim]"
-            f"{session}{engine_info}  [{color}]{state}[/{color}]"
+            f"{session}{engine_info}{auto_info}{effort_info}{model_info}  [{color}]{state}[/{color}]"
         )
 
     async def _socket_loop(self) -> None:
@@ -2090,10 +2782,18 @@ class IwanTuiApp(App[None]):
                 }
                 if self._replay_run_id is not None:
                     params["replay_from_run"] = self._replay_run_id
+                
                 await client.send_command("event.subscribe", params)
                 created = await client.send_command("session.create", {"mode": "chat"})
-                self._session_id = str(created["session_id"])
-                log.info("session created session_id=%s", self._session_id)
+                sid = str(created["session_id"])
+                title = str(created.get("title", "")) or sid
+                self._add_session(sid, title)
+                state = self._sessions.get(sid)
+                if state is not None:
+                    state.auto_mode = str(created.get("auto_mode", "off"))
+                    state.effort_level = str(created.get("effort_level", "medium"))
+                    state.model_preset = str(created.get("model_preset", "balanced"))
+                log.info("session created session_id=%s auto_mode=%s effort_level=%s model_preset=%s", sid, self._auto_mode, self._effort_level, self._model_preset)
 
                 engine_info = await client.send_command("session.engine_info", {})
                 self._engine_type = engine_info.get("engine", "legacy")
@@ -2179,6 +2879,20 @@ class IwanTuiApp(App[None]):
         """
         t = event.get("type", "")
 
+        # 获取事件的会话 ID（如果有）
+        event_sid = event.get("session_id")
+
+        # 如果事件属于后台会话（非当前会话），只更新状态不渲染
+        if event_sid and event_sid != self._session_id and event_sid in self._sessions:
+            state = self._sessions[event_sid]
+            if t == "run.started":
+                state.busy = True
+                self._refresh_tabbar()
+            elif t in ("run.finished", "session.waiting_for_input", "session.closed"):
+                state.busy = False
+                self._refresh_tabbar()
+            return
+
         if t == "llm.token":
             token = event.get("token", "")
             if self._current_llm is None:
@@ -2208,6 +2922,29 @@ class IwanTuiApp(App[None]):
                 prompt.read_only = False
                 prompt.border_title = "session closed"
             self._update_header("disconnected")
+
+        elif t == "session.renamed":
+            new_title = event.get("title", "")
+            state = self._state
+            if state is not None:
+                state.title = new_title
+            self._refresh_tabbar()
+            self._update_header("ready")
+
+        elif t == "session.auto_mode_changed":
+            mode = event.get("mode", "off")
+            self._auto_mode = mode
+            self._update_header("ready")
+
+        elif t == "session.effort_level_changed":
+            level = event.get("level", "medium")
+            self._effort_level = level
+            self._update_header("ready")
+
+        elif t == "session.model_changed":
+            preset = event.get("preset", "balanced")
+            self._model_preset = preset
+            self._update_header("ready")
 
         elif t == "run.started":
             run_id = event.get("run_id", "")

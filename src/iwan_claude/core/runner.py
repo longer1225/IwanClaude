@@ -39,6 +39,7 @@ from iwan_claude.core.bus.events import RunFinishedEvent, RunStartedEvent
 from iwan_claude.core.compact.compactor import Compactor       # 会话压缩器
 from iwan_claude.core.config import IwanConfig                 # 配置
 from iwan_claude.core.context import ExecutionContext           # 执行上下文
+from iwan_claude.core.model_presets import get_model_preset     # 模型预设查询
 from iwan_claude.core.sandbox import init_sandbox              # 沙箱初始化
 from iwan_claude.core.events.bus import EventBus, EventHandler # 事件总线
 from iwan_claude.core.events.writer import EventWriter         # 事件写入器
@@ -957,8 +958,15 @@ class AgentRunner:
             
             try:
                 # 创建或获取 LLM Provider
+                # 如果设置了模型预设，使用预设中的模型名称覆盖默认配置
+                model_override: str | None = None
+                if self._permission_manager is not None:
+                    preset_name = self._permission_manager.get_model_preset()
+                    preset_info = get_model_preset(preset_name)
+                    model_override = preset_info.model
                 provider: LLMProvider = self._provider or create_provider_from_config(
-                    self._config.llm
+                    self._config.llm,
+                    model_override=model_override,
                 )
                 
                 # 如果启用了跟踪，包装 provider
@@ -1024,6 +1032,7 @@ class AgentRunner:
                         session_id=session_id_str,
                         checkpointer=checkpointer,
                         has_rag=has_rag,
+                        effort_level=self._permission_manager.get_effort_level() if self._permission_manager else "medium",
                     )
                 else:
                     # 使用 Legacy 引擎（简单的循环实现）
@@ -1035,6 +1044,7 @@ class AgentRunner:
                         compact_threshold=self._config.compaction.auto_threshold,
                         session_id=session_id_str,
                         has_rag=has_rag,
+                        effort_level=self._permission_manager.get_effort_level() if self._permission_manager else "medium",
                     )
                 
                 # ========== 第六步：执行 Agent 循环 ==========

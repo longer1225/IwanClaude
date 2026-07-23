@@ -392,6 +392,88 @@ class SessionClosedEvent(BaseModel):
     ts: str
 
 
+class SessionAutoModeChangedEvent(BaseModel):
+    """
+    会话自动模式变更事件 - 自动模式切换时发送
+
+    【字段说明】
+    - type: Literal["session.auto_mode_changed"] - 事件类型
+    - session_id: str - 会话 ID
+    - mode: str - 新的自动模式
+    - ts: str - 时间戳（ISO 8601）
+
+    【设计目的】
+    通知客户端自动模式已变更，
+    客户端可以更新状态栏显示。
+    """
+    type: Literal["session.auto_mode_changed"] = "session.auto_mode_changed"
+    session_id: str
+    mode: str
+    ts: str
+
+
+class SessionEffortLevelChangedEvent(BaseModel):
+    """
+    会话努力等级变更事件 - 努力等级切换时发送
+
+    【字段说明】
+    - type: Literal["session.effort_level_changed"] - 事件类型
+    - session_id: str - 会话 ID
+    - level: str - 新的努力等级（minimal / low / medium / high / max）
+    - ts: str - 时间戳（ISO 8601）
+
+    【设计目的】
+    通知客户端努力等级已变更，
+    客户端可以更新状态栏显示。
+    """
+    type: Literal["session.effort_level_changed"] = "session.effort_level_changed"
+    session_id: str
+    level: str
+    ts: str
+
+
+class SessionModelChangedEvent(BaseModel):
+    """
+    会话模型预设变更事件 - 模型预设切换时发送
+
+    【字段说明】
+    - type: Literal["session.model_changed"] - 事件类型
+    - session_id: str - 会话 ID
+    - preset: str - 新的模型预设（fast / balanced / powerful）
+    - model: str - 对应的模型名称
+    - ts: str - 时间戳（ISO 8601）
+
+    【设计目的】
+    通知客户端模型预设已变更，
+    客户端可以更新状态栏显示。
+    """
+    type: Literal["session.model_changed"] = "session.model_changed"
+    session_id: str
+    preset: str
+    model: str
+    ts: str
+
+
+class SessionRenamedEvent(BaseModel):
+    """
+    会话重命名事件 - 会话标题变更时发送
+
+    【字段说明】
+    - type: Literal["session.renamed"] - 事件类型
+    - session_id: str - 会话 ID
+    - title: str - 新的会话标题
+    - ts: str - 时间戳（ISO 8601）
+
+    【设计目的】
+    通知客户端会话标题已变更，
+    客户端可以更新标签页显示。
+    """
+    type: Literal["session.renamed"] = "session.renamed"
+    session_id: str
+    title: str
+    ts: str
+
+
 class ContextCompactedEvent(BaseModel):
     """
     上下文压缩事件 - 上下文压缩完成后发送
@@ -578,6 +660,10 @@ Event = Annotated[
     | SessionWaitingForInputEvent
     | SessionResumedEvent
     | SessionClosedEvent
+    | SessionAutoModeChangedEvent
+    | SessionEffortLevelChangedEvent
+    | SessionModelChangedEvent
+    | SessionRenamedEvent
     | ContextCompactedEvent
     | PermissionRequestedEvent
     | PermissionGrantedEvent

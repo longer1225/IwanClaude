@@ -203,3 +203,121 @@ def test_unknown_event_silently_ignored() -> None:
 
     app._handle_event({"type": "some.unknown.type", "run_id": "r", "ts": "t"})
     assert appended == []
+
+
+# 功能：验证 session.auto_mode_changed 事件更新 TUI 内部 auto_mode 状态
+# 设计：直接发送事件，断言 _auto_mode 字段被更新
+def test_auto_mode_changed_event_updates_state() -> None:
+    app = IwanTuiApp("127.0.0.1", 9999)
+    assert app._auto_mode == "off"  # type: ignore[attr-defined]
+
+    app._handle_event({
+        "type": "session.auto_mode_changed",
+        "session_id": "s1",
+        "mode": "read_only",
+        "ts": "t",
+    })
+
+    assert app._auto_mode == "read_only"  # type: ignore[attr-defined]
+
+
+# 功能：验证 _update_header 渲染结果包含当前 auto_mode
+# 设计：monkey-patch query_one 返回 fake header，调用 _update_header 断言渲染文本包含 auto:read_only
+def test_update_header_includes_auto_mode() -> None:
+    app = IwanTuiApp("127.0.0.1", 9999)
+    app._session_id = "sess-1"  # type: ignore[assignment]
+    app._engine_type = "legacy"  # type: ignore[assignment]
+    app._checkpoint_backend = "none"  # type: ignore[assignment]
+    app._auto_mode = "read_only"  # type: ignore[assignment]
+
+    updated: list[str] = []
+
+    class _FakeHeader:
+        def update(self, text: str) -> None:
+            updated.append(text)
+
+    app.query_one = lambda _selector, _widget: _FakeHeader()  # type: ignore[method-assign]
+    app._update_header("ready")
+
+    assert len(updated) == 1
+    assert "auto:read_only" in updated[0]
+
+
+# 功能：验证 session.effort_level_changed 事件更新 TUI 内部 effort_level 状态
+# 设计：直接发送事件，断言 _effort_level 字段被更新
+def test_effort_level_changed_event_updates_state() -> None:
+    app = IwanTuiApp("127.0.0.1", 9999)
+    assert app._effort_level == "medium"  # type: ignore[attr-defined]
+
+    app._handle_event({
+        "type": "session.effort_level_changed",
+        "session_id": "s1",
+        "level": "high",
+        "ts": "t",
+    })
+
+    assert app._effort_level == "high"  # type: ignore[attr-defined]
+
+
+# 功能：验证 _update_header 渲染结果包含当前 effort_level
+# 设计：monkey-patch query_one 返回 fake header，调用 _update_header 断言渲染文本包含 effort:high
+def test_update_header_includes_effort_level() -> None:
+    app = IwanTuiApp("127.0.0.1", 9999)
+    app._session_id = "sess-1"  # type: ignore[assignment]
+    app._engine_type = "legacy"  # type: ignore[assignment]
+    app._checkpoint_backend = "none"  # type: ignore[assignment]
+    app._auto_mode = "off"  # type: ignore[assignment]
+    app._effort_level = "high"  # type: ignore[assignment]
+
+    updated: list[str] = []
+
+    class _FakeHeader:
+        def update(self, text: str) -> None:
+            updated.append(text)
+
+    app.query_one = lambda _selector, _widget: _FakeHeader()  # type: ignore[method-assign]
+    app._update_header("ready")
+
+    assert len(updated) == 1
+    assert "effort:high" in updated[0]
+
+
+# 功能：验证 session.model_changed 事件更新 TUI 内部 model_preset 状态
+# 设计：直接发送事件，断言 _model_preset 字段被更新
+def test_model_changed_event_updates_state() -> None:
+    app = IwanTuiApp("127.0.0.1", 9999)
+    assert app._model_preset == "balanced"  # type: ignore[attr-defined]
+
+    app._handle_event({
+        "type": "session.model_changed",
+        "session_id": "s1",
+        "preset": "powerful",
+        "model": "claude-opus-4-1-20250805",
+        "ts": "t",
+    })
+
+    assert app._model_preset == "powerful"  # type: ignore[attr-defined]
+
+
+# 功能：验证 _update_header 渲染结果包含当前 model_preset
+# 设计：monkey-patch query_one 返回 fake header，调用 _update_header 断言渲染文本包含 model:powerful
+def test_update_header_includes_model_preset() -> None:
+    app = IwanTuiApp("127.0.0.1", 9999)
+    app._session_id = "sess-1"  # type: ignore[assignment]
+    app._engine_type = "legacy"  # type: ignore[assignment]
+    app._checkpoint_backend = "none"  # type: ignore[assignment]
+    app._auto_mode = "off"  # type: ignore[assignment]
+    app._effort_level = "medium"  # type: ignore[assignment]
+    app._model_preset = "powerful"  # type: ignore[assignment]
+
+    updated: list[str] = []
+
+    class _FakeHeader:
+        def update(self, text: str) -> None:
+            updated.append(text)
+
+    app.query_one = lambda _selector, _widget: _FakeHeader()  # type: ignore[method-assign]
+    app._update_header("ready")
+
+    assert len(updated) == 1
+    assert "model:powerful" in updated[0]

@@ -163,12 +163,18 @@ class SessionCreateResult(BaseModel):
     【字段说明】
     - session_id: str - 会话 ID
     - status: SessionStatus - 会话状态
+    - auto_mode: str - 当前自动模式（"off" / "read_only" / "on"）
+    - effort_level: str - 当前努力等级（"minimal" / "low" / "medium" / "high" / "max"）
+    - model_preset: str - 当前模型预设（"fast" / "balanced" / "powerful"）
 
     【设计目的】
-    返回会话 ID 和状态，用于客户端管理会话。
+    返回会话 ID、状态和当前配置，用于客户端管理会话。
     """
     session_id: str
     status: SessionStatus
+    auto_mode: str = "off"
+    effort_level: str = "medium"
+    model_preset: str = "balanced"
 
 
 class SessionSendMessageCommand(BaseModel):
@@ -303,6 +309,197 @@ class PermissionRespondResult(BaseModel):
     返回权限响应是否成功处理。
     """
     ok: bool = True
+
+
+class SessionSetAutoModeCommand(BaseModel):
+    """
+    设置自动模式命令 - 客户端请求设置会话的自动模式
+
+    【字段说明】
+    - type: Literal["session.set_auto_mode"] - 命令类型
+    - session_id: str - 会话 ID
+    - mode: str - 自动模式（"off" / "read_only" / "on"）
+
+    【设计目的】
+    允许客户端动态切换自动模式，控制是否自动批准低风险工具调用。
+
+    【响应】
+    SessionSetAutoModeResult - 包含设置后的模式
+    """
+    type: Literal["session.set_auto_mode"] = "session.set_auto_mode"
+    session_id: str
+    mode: str
+
+
+class SessionSetAutoModeResult(BaseModel):
+    """
+    设置自动模式响应 - 服务器返回的设置结果
+
+    【字段说明】
+    - mode: str - 当前自动模式
+
+    【设计目的】
+    返回设置后的自动模式，用于客户端同步状态。
+    """
+    mode: str
+
+
+class SessionSetEffortLevelCommand(BaseModel):
+    """
+    设置努力等级命令 - 客户端请求设置会话的努力等级
+
+    【字段说明】
+    - type: Literal["session.set_effort_level"] - 命令类型
+    - session_id: str - 会话 ID
+    - level: str - 努力等级（"minimal" / "low" / "medium" / "high" / "max"）
+
+    【设计目的】
+    允许客户端动态切换努力等级，控制 Agent 执行深度。
+    等级越高，Agent 会读更多文件、做更多验证、搜索更深。
+
+    【响应】
+    SessionSetEffortLevelResult - 包含设置后的等级
+    """
+    type: Literal["session.set_effort_level"] = "session.set_effort_level"
+    session_id: str
+    level: str
+
+
+class SessionSetEffortLevelResult(BaseModel):
+    """
+    设置努力等级响应 - 服务器返回的设置结果
+
+    【字段说明】
+    - level: str - 当前努力等级
+
+    【设计目的】
+    返回设置后的努力等级，用于客户端同步状态。
+    """
+    level: str
+
+
+class SessionSetModelCommand(BaseModel):
+    """
+    设置模型预设命令 - 客户端请求设置会话的模型预设
+
+    【字段说明】
+    - type: Literal["session.set_model"] - 命令类型
+    - session_id: str - 会话 ID
+    - preset: str - 模型预设（"fast" / "balanced" / "powerful"）
+
+    【设计目的】
+    允许客户端动态切换模型预设，控制 Agent 使用哪个 LLM 模型。
+    切换后，下一次 Agent run 会使用新预设对应的模型。
+
+    【响应】
+    SessionSetModelResult - 包含设置后的预设
+    """
+    type: Literal["session.set_model"] = "session.set_model"
+    session_id: str
+    preset: str
+
+
+class SessionSetModelResult(BaseModel):
+    """
+    设置模型预设响应 - 服务器返回的设置结果
+
+    【字段说明】
+    - preset: str - 当前模型预设
+
+    【设计目的】
+    返回设置后的模型预设，用于客户端同步状态。
+    """
+    preset: str
+
+
+class SessionListCommand(BaseModel):
+    """
+    会话列表命令 - 客户端请求列出所有会话
+
+    【字段说明】
+    - type: Literal["session.list"] - 命令类型
+
+    【设计目的】
+    允许客户端获取所有会话的列表，
+    用于 TUI 标签页显示和会话切换。
+
+    【响应】
+    SessionListResult - 包含会话列表
+    """
+    type: Literal["session.list"] = "session.list"
+
+
+class SessionInfo(BaseModel):
+    """
+    会话信息 - 会话列表中的单个会话信息
+
+    【字段说明】
+    - id: str - 会话 ID
+    - title: str - 会话标题
+    - status: str - 会话状态（active / waiting_for_input / closed）
+    - mode: str - 会话模式（one_shot / chat）
+    - updated_at: str - 最后更新时间
+
+    【设计目的】
+    轻量级的会话信息，用于列表展示，
+    不包含完整消息历史以减少传输量。
+    """
+    id: str
+    title: str
+    status: str
+    mode: str
+    updated_at: str
+
+
+class SessionListResult(BaseModel):
+    """
+    会话列表响应 - 服务器返回的会话列表
+
+    【字段说明】
+    - sessions: list[SessionInfo] - 会话列表，按更新时间倒序排列
+
+    【设计目的】
+    返回所有会话的摘要信息，
+    用于 TUI 标签页显示和会话切换。
+    """
+    sessions: list[SessionInfo]
+
+
+class SessionRenameCommand(BaseModel):
+    """
+    重命名会话命令 - 客户端请求重命名会话标题
+
+    【字段说明】
+    - type: Literal["session.rename"] - 命令类型
+    - session_id: str - 会话 ID
+    - title: str - 新的会话标题
+
+    【设计目的】
+    允许用户自定义会话标题，
+    便于在多标签中识别不同会话。
+
+    【响应】
+    SessionRenameResult - 包含重命名后的会话信息
+    """
+    type: Literal["session.rename"] = "session.rename"
+    session_id: str
+    title: str
+
+
+class SessionRenameResult(BaseModel):
+    """
+    重命名会话响应 - 服务器返回的重命名结果
+
+    【字段说明】
+    - session_id: str - 会话 ID
+    - title: str - 新的会话标题
+
+    【设计目的】
+    返回重命名后的会话信息，
+    用于客户端同步标签页标题。
+    """
+    session_id: str
+    title: str
 
 
 class SessionCompactCommand(BaseModel):
@@ -444,6 +641,11 @@ Command = Annotated[
     | SessionGetHistoryCommand
     | SessionCloseCommand
     | PermissionRespondCommand
+    | SessionSetAutoModeCommand
+    | SessionSetEffortLevelCommand
+    | SessionSetModelCommand
+    | SessionListCommand
+    | SessionRenameCommand
     | SessionCompactCommand
     | SessionCheckpointListCommand
     | SessionCheckpointRestoreCommand,

@@ -89,6 +89,17 @@ from iwan_claude.core.bus.commands import (
     SessionGetHistoryResult,        # 获取历史结果
     SessionSendMessageCommand,      # 发送消息命令
     SessionSendMessageResult,       # 发送消息结果
+    SessionSetAutoModeCommand,      # 设置自动模式命令
+    SessionSetAutoModeResult,       # 设置自动模式结果
+    SessionSetEffortLevelCommand,   # 设置努力等级命令
+    SessionSetEffortLevelResult,    # 设置努力等级结果
+    SessionSetModelCommand,         # 设置模型预设命令
+    SessionSetModelResult,          # 设置模型预设结果
+    SessionListCommand,             # 会话列表命令
+    SessionListResult,              # 会话列表结果
+    SessionInfo,                    # 会话信息
+    SessionRenameCommand,           # 重命名会话命令
+    SessionRenameResult,            # 重命名会话结果
 )
 from iwan_claude.core.bus.envelope import EventPushEnvelope  # 事件推送封装
 
@@ -335,9 +346,12 @@ class CoreApp:
         
         # 创建会话
         session = await self._sessions.create(mode=cmd.mode, title=cmd.title)
-        
-        # 返回会话 ID 和状态
-        return SessionCreateResult(session_id=session.id, status=session.status)
+
+        # 返回会话 ID、状态和当前配置
+        auto_mode = self._permission_manager.get_auto_mode() if self._permission_manager is not None else "off"
+        effort_level = self._permission_manager.get_effort_level() if self._permission_manager is not None else "medium"
+        model_preset = self._permission_manager.get_model_preset() if self._permission_manager is not None else "balanced"
+        return SessionCreateResult(session_id=session.id, status=session.status, auto_mode=auto_mode, effort_level=effort_level, model_preset=model_preset)
 
     # 向 session 发送一条用户消息并同步等待对应 run 完成
     async def _session_send_handler(self, params: dict[str, Any]) -> SessionSendMessageResult:
@@ -524,6 +538,167 @@ class CoreApp:
         
         # 返回关闭状态
         return SessionCloseResult(status="closed")
+
+    # 设置会话的自动模式
+    async def _session_set_auto_mode_handler(self, params: dict[str, Any]) -> SessionSetAutoModeResult:
+        """
+        处理 session.set_auto_mode RPC 请求 - 设置自动模式
+        
+        参数：
+            params: 请求参数，包含 session_id 和 mode 字段
+        
+        返回：
+            SessionSetAutoModeResult: 包含设置后的模式
+        """
+        assert self._sessions is not None
+        assert self._permission_manager is not None
+        
+        # 验证请求参数
+        cmd = SessionSetAutoModeCommand.model_validate(params)
+        
+        # 确保会话存在
+        self._sessions._get_session(cmd.session_id)
+        
+        # 设置权限管理器的自动模式
+        self._permission_manager.set_auto_mode(cmd.mode)
+        
+        # 发布事件通知客户端模式已变更
+        from iwan_claude.core.bus.events import SessionAutoModeChangedEvent
+        await self._bus.publish(
+            SessionAutoModeChangedEvent(
+                session_id=cmd.session_id,
+                mode=cmd.mode,
+                ts=_now(),
+            )
+        )
+        
+        # 返回设置后的模式
+        return SessionSetAutoModeResult(mode=cmd.mode)
+
+    # 设置会话的努力等级
+    async def _session_set_effort_level_handler(self, params: dict[str, Any]) -> SessionSetEffortLevelResult:
+        """
+        处理 session.set_effort_level RPC 请求 - 设置努力等级
+
+        参数：
+            params: 请求参数，包含 session_id 和 level 字段
+
+        返回：
+            SessionSetEffortLevelResult: 包含设置后的等级
+        """
+        assert self._sessions is not None
+        assert self._permission_manager is not None
+
+        # 验证请求参数
+        cmd = SessionSetEffortLevelCommand.model_validate(params)
+
+        # 确保会话存在
+        self._sessions._get_session(cmd.session_id)
+
+        # 设置权限管理器的努力等级
+        self._permission_manager.set_effort_level(cmd.level)
+
+        # 发布事件通知客户端等级已变更
+        from iwan_claude.core.bus.events import SessionEffortLevelChangedEvent
+        await self._bus.publish(
+            SessionEffortLevelChangedEvent(
+                session_id=cmd.session_id,
+                level=cmd.level,
+                ts=_now(),
+            )
+        )
+
+        # 返回设置后的等级
+        return SessionSetEffortLevelResult(level=cmd.level)
+
+    # 设置会话的模型预设
+    async def _session_set_model_handler(self, params: dict[str, Any]) -> SessionSetModelResult:
+        """
+        处理 session.set_model RPC 请求 - 设置模型预设
+
+        参数：
+            params: 请求参数，包含 session_id 和 preset 字段
+
+        返回：
+            SessionSetModelResult: 包含设置后的预设
+        """
+        assert self._sessions is not None
+        assert self._permission_manager is not None
+
+        # 验证请求参数
+        cmd = SessionSetModelCommand.model_validate(params)
+
+        # 确保会话存在
+        self._sessions._get_session(cmd.session_id)
+
+        # 设置权限管理器的模型预设（会校验 preset 是否合法）
+        self._permission_manager.set_model_preset(cmd.preset)
+
+        # 发布事件通知客户端模型预设已变更
+        from iwan_claude.core.bus.events import SessionModelChangedEvent
+        from iwan_claude.core.model_presets import get_model_preset
+        preset_info = get_model_preset(cmd.preset)
+        await self._bus.publish(
+            SessionModelChangedEvent(
+                session_id=cmd.session_id,
+                preset=cmd.preset,
+                model=preset_info.model,
+                ts=_now(),
+            )
+        )
+
+        # 返回设置后的预设
+        return SessionSetModelResult(preset=cmd.preset)
+
+    # 列出所有会话
+    async def _session_list_handler(self, params: dict[str, Any]) -> SessionListResult:
+        """
+        处理 session.list RPC 请求 - 列出所有会话
+
+        参数：
+            params: 请求参数（无）
+
+        返回：
+            SessionListResult: 包含会话列表，按更新时间倒序排列
+        """
+        assert self._sessions is not None
+
+        # 获取所有会话列表
+        sessions = self._sessions.list_sessions()
+        # 转换为 SessionInfo 列表
+        session_infos = [
+            SessionInfo(
+                id=s.id,
+                title=s.title or "(untitled)",
+                status=s.status,
+                mode=s.mode,
+                updated_at=s.updated_at,
+            )
+            for s in sessions
+        ]
+        return SessionListResult(sessions=session_infos)
+
+    # 重命名会话
+    async def _session_rename_handler(self, params: dict[str, Any]) -> SessionRenameResult:
+        """
+        处理 session.rename RPC 请求 - 重命名会话标题
+
+        参数：
+            params: 请求参数，包含 session_id 和 title 字段
+
+        返回：
+            SessionRenameResult: 包含重命名后的会话信息
+        """
+        assert self._sessions is not None
+
+        # 验证请求参数
+        cmd = SessionRenameCommand.model_validate(params)
+
+        # 确保会话存在并重命名
+        session = await self._sessions.rename_session(cmd.session_id, cmd.title)
+
+        # 返回重命名结果
+        return SessionRenameResult(session_id=session.id, title=session.title)
 
     # 获取当前会话使用的引擎信息
     async def _session_engine_info_handler(self, params: dict[str, Any]) -> dict[str, str]:
@@ -769,6 +944,11 @@ class CoreApp:
         server.register("session.compact", self._session_compact_handler)
         server.register("session.checkpoint.list", self._session_checkpoint_list_handler)
         server.register("session.checkpoint.restore", self._session_checkpoint_restore_handler)
+        server.register("session.set_auto_mode", self._session_set_auto_mode_handler)
+        server.register("session.set_effort_level", self._session_set_effort_level_handler)
+        server.register("session.set_model", self._session_set_model_handler)
+        server.register("session.list", self._session_list_handler)
+        server.register("session.rename", self._session_rename_handler)
         server.register("session.engine_info", self._session_engine_info_handler)
 
         # ===== 启动服务器 =====

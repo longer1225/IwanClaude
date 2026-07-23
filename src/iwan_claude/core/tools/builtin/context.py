@@ -96,7 +96,7 @@ class AddContextTool(BaseTool):
     === /path/to/file.py (lines 10-50) ===
 
     def my_function():
-        """Function docstring"""
+        '''Function docstring'''
         return True
     ```
 

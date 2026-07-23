@@ -44,6 +44,8 @@ from pathlib import Path
 from typing import Any
 
 from iwan_claude.core.permissions.policy import (
+    AUTO_MODE_READ_ONLY_TOOLS,
+    AUTO_MODE_WRITE_ALLOW_TOOLS,
     DEFAULT_POLICIES,
     PermissionDecision,
     ToolPolicy,
@@ -51,6 +53,15 @@ from iwan_claude.core.permissions.policy import (
     param_preview,
 )
 from iwan_claude.core.permissions.storage import load_policy_file, save_policy_file
+
+# 合法的自动模式值
+AUTO_MODES = ("off", "read_only", "on")
+
+# 合法的努力等级值
+EFFORT_LEVELS = ("minimal", "low", "medium", "high", "max")
+
+# 合法的模型预设值
+MODEL_PRESETS = ("fast", "balanced", "powerful")
 
 # 日志记录器
 logger = logging.getLogger(__name__)
@@ -175,6 +186,115 @@ class PermissionManager:
         )
         # 审批超时时间（秒，0 表示不超时）
         self._timeout_s = timeout_s
+        # 自动模式：off / read_only / on
+        self._auto_mode: str = "off"
+        # 努力等级：minimal / low / medium / high / max
+        self._effort_level: str = "medium"
+        # 模型预设：fast / balanced / powerful
+        self._model_preset: str = "balanced"
+
+    # 设置当前自动模式
+    def set_auto_mode(self, mode: str) -> None:
+        """
+        设置当前自动模式
+
+        【参数说明】
+        - mode: str - 自动模式，必须是 "off" / "read_only" / "on" 之一
+
+        【设计目的】
+        允许运行时动态切换自动模式，无需重启守护进程。
+        """
+        if mode not in AUTO_MODES:
+            raise ValueError(f"auto_mode must be one of {AUTO_MODES}, got {mode!r}")
+        self._auto_mode = mode
+        logger.info("permission: auto_mode set to %s", mode)
+
+    # 获取当前自动模式
+    def get_auto_mode(self) -> str:
+        """
+        获取当前自动模式
+
+        【返回值】
+        - str: 当前自动模式（"off" / "read_only" / "on"）
+        """
+        return self._auto_mode
+
+    # 设置当前努力等级
+    def set_effort_level(self, level: str) -> None:
+        """
+        设置当前努力等级
+
+        【参数说明】
+        - level: str - 努力等级，必须是 "minimal" / "low" / "medium" / "high" / "max" 之一
+
+        【设计目的】
+        允许运行时动态切换努力等级，控制 Agent 执行深度。
+        """
+        if level not in EFFORT_LEVELS:
+            raise ValueError(f"effort_level must be one of {EFFORT_LEVELS}, got {level!r}")
+        self._effort_level = level
+        logger.info("permission: effort_level set to %s", level)
+
+    # 获取当前努力等级
+    def get_effort_level(self) -> str:
+        """
+        获取当前努力等级
+
+        【返回值】
+        - str: 当前努力等级（"minimal" / "low" / "medium" / "high" / "max"）
+        """
+        return self._effort_level
+
+    # 设置当前模型预设
+    def set_model_preset(self, preset: str) -> None:
+        """
+        设置当前模型预设
+
+        【参数说明】
+        - preset: str - 模型预设，必须是 "fast" / "balanced" / "powerful" 之一
+
+        【设计目的】
+        允许运行时动态切换模型预设，控制 Agent 使用哪个 LLM 模型。
+        切换后，下一次 Agent run 会使用新预设对应的模型。
+        """
+        if preset not in MODEL_PRESETS:
+            raise ValueError(f"model_preset must be one of {MODEL_PRESETS}, got {preset!r}")
+        self._model_preset = preset
+        logger.info("permission: model_preset set to %s", preset)
+
+    # 获取当前模型预设
+    def get_model_preset(self) -> str:
+        """
+        获取当前模型预设
+
+        【返回值】
+        - str: 当前模型预设（"fast" / "balanced" / "powerful"）
+        """
+        return self._model_preset
+
+    # 判断指定工具在当前自动模式下是否可以自动批准
+    def _auto_mode_allows(self, tool_name: str) -> bool:
+        """
+        判断当前自动模式是否允许自动批准该工具
+
+        【参数说明】
+        - tool_name: str - 工具名称
+
+        【返回值】
+        - bool: True 表示可以自动批准，False 表示仍需走正常审批流程
+
+        【逻辑说明】
+        - off: 不允许任何自动批准
+        - read_only: 只自动批准只读工具
+        - on: 自动批准只读工具 + 白名单内的写工具
+        """
+        if self._auto_mode == "off":
+            return False
+        if tool_name in AUTO_MODE_READ_ONLY_TOOLS:
+            return True
+        if self._auto_mode == "on" and tool_name in AUTO_MODE_WRITE_ALLOW_TOOLS:
+            return True
+        return False
 
     def evaluate(self, tool_name: str, params: dict[str, Any]) -> PermissionDecision:
         """
@@ -265,6 +385,11 @@ class PermissionManager:
         # 获取工具策略
         policy = self._policies.get(tool_name)
 
+        # Tier 0: Auto Mode 自动批准（仅适用于非 bash 工具，且不能绕过安全规则）
+        auto_allowed = False
+        if tool_name != "bash" and self._auto_mode_allows(tool_name):
+            auto_allowed = True
+
         # Tier 1: deny_patterns（bash only，不可被缓存绕过）
         if command and policy:
             for pat in policy.deny_patterns:
@@ -301,7 +426,11 @@ class PermissionManager:
                     return True, "auto_allow"
                 if policy.default == PermissionDecision.DENY:
                     return False, "auto_deny"
-            # default == ASK（bash、unknown tool）→ fall through to Future
+            # default == ASK（bash、unknown tool）→ 检查 Auto Mode 是否允许自动批准
+            if auto_allowed:
+                logger.debug("permission: auto_mode allowed tool=%s mode=%s", tool_name, self._auto_mode)
+                return True, "auto_allow"
+            # 仍需要用户确认 → fall through to Future
 
         # ASK 路径（来自 OUTSIDE_CWD 强制 ASK，或 default=ASK）
         # 获取事件循环

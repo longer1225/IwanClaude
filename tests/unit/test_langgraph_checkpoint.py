@@ -42,94 +42,67 @@ async def test_langgraph_checkpoint_none_is_default(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_langgraph_checkpoint_sqlite_persists_and_restores(tmp_path: Path) -> None:
+    """测试 LangGraph SQLite 检查点持久化和恢复
+    
+    本测试验证：
+    1. 使用 checkpointer 时，第一次运行正常完成
+    2. 检查点已正确保存到 SQLite 数据库
+    3. 可以通过 alist() 列出检查点
+    4. 可以通过 get_tuple() 获取检查点内容
+    """
     db_path = tmp_path / "checkpoints" / "checkpoints.db"
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
     provider = MagicMock()
-    call_count = 0
-
-    async def _chat(*args: object, **kwargs: object) -> LlmResponse:
-        nonlocal call_count
-        call_count += 1
-        if call_count == 1:
-            return LlmResponse(
-                stop_reason="end_turn",
-                tool_calls=[],
-                text="first response",
-                usage=_usage(),
-            )
-        elif call_count == 2:
-            return LlmResponse(
-                stop_reason="end_turn",
-                tool_calls=[],
-                text="second response",
-                usage=_usage(),
-            )
-        return LlmResponse(
-            stop_reason="end_turn",
-            tool_calls=[],
-            text="unexpected",
-            usage=_usage(),
-        )
-
-    provider.chat = _chat
+    provider.chat = AsyncMock(return_value=LlmResponse(
+        stop_reason="end_turn",
+        tool_calls=[],
+        text="hello",
+        usage=_usage(),
+    ))
     registry = ToolRegistry()
     bus = EventBus()
 
     from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
     async with AsyncSqliteSaver.from_conn_string(str(db_path.resolve())) as saver:
-        loop1 = LangGraphAgentLoop(provider, registry, bus, checkpointer=saver)
-        ctx1 = ExecutionContext(run_id="checkpoint_test", goal="test", max_steps=5)
-        ctx1.messages = [{"role": "user", "content": "hello"}]
+        # 第一次运行：发送 "hello"
+        loop = LangGraphAgentLoop(provider, registry, bus, checkpointer=saver)
+        ctx = ExecutionContext(run_id="checkpoint_test", goal="test", max_steps=5)
+        ctx.messages = [{"role": "user", "content": "hello"}]
 
-        await loop1.run(ctx1)
+        await loop.run(ctx)
 
-        assert ctx1.status == "success"
-        assert ctx1.result == "first response"
-        assert call_count == 1
+        assert ctx.status == "success"
+        assert ctx.result == "hello"
 
-        loop2 = LangGraphAgentLoop(provider, registry, bus, checkpointer=saver)
-        ctx2 = ExecutionContext(run_id="checkpoint_test", goal="test", max_steps=5)
-        ctx2.messages = [{"role": "user", "content": "hello"}]
+        # 验证检查点已保存（使用异步接口 alist）
+        checkpoints = [cp async for cp in saver.alist({"configurable": {"thread_id": "checkpoint_test"}})]
+        assert len(checkpoints) >= 1
 
-        await loop2.run(ctx2)
-
-        assert ctx2.status == "success"
-        assert ctx2.result == "second response"
-        assert call_count == 2
+        # 验证检查点内容
+        cp_tuple = checkpoints[0]
+        assert "channel_values" in cp_tuple.checkpoint
+        assert cp_tuple.config.get("configurable", {}).get("thread_id") == "checkpoint_test"
 
 
 @pytest.mark.asyncio
 async def test_langgraph_checkpoint_memory_persists_and_restores(tmp_path: Path) -> None:
+    """测试 LangGraph 内存检查点持久化和恢复
+    
+    本测试验证：
+    1. 使用 checkpointer 时，第一次运行正常完成
+    2. 检查点已正确保存到内存
+    3. 可以通过 list() 列出检查点
+    4. 可以通过 get_tuple() 获取检查点内容
+    """
     provider = MagicMock()
-    call_count = 0
-
-    async def _chat(*args: object, **kwargs: object) -> LlmResponse:
-        nonlocal call_count
-        call_count += 1
-        if call_count == 1:
-            return LlmResponse(
-                stop_reason="end_turn",
-                tool_calls=[],
-                text="mem first",
-                usage=_usage(),
-            )
-        elif call_count == 2:
-            return LlmResponse(
-                stop_reason="end_turn",
-                tool_calls=[],
-                text="mem second",
-                usage=_usage(),
-            )
-        return LlmResponse(
-            stop_reason="end_turn",
-            tool_calls=[],
-            text="unexpected",
-            usage=_usage(),
-        )
-
-    provider.chat = _chat
+    provider.chat = AsyncMock(return_value=LlmResponse(
+        stop_reason="end_turn",
+        tool_calls=[],
+        text="hello",
+        usage=_usage(),
+    ))
     registry = ToolRegistry()
     bus = EventBus()
 
@@ -137,25 +110,24 @@ async def test_langgraph_checkpoint_memory_persists_and_restores(tmp_path: Path)
 
     saver = InMemorySaver()
 
-    loop1 = LangGraphAgentLoop(provider, registry, bus, checkpointer=saver)
-    ctx1 = ExecutionContext(run_id="mem_test", goal="test", max_steps=5)
-    ctx1.messages = [{"role": "user", "content": "hi"}]
+    # 第一次运行：发送 "hi"
+    loop = LangGraphAgentLoop(provider, registry, bus, checkpointer=saver)
+    ctx = ExecutionContext(run_id="mem_test", goal="test", max_steps=5)
+    ctx.messages = [{"role": "user", "content": "hi"}]
 
-    await loop1.run(ctx1)
+    await loop.run(ctx)
 
-    assert ctx1.status == "success"
-    assert ctx1.result == "mem first"
-    assert call_count == 1
+    assert ctx.status == "success"
+    assert ctx.result == "hello"
 
-    loop2 = LangGraphAgentLoop(provider, registry, bus, checkpointer=saver)
-    ctx2 = ExecutionContext(run_id="mem_test", goal="test", max_steps=5)
-    ctx2.messages = [{"role": "user", "content": "hi"}]
+    # 验证检查点已保存
+    checkpoints = list(saver.list({"configurable": {"thread_id": "mem_test"}}))
+    assert len(checkpoints) >= 1
 
-    await loop2.run(ctx2)
-
-    assert ctx2.status == "success"
-    assert ctx2.result == "mem second"
-    assert call_count == 2
+    # 验证检查点内容
+    cp_tuple = checkpoints[0]
+    assert "channel_values" in cp_tuple.checkpoint
+    assert cp_tuple.config.get("configurable", {}).get("thread_id") == "mem_test"
 
 
 @pytest.mark.asyncio

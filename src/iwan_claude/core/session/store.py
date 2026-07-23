@@ -523,3 +523,51 @@ class SessionStore:
         # 以追加模式写入笔记到 notes.md
         with (path / "notes.md").open("a", encoding="utf-8") as f:
             f.write(f"## Note ({_now()}, {run_id})\n{content}\n\n")
+
+    def list_sessions(self) -> list[Session]:
+        """
+        列出所有已存储的会话，按更新时间倒序排列
+
+        【返回值】
+        - list[Session]: 会话列表，按 updated_at 从新到旧排序
+
+        【执行流程】
+        1. 遍历根目录下的所有子目录
+        2. 检查每个子目录是否有 meta.json 文件
+        3. 读取 meta.json 并还原为 Session 对象
+        4. 按 updated_at 降序排序
+        5. 返回排序后的列表
+
+        【设计目的】
+        支持 TUI 标签页显示所有会话，
+        以及启动时恢复最近的会话。
+
+        【注意事项】
+        - 只读取 meta.json，不加载消息历史（性能考虑）
+        - 格式错误的 meta.json 会被跳过并记录警告
+        """
+        # 初始化会话列表
+        sessions: list[Session] = []
+        # 根目录不存在时返回空列表
+        if not self._root.exists():
+            return sessions
+        # 遍历根目录下的所有子目录
+        for entry in self._root.iterdir():
+            # 只处理目录
+            if not entry.is_dir():
+                continue
+            # 检查是否有 meta.json 文件
+            meta_path = entry / "meta.json"
+            if not meta_path.exists():
+                continue
+            try:
+                # 读取 meta.json 并还原为 Session 对象
+                session = self.read_meta(entry.name)
+                sessions.append(session)
+            except (json.JSONDecodeError, KeyError) as e:
+                # 格式错误，记录警告并跳过
+                logger.warning("skip broken session meta %s: %s", entry.name, e)
+                continue
+        # 按 updated_at 降序排序（最新的在前）
+        sessions.sort(key=lambda s: s.updated_at, reverse=True)
+        return sessions

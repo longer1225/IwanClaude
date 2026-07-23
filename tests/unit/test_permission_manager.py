@@ -409,3 +409,189 @@ async def test_permission_timeout_cleans_up_pending() -> None:
     # 超时后迟到的 respond 不应 crash
     mgr.respond("t_late", "allow_once")  # should be noop
     assert "t_late" not in mgr._pending
+
+
+# ── Auto Mode ─────────────────────────────────────────────────────────────────
+
+# 功能：验证默认 auto_mode 为 off
+# 设计：新创建的 PermissionManager 默认不启用自动模式
+def test_auto_mode_default_is_off() -> None:
+    mgr = _make_manager()
+    assert mgr.get_auto_mode() == "off"
+
+
+# 功能：验证 set_auto_mode 切换模式并拒绝非法值
+# 设计：分别切换到 read_only / on，再传入非法模式触发 ValueError
+def test_set_auto_mode_validates_input() -> None:
+    mgr = _make_manager()
+    mgr.set_auto_mode("read_only")
+    assert mgr.get_auto_mode() == "read_only"
+    mgr.set_auto_mode("on")
+    assert mgr.get_auto_mode() == "on"
+    with pytest.raises(ValueError):
+        mgr.set_auto_mode("fast")
+
+
+# 功能：验证 read_only 模式下只读工具自动批准且不发送事件
+# 设计：read_file 默认 ASK，在 read_only 模式下应返回 (True, "auto_allow")，不触发 permission.requested
+async def test_auto_mode_read_only_allows_read_tools() -> None:
+    mgr = _make_manager()
+    mgr.set_auto_mode("read_only")
+    emitted, emitter = await _collect_emitted()
+
+    allowed, decision = await mgr.check_and_wait(
+        tool_use_id="t_read", tool_name="read_file",
+        params={"path": "README.md"}, session_id="s1",
+        event_emitter=emitter,
+    )
+
+    assert allowed is True
+    assert decision == "auto_allow"
+    assert emitted == []
+
+
+# 功能：验证 read_only 模式下写工具仍需 ASK
+# 设计：write_file 不在 AUTO_MODE_READ_ONLY_TOOLS 中，read_only 模式下仍应发出 permission.requested
+async def test_auto_mode_read_only_still_asks_write_tools() -> None:
+    mgr = _make_manager()
+    mgr.set_auto_mode("read_only")
+    emitted, emitter = await _collect_emitted()
+
+    async def _auto_allow() -> None:
+        await asyncio.sleep(0)
+        mgr.respond("t_write", "allow_once")
+
+    task = asyncio.create_task(_auto_allow())
+    allowed, decision = await mgr.check_and_wait(
+        tool_use_id="t_write", tool_name="write_file",
+        params={"path": "x.txt", "content": "hi"}, session_id="s1",
+        event_emitter=emitter,
+    )
+    await task
+
+    assert allowed is True
+    assert decision == "allow_once"
+    assert len(emitted) == 1
+    assert emitted[0]["type"] == "permission.requested"
+
+
+# 功能：验证 on 模式下白名单写工具自动批准
+# 设计：write_file 在 AUTO_MODE_WRITE_ALLOW_TOOLS 中，on 模式下应直接返回 auto_allow
+async def test_auto_mode_on_allows_whitelisted_write_tools() -> None:
+    mgr = _make_manager()
+    mgr.set_auto_mode("on")
+    emitted, emitter = await _collect_emitted()
+
+    allowed, decision = await mgr.check_and_wait(
+        tool_use_id="t_write_on", tool_name="write_file",
+        params={"path": "x.txt", "content": "hi"}, session_id="s1",
+        event_emitter=emitter,
+    )
+
+    assert allowed is True
+    assert decision == "auto_allow"
+    assert emitted == []
+
+
+# 功能：验证 on 模式下非白名单写工具仍需 ASK
+# 设计：bash 不在白名单中，on 模式下仍应发出 permission.requested
+async def test_auto_mode_on_still_asks_non_whitelisted_tools() -> None:
+    mgr = _make_manager()
+    mgr.set_auto_mode("on")
+    emitted, emitter = await _collect_emitted()
+
+    async def _auto_allow() -> None:
+        await asyncio.sleep(0)
+        mgr.respond("t_bash", "allow_once")
+
+    task = asyncio.create_task(_auto_allow())
+    allowed, decision = await mgr.check_and_wait(
+        tool_use_id="t_bash", tool_name="bash",
+        params={"command": "echo hi"}, session_id="s1",
+        event_emitter=emitter,
+    )
+    await task
+
+    assert allowed is True
+    assert decision == "allow_once"
+    assert len(emitted) == 1
+    assert emitted[0]["type"] == "permission.requested"
+
+
+# 功能：验证 auto mode 不绕过 bash 的 deny_patterns
+# 设计：on 模式下 bash 仍受 deny_patterns 约束，命中后应直接拒绝
+def test_auto_mode_does_not_bypass_bash_deny_patterns() -> None:
+    mgr = PermissionManager(
+        policies={"bash": ToolPolicy(default=PermissionDecision.ASK, deny_patterns=["rm"])},
+    )
+    mgr.set_auto_mode("on")
+    decision = mgr.evaluate("bash", {"command": "rm -rf /"})
+    assert decision == PermissionDecision.DENY
+
+
+# ── effort_level tests ──────────────────────────────────────────────────────
+
+# 功能：验证 effort_level 默认值为 medium
+# 设计：新建 manager 后，默认 effort_level 应为 "medium"
+def test_effort_level_default_is_medium() -> None:
+    mgr = _make_manager()
+    assert mgr.get_effort_level() == "medium"
+
+
+# 功能：验证 set_effort_level 可以设置所有合法值
+# 设计：遍历所有合法等级，验证 setter 和 getter 的一致性
+def test_effort_level_set_all_valid_levels() -> None:
+    mgr = _make_manager()
+    for level in ("minimal", "low", "medium", "high", "max"):
+        mgr.set_effort_level(level)
+        assert mgr.get_effort_level() == level
+
+
+# 功能：验证 set_effort_level 拒绝非法值
+# 设计：传入非法字符串应抛出 ValueError
+def test_effort_level_rejects_invalid_value() -> None:
+    mgr = _make_manager()
+    with pytest.raises(ValueError):
+        mgr.set_effort_level("invalid")
+
+
+# 功能：验证 set_effort_level 拒绝空字符串
+# 设计：传入空字符串应抛出 ValueError
+def test_effort_level_rejects_empty_string() -> None:
+    mgr = _make_manager()
+    with pytest.raises(ValueError):
+        mgr.set_effort_level("")
+
+
+# ── model_preset tests ──────────────────────────────────────────────────────
+
+# 功能：验证 model_preset 默认值为 balanced
+# 设计：新建 manager 后，默认 model_preset 应为 "balanced"
+def test_model_preset_default_is_balanced() -> None:
+    mgr = _make_manager()
+    assert mgr.get_model_preset() == "balanced"
+
+
+# 功能：验证 set_model_preset 可以设置所有合法值
+# 设计：遍历所有合法预设，验证 setter 和 getter 的一致性
+def test_model_preset_set_all_valid_presets() -> None:
+    mgr = _make_manager()
+    for preset in ("fast", "balanced", "powerful"):
+        mgr.set_model_preset(preset)
+        assert mgr.get_model_preset() == preset
+
+
+# 功能：验证 set_model_preset 拒绝非法值
+# 设计：传入非法字符串应抛出 ValueError
+def test_model_preset_rejects_invalid_value() -> None:
+    mgr = _make_manager()
+    with pytest.raises(ValueError):
+        mgr.set_model_preset("invalid")
+
+
+# 功能：验证 set_model_preset 拒绝空字符串
+# 设计：传入空字符串应抛出 ValueError
+def test_model_preset_rejects_empty_string() -> None:
+    mgr = _make_manager()
+    with pytest.raises(ValueError):
+        mgr.set_model_preset("")

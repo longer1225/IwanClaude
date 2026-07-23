@@ -54,6 +54,9 @@ _DEFAULT_CONFIG_PATH = "~/.iwan/config.toml"   # 默认配置文件路径
 _DEFAULT_MAX_STEPS = 20                        # Agent 最大步骤数
 _DEFAULT_MODEL = "claude-sonnet-4-6"           # 默认 LLM 模型
 _DEFAULT_TRACE_FILE = "~/.iwan/traces/daemon.jsonl"  # 默认 trace 文件路径
+_DEFAULT_AUTO_MODE = "off"                     # 默认自动模式（off / read_only / on）
+_DEFAULT_EFFORT_LEVEL = "medium"               # 默认努力等级（minimal / low / medium / high / max）
+_DEFAULT_MODEL_PRESET = "balanced"             # 默认模型预设（fast / balanced / powerful）
 
 
 # ===== 配置数据类 =====
@@ -84,11 +87,17 @@ class AgentConfig:
         engine: Agent 引擎类型（legacy 或 langgraph）
         checkpoint_backend: 检查点存储后端（none, memory, sqlite）
         checkpoint_db_path: SQLite 检查点数据库路径
+        auto_mode: 自动模式（off / read_only / on）
+        effort_level: 努力等级（minimal / low / medium / high / max）
+        model_preset: 模型预设（fast / balanced / powerful）
     """
     max_steps: int = _DEFAULT_MAX_STEPS
     engine: str = "legacy"
     checkpoint_backend: str = "none"  # "none" | "memory" | "sqlite"
     checkpoint_db_path: str = ".iwan/checkpoints.db"
+    auto_mode: str = _DEFAULT_AUTO_MODE  # "off" | "read_only" | "on"
+    effort_level: str = _DEFAULT_EFFORT_LEVEL  # "minimal" | "low" | "medium" | "high" | "max"
+    model_preset: str = _DEFAULT_MODEL_PRESET  # "fast" | "balanced" | "powerful"
 
 
 @dataclass
@@ -226,12 +235,16 @@ class SandboxConfig:
         allow_parent_dirs: 是否允许访问父目录（突破沙箱限制）
         max_file_size: 单个文件最大大小（字节）
         max_total_size: 沙箱总大小限制（字节）
+        search_limited: 是否限制搜索范围（在沙箱内）
+        ask_on_access_denied: 访问被拒绝时是否询问用户
     """
     enabled: bool = True
     root: str = "./sandbox"
     allow_parent_dirs: bool = False
     max_file_size: int = 10 * 1024 * 1024  # 10MB
     max_total_size: int = 100 * 1024 * 1024  # 100MB
+    search_limited: bool = False
+    ask_on_access_denied: bool = True
 
 
 @dataclass
@@ -250,8 +263,6 @@ class RagConfig:
         chunk_overlap: 分块重叠大小（字符数）
         top_k: 检索时返回的最相关文档数
         index_path: 向量索引存储路径
-        search_limited: 是否限制搜索范围（在沙箱内）
-        ask_on_access_denied: 访问被拒绝时是否询问用户
     """
     enabled: bool = False
     embedding_model: str = "deepseek-embed-v3"
@@ -260,8 +271,6 @@ class RagConfig:
     chunk_overlap: int = 64
     top_k: int = 5
     index_path: str = ".iwan/rag_index"
-    search_limited: bool = False
-    ask_on_access_denied: bool = True
 
 
 @dataclass
@@ -405,7 +414,7 @@ def _apply_toml(config: IwanConfig, data: dict[str, Any]) -> None:
         agent = data["agent"]
         if not isinstance(agent, dict):
             raise SystemExit("Config error: [agent] must be a table")
-        unknown_agent: set[str] = set(agent.keys()) - {"max_steps"}
+        unknown_agent: set[str] = set(agent.keys()) - {"max_steps", "auto_mode", "effort_level", "model_preset"}
         if unknown_agent:
             raise SystemExit(f"Unknown [agent] keys: {', '.join(sorted(unknown_agent))}")
         if "max_steps" in agent:
@@ -413,6 +422,21 @@ def _apply_toml(config: IwanConfig, data: dict[str, Any]) -> None:
             if not isinstance(val, int) or val <= 0:
                 raise SystemExit("Config error: agent.max_steps must be a positive integer")
             config.agent.max_steps = val
+        if "auto_mode" in agent:
+            val = agent["auto_mode"]
+            if not isinstance(val, str) or val not in ("off", "read_only", "on"):
+                raise SystemExit("Config error: agent.auto_mode must be 'off', 'read_only', or 'on'")
+            config.agent.auto_mode = val
+        if "effort_level" in agent:
+            val = agent["effort_level"]
+            if not isinstance(val, str) or val not in ("minimal", "low", "medium", "high", "max"):
+                raise SystemExit("Config error: agent.effort_level must be 'minimal', 'low', 'medium', 'high', or 'max'")
+            config.agent.effort_level = val
+        if "model_preset" in agent:
+            val = agent["model_preset"]
+            if not isinstance(val, str) or val not in ("fast", "balanced", "powerful"):
+                raise SystemExit("Config error: agent.model_preset must be 'fast', 'balanced', or 'powerful'")
+            config.agent.model_preset = val
 
     if "llm" in data:
         llm = data["llm"]
@@ -904,3 +928,32 @@ def _apply_env(config: IwanConfig) -> None:
     checkpoint_db_path = os.environ.get("IWAN_AGENT_CHECKPOINT_DB_PATH")
     if checkpoint_db_path is not None:
         config.agent.checkpoint_db_path = checkpoint_db_path
+
+    auto_mode = os.environ.get("IWAN_AUTO_MODE")
+    if auto_mode is not None:
+        if auto_mode not in ("off", "read_only", "on"):
+            raise SystemExit(
+                "Config error: IWAN_AUTO_MODE must be 'off', 'read_only', or 'on',"
+                f" got: {auto_mode!r}"
+            )
+        config.agent.auto_mode = auto_mode
+
+    # 努力等级环境变量覆盖（优先级最高）
+    effort_level = os.environ.get("IWAN_EFFORT_LEVEL")
+    if effort_level is not None:
+        if effort_level not in ("minimal", "low", "medium", "high", "max"):
+            raise SystemExit(
+                "Config error: IWAN_EFFORT_LEVEL must be 'minimal', 'low', 'medium', 'high', or 'max',"
+                f" got: {effort_level!r}"
+            )
+        config.agent.effort_level = effort_level
+
+    # 模型预设环境变量覆盖（优先级最高）
+    model_preset = os.environ.get("IWAN_MODEL_PRESET")
+    if model_preset is not None:
+        if model_preset not in ("fast", "balanced", "powerful"):
+            raise SystemExit(
+                "Config error: IWAN_MODEL_PRESET must be 'fast', 'balanced', or 'powerful',"
+                f" got: {model_preset!r}"
+            )
+        config.agent.model_preset = model_preset

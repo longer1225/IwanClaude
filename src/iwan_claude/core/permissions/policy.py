@@ -156,6 +156,37 @@ DEFAULT_POLICIES: dict[str, ToolPolicy] = {
 # 未在 DEFAULT_POLICIES 中登记的工具的兜底策略
 _UNKNOWN_TOOL_DEFAULT = PermissionDecision.ASK
 
+# Auto Mode 下自动批准的只读工具集合（read_only / on 模式都适用）
+AUTO_MODE_READ_ONLY_TOOLS: frozenset[str] = frozenset({
+    "read_file",
+    "list_dir",
+    "search",
+    "file_exists",
+    "file_stat",
+    "find_files",
+    "git_status",
+    "git_diff",
+    "git_log",
+    "note_save",
+    "list_checkpoints",
+    "restore_checkpoint",
+    "task_get",
+    "task_list",
+    "cache_get",
+    "cache_stats",
+})
+
+# Auto Mode 为 on 时额外自动批准的写工具集合（保守白名单）
+AUTO_MODE_WRITE_ALLOW_TOOLS: frozenset[str] = frozenset({
+    "write_file",
+    "edit_by_search",
+    "edit_by_lines",
+    "insert_at_line",
+    "delete_lines",
+    "generate_docs",
+    "changelog",
+})
+
 # bash 参数中展示用的关键字段映射（用于生成审批提示）
 _PREVIEW_KEY: dict[str, str] = {
     "bash":       "command",

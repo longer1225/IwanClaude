@@ -645,3 +645,78 @@ class SessionManager:
         if session is None:
             raise HandlerError(SESSION_NOT_FOUND, "session not found")
         return session
+
+    def list_sessions(self) -> list[Session]:
+        """
+        列出所有会话，按更新时间倒序排列
+
+        【返回值】
+        - list[Session]: 会话列表，按 updated_at 从新到旧排序
+
+        【执行流程】
+        1. 从存储层读取所有会话的元数据
+        2. 合并内存中的会话状态（确保状态最新）
+        3. 按 updated_at 降序排序
+        4. 返回排序后的列表
+
+        【设计目的】
+        支持 TUI 标签页显示所有会话，
+        以及启动时恢复最近的会话。
+
+        【状态同步说明】
+        内存中的会话状态可能比磁盘上的更新（如正在运行中），
+        所以需要用内存状态覆盖磁盘读取的状态。
+        """
+        # 从存储层读取所有会话
+        stored = self._store.list_sessions()
+        # 构建内存会话字典（用于快速查找）
+        by_id = {s.id: s for s in stored}
+        # 用内存中的会话覆盖（确保状态和 updated_at 最新）
+        for sid, session in self._sessions.items():
+            by_id[sid] = session
+        # 转换为列表并按 updated_at 降序排序
+        result = list(by_id.values())
+        result.sort(key=lambda s: s.updated_at, reverse=True)
+        return result
+
+    async def rename_session(self, sid: str, title: str) -> Session:
+        """
+        重命名会话标题
+
+        【参数说明】
+        - sid: str - 会话 ID
+        - title: str - 新的会话标题
+
+        【返回值】
+        - Session: 更新后的会话对象
+
+        【执行流程】
+        1. 获取会话对象（不存在则抛出错误）
+        2. 更新会话标题
+        3. 更新会话时间戳
+        4. 写入会话元数据到磁盘
+        5. 发布重命名事件
+        6. 返回更新后的会话
+
+        【设计目的】
+        允许用户自定义会话标题，便于在多标签中识别。
+        """
+        # 1. 获取会话对象（不存在则抛出错误）
+        session = self._get_session(sid)
+        # 2. 更新会话标题
+        session.title = title
+        # 3. 更新会话时间戳
+        session.updated_at = _now()
+        # 4. 写入会话元数据到磁盘
+        self._store.write_meta(session)
+        # 5. 发布重命名事件
+        from iwan_claude.core.bus.events import SessionRenamedEvent
+        await self._bus.publish(
+            SessionRenamedEvent(
+                session_id=sid,
+                title=title,
+                ts=session.updated_at,
+            )
+        )
+        # 6. 返回更新后的会话
+        return session

@@ -72,7 +72,7 @@ class GenerateTestsParams(BaseModel):
 
 
 class GenerateTestsTool(BaseTool):
-    """测试代码生成工具
+    '''测试代码生成工具
 
     根据 Python 文件自动生成 pytest 测试用例。
     
@@ -104,7 +104,7 @@ class GenerateTestsTool(BaseTool):
     - 生成的测试用例是基础模板，需要手动完善断言
     - 不支持生成复杂的参数化测试
     - 不支持生成异步函数的测试
-    """
+    '''
     params_model = GenerateTestsParams
     name = "generate_tests"
     description = (
@@ -188,7 +188,7 @@ class GenerateTestsTool(BaseTool):
         return ToolResult(content=f"Tests generated at: {output_path}\n\n{test_content}")
 
     def _extract_functions_and_classes(self, content: str) -> tuple[list[str], list[str]]:
-        """提取函数和类
+        r"""提取函数和类
 
         使用正则表达式从代码中提取函数名和类名。
         

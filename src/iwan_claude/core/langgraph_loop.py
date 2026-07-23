@@ -51,6 +51,7 @@ from iwan_claude.core.bus.events import StepFinishedEvent, StepStartedEvent
 # 导入核心组件
 from iwan_claude.core.compact.compactor import Compactor       # 会话压缩器
 from iwan_claude.core.context import ExecutionContext           # 执行上下文
+from iwan_claude.core.effort import get_effort_params           # 努力等级参数查询
 from iwan_claude.core.events.bus import EventBus                # 事件总线
 from iwan_claude.core.llm.base import LLMProvider               # LLM 提供者接口
 from iwan_claude.core.llm.types import LlmResponse, ToolCallBlock  # LLM 响应类型
@@ -136,10 +137,11 @@ class LangGraphAgentLoop:
         session_id: str = "",
         checkpointer: Any = None,
         has_rag: bool = False,
+        effort_level: str = "medium",
     ) -> None:
         """
         构造函数 - 初始化 LangGraph 执行引擎
-        
+
         参数：
             provider: LLM 提供者，负责调用 LLM API
             registry: 工具注册表，管理可用工具
@@ -151,6 +153,7 @@ class LangGraphAgentLoop:
             session_id: 会话 ID，用于 checkpointer 的 thread_id（可选）
             checkpointer: LangGraph Checkpointer，实现状态持久化（可选）
             has_rag: 是否启用 RAG 功能，影响 system prompt 的构建
+            effort_level: 努力等级（minimal / low / medium / high / max），控制执行深度
         
         【初始化流程】
         1. 保存所有依赖到实例属性
@@ -186,7 +189,10 @@ class LangGraphAgentLoop:
         
         # 是否启用 RAG：影响 system prompt 的构建
         self._has_rag = has_rag
-        
+
+        # 努力等级参数：控制文件读取数、验证轮数、搜索深度等
+        self._effort_params = get_effort_params(effort_level)
+
         # 构建并编译工作流图
         self._graph = self._build_graph()
 
@@ -301,6 +307,10 @@ class LangGraphAgentLoop:
         """
         # 构建 system prompt（包含模型名称、RAG 状态和 CLAUDE.md 上下文）
         system_prompt = build_base_system_prompt(self._llm_model_name, has_rag=self._has_rag, claude_md_context=context.claude_md_context)
+
+        # 努力等级：如果指定了 max_steps_override，覆盖 context 的 max_steps
+        if self._effort_params.max_steps_override > 0:
+            context.max_steps = self._effort_params.max_steps_override
 
         # 创建初始状态：将 ExecutionContext 转换为 LangGraph AgentState
         initial_state: AgentState = {
@@ -498,9 +508,22 @@ class LangGraphAgentLoop:
         tool_calls = state.get("_tool_calls") or []
         # 复制消息历史（避免直接修改原状态）
         new_messages = state["messages"]
+        # 努力等级限制：记录已读取的文件数
+        files_read_count = state.get("_files_read", 0)
 
         # 遍历执行每个工具调用
         for tc in tool_calls:
+            # 努力等级限制：如果达到最大文件读取数，跳过后续读操作
+            if self._effort_params.max_files_read > 0 and tc.name in ("read_file", "list_dir", "file_exists", "file_stat"):
+                if files_read_count >= self._effort_params.max_files_read:
+                    new_messages = _add_tool_result_to_messages(
+                        new_messages, tc.id,
+                        type("R", (), {"content": f"Error: effort level limit reached ({self._effort_params.max_files_read} files max). "
+                                                   "Increase effort level to read more files.",
+                                         "is_error": True})()
+                    )
+                    continue
+                files_read_count += 1
             result = await invoke_tool(
                 self._registry,              # 工具注册表
                 tc,                          # 工具调用请求
@@ -674,7 +697,13 @@ def _assistant_msg_from_response(response: LlmResponse) -> dict[str, Any]:
         # 添加 thinking blocks（如果有）
         if response.thinking_blocks:
             for block in response.thinking_blocks:
-                blocks.append({"type": "text", "text": block})
+                # thinking_blocks 中的元素可能是 dict（如 {"thinking": "...", "signature": "..."}），
+                # 统一转换为字符串后再添加
+                if isinstance(block, dict):
+                    text = block.get("thinking") or block.get("text") or str(block)
+                else:
+                    text = str(block)
+                blocks.append({"type": "text", "text": text})
         # 添加文本响应（如果有）
         if response.text:
             blocks.append({"type": "text", "text": response.text})
@@ -693,7 +722,16 @@ def _assistant_msg_from_response(response: LlmResponse) -> dict[str, Any]:
         content = response.text or ""
         # 如果有 thinking blocks，添加到文本前面
         if response.thinking_blocks:
-            content = "\n".join(response.thinking_blocks) + "\n" + content
+            # thinking_blocks 中的元素可能是 dict（如 {"thinking": "...", "signature": "..."}），
+            # 统一转换为字符串后再拼接
+            thinking_texts = []
+            for block in response.thinking_blocks:
+                if isinstance(block, dict):
+                    # 提取 thinking 或 text 字段，如果没有则转 JSON 字符串
+                    thinking_texts.append(block.get("thinking") or block.get("text") or str(block))
+                else:
+                    thinking_texts.append(str(block))
+            content = "\n".join(thinking_texts) + "\n" + content
         return {"role": "assistant", "content": content}
 
 

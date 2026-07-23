@@ -5,8 +5,10 @@ import os
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 from collections.abc import AsyncGenerator
+from pathlib import Path
 
 import pytest
 
@@ -21,14 +23,24 @@ def free_port() -> int:
 
 @pytest.fixture
 async def running_daemon(free_port: int) -> AsyncGenerator[subprocess.Popen[bytes], None]:
+    tmp_dir = Path(tempfile.mkdtemp(prefix="iwan_daemon_"))
     env = os.environ.copy()
     env["IWAN_PORT"] = str(free_port)
     env["IWAN_LOG_FILE"] = ""
     env["IWAN_LOG_LEVEL"] = "WARNING"
+    env["IWAN_SESSIONS_DIR"] = str(tmp_dir / "sessions")
+    env["IWAN_POLICY_FILE"] = str(tmp_dir / "policy.toml")
 
-    proc = subprocess.Popen([sys.executable, "-m", "iwan_claude.core"], env=env)
+    # 启动 daemon 子进程，将 stderr 重定向到临时日志以便排查启动失败
+    stderr_path = tmp_dir / "daemon_stderr.log"
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "iwan_claude.core"],
+        env=env,
+        stderr=open(stderr_path, "w", encoding="utf-8"),
+    )
 
-    deadline = time.monotonic() + 3.0
+    # 首次冷启动需要编译字节码并加载持久化策略，超时放宽到 10 秒
+    deadline = time.monotonic() + 10.0
     while time.monotonic() < deadline:
         await asyncio.sleep(0.05)
         try:
@@ -41,7 +53,8 @@ async def running_daemon(free_port: int) -> AsyncGenerator[subprocess.Popen[byte
     else:
         proc.terminate()
         proc.wait()
-        pytest.fail("Daemon did not start within 3 seconds")
+        stderr_text = stderr_path.read_text(encoding="utf-8", errors="ignore") if stderr_path.exists() else ""
+        pytest.fail(f"Daemon did not start within 10 seconds\nstderr:\n{stderr_text}")
 
     yield proc
 
@@ -51,3 +64,5 @@ async def running_daemon(free_port: int) -> AsyncGenerator[subprocess.Popen[byte
     except subprocess.TimeoutExpired:
         proc.kill()
         proc.wait()
+    import shutil
+    shutil.rmtree(tmp_dir, ignore_errors=True)

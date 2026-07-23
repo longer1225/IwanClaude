@@ -38,10 +38,10 @@ async def test_bash_timeout() -> None:
 
 
 # 功能：验证 stderr 被合并到 stdout 输出中
-# 设计：只写 stderr 的命令（>&2 echo），输出应该出现在合并后的 content 里
+# 设计：使用跨平台的 python 命令写 stderr，输出应该出现在合并后的 content 里
 @pytest.mark.asyncio
 async def test_bash_stderr_merged() -> None:
-    result = await BashTool().invoke({"command": "echo err >&2"})
+    result = await BashTool().invoke({"command": "python -c \"import sys; sys.stderr.write('err\\n')\""})
     assert not result.is_error
     assert "err" in result.content
 
