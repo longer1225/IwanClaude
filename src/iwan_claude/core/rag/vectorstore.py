@@ -125,6 +125,44 @@ class VectorStore(ABC):
         ...
 
     @abstractmethod
+    async def get_by_ids(self, chunk_ids: list[str]) -> list[Chunk]:
+        """
+        根据 chunk_id 列表获取 Chunk
+
+        【参数说明】
+        - chunk_ids: list[str] - chunk_id 列表
+
+        【返回值】
+        - list[Chunk]: Chunk 对象列表（不存在的 id 会被跳过）
+
+        【设计目的】
+        用于 Parent-Child 检索：根据子 chunk 的 parent_id 查找父级 chunk，
+        提供更完整的上下文。
+        """
+        ...
+
+    @abstractmethod
+    async def search_by_text(
+        self, query: str, top_k: int = 5
+    ) -> list[tuple[Chunk, float]]:
+        """
+        关键词搜索 - 在所有 Chunk 中做精确文本匹配（不使用向量）
+
+        【参数说明】
+        - query: str - 查询文本
+        - top_k: int - 返回前 K 个结果（默认 5）
+
+        【返回值】
+        - list[tuple[Chunk, float]]: (Chunk, 关键词匹配分数) 列表
+
+        【设计目的】
+        用于 Adaptive RAG 的 grep 策略：
+        当用户查询是精确的代码标识符（如 "AuthService"）时，
+        关键词搜索比语义检索更准确。
+        """
+        ...
+
+    @abstractmethod
     def save(self, path: Path) -> None:
         """
         持久化到磁盘
@@ -417,6 +455,80 @@ class MemoryVectorStore(VectorStore):
             results.append((chunk, score))
 
         return results
+
+    async def get_by_ids(self, chunk_ids: list[str]) -> list[Chunk]:
+        """
+        根据 chunk_id 列表获取 Chunk
+
+        【参数说明】
+        - chunk_ids: list[str] - chunk_id 列表
+
+        【返回值】
+        - list[Chunk]: Chunk 对象列表（不存在的 id 会被跳过）
+
+        【执行流程】
+        1. 遍历 chunk_ids
+        2. 通过 _chunk_id_map 查找索引
+        3. 从 _chunks 获取 Chunk 对象
+        4. 返回结果列表
+
+        【时间复杂度】
+        O(k)，k 为 chunk_ids 的数量（每次查找是 O(1) 哈希查找）
+        """
+        result: list[Chunk] = []
+        for chunk_id in chunk_ids:
+            if chunk_id in self._chunk_id_map:
+                result.append(self._chunks[self._chunk_id_map[chunk_id]])
+        return result
+
+    async def search_by_text(
+        self, query: str, top_k: int = 5
+    ) -> list[tuple[Chunk, float]]:
+        """
+        关键词搜索 - 在所有 Chunk 中做精确文本匹配
+
+        【参数说明】
+        - query: str - 查询文本
+        - top_k: int - 返回前 K 个结果（默认 5）
+
+        【返回值】
+        - list[tuple[Chunk, float]]: (Chunk, 关键词匹配分数) 列表
+
+        【执行流程】
+        1. 提取查询中的关键词（正则 \w+）
+        2. 遍历所有 Chunk，计算关键词匹配分数
+        3. 按分数降序排序，返回前 top_k 个结果
+
+        【评分算法】
+        - 每个匹配的关键词 +1.0 分
+        - 额外出现的关键词 +0.1 分（鼓励关键词密集的 Chunk）
+        - 最终分数归一化到 [0, 1]
+
+        【设计目的】
+        用于 Adaptive RAG 的 grep 策略：
+        代码标识符（如 "AuthService"）用关键词搜索比语义检索更准确。
+        """
+        import re
+
+        # 提取查询中的关键词
+        keywords = re.findall(r"\w+", query.lower())
+        if not keywords:
+            return []
+
+        results: list[tuple[Chunk, float]] = []
+        for chunk in self._chunks:
+            chunk_text = chunk.text.lower()
+            score = 0.0
+            for kw in keywords:
+                if kw in chunk_text:
+                    score += 1.0
+                    score += chunk_text.count(kw) * 0.1
+            if score > 0:
+                results.append((chunk, min(score / len(keywords), 1.0)))
+
+        # 按分数降序排序
+        results.sort(key=lambda x: x[1], reverse=True)
+        return results[:top_k]
 
     def _cosine_similarity(self, a: list[float], b: list[float]) -> float:
         """

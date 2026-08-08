@@ -52,6 +52,7 @@ from iwan_claude.core.memory.claude_md import (               # CLAUDE.md 处理
     load_claude_md,
     render_claude_md_prompt,
 )
+from iwan_claude.core.memory.manager import MemoryManager       # 跨会话记忆管理器
 from iwan_claude.core.permissions.manager import PermissionManager  # 权限管理
 from iwan_claude.core.runs import RUNS_DIR, new_run_id         # 运行相关工具
 from iwan_claude.core.session.model import Session             # 会话模型
@@ -64,9 +65,11 @@ from iwan_claude.core.subagent.tool import (                   # 子 Agent 工�
     SpawnAgentTool,
     SpawnAgentsTool,
 )
+from iwan_claude.core.rag.adaptive import AdaptiveRetriever    # 自适应检索器
 from iwan_claude.core.rag.chunker import DocumentChunker       # 文档分块器
 from iwan_claude.core.rag.embedding import get_embedding_provider  # 嵌入提供者
 from iwan_claude.core.rag.index import KnowledgeIndexManager  # 知识索引管理器
+from iwan_claude.core.rag.llm_client import LLMClient         # 轻量 LLM 客户端
 from iwan_claude.core.rag.tools import (                      # RAG 工具
     ForgetKnowledgeTool,
     IndexKnowledgeTool,
@@ -203,6 +206,7 @@ class AgentRunner:
         permission_manager: PermissionManager | None = None,
         mcp_manager: McpServerManager | None = None,
         checkpointer: Any | None = None,
+        memory_manager: MemoryManager | None = None,
     ) -> None:
         """
         构造函数 - 注入运行时依赖
@@ -252,6 +256,9 @@ class AgentRunner:
         
         # 外部传入的 checkpointer（跨 run 共享），如果没有传入则延迟初始化
         self._checkpointer = checkpointer
+
+        # 跨会话记忆管理器（可选）：用于 recall 检索相关记忆注入 system prompt
+        self._memory_manager = memory_manager
         
         # 初始化沙箱配置：设置文件访问的安全限制
         init_sandbox(config.sandbox)
@@ -773,33 +780,54 @@ class AgentRunner:
             try:
                 # 创建向量存储
                 vector_store = get_vector_store()
-                
+
                 # 创建嵌入提供者
                 embedding_provider = get_embedding_provider(
                     self._config.rag,
                     self._config.llm.base_url,
                 )
-                
+
                 # 创建文档分块器
                 chunker = DocumentChunker(
                     chunk_size=self._config.rag.max_chunk_size,
                     chunk_overlap=self._config.rag.chunk_overlap,
                 )
-                
-                # 创建知识索引管理器
+
+                # 尝试创建轻量 LLM 客户端（用于 Contextual Retrieval + 查询重写 + Reranking）
+                # LLMClient 使用 OpenAI 兼容的 /chat/completions 端点
+                # 如果 provider 是 anthropic，需要把 base_url 从 /anthropic 改成 /v1
+                llm_client = None
+                try:
+                    llm_base_url = self._config.llm.base_url
+                    if self._config.llm.provider == "anthropic" and "/anthropic" in llm_base_url:
+                        llm_base_url = llm_base_url.replace("/anthropic", "/v1")
+                    llm_client = LLMClient(
+                        model=self._config.llm.default_model,
+                        base_url=llm_base_url,
+                        api_key_env=self._config.llm.api_key_env,
+                    )
+                except Exception:
+                    # 没有 API Key 时降级为无 LLM 模式（不影响基本 RAG 功能）
+                    pass
+
+                # 创建知识索引管理器（传入 LLM 客户端启用 Contextual Retrieval）
                 index_manager = KnowledgeIndexManager(
                     vector_store=vector_store,
                     embedding_provider=embedding_provider,
                     chunker=chunker,
                     index_path=self._config.rag.index_path,
+                    llm_client=llm_client,
                 )
-                
+
                 # 加载索引
                 index_manager.load()
-                
+
+                # 创建自适应检索器（Adaptive RAG + CRAG + Reranking）
+                adaptive_retriever = AdaptiveRetriever(index_manager, llm_client=llm_client)
+
                 # 注册 RAG 工具
                 if _ok("search_knowledge"):
-                    registry.register(SearchKnowledgeTool(index_manager))
+                    registry.register(SearchKnowledgeTool(index_manager, adaptive_retriever))
                 if _ok("index_knowledge"):
                     registry.register(IndexKnowledgeTool(index_manager))
                 if _ok("forget_knowledge"):
@@ -927,6 +955,14 @@ class AgentRunner:
         for h in self._extra_handlers:
             bus.subscribe(h)
 
+        # 检索跨会话记忆（如果配置了 MemoryManager），注入 system prompt
+        memory_context = ""
+        if self._memory_manager is not None:
+            try:
+                memory_context = await self._memory_manager.recall(goal)
+            except Exception:
+                logging.getLogger(__name__).exception("memory recall failed")
+
         # 创建执行上下文（封装所有运行时状态）
         context = ExecutionContext(
             run_id=run_id,
@@ -938,6 +974,7 @@ class AgentRunner:
             project_context=project_ctx,     # 项目上下文
             claude_md_context=claude_md_prompt, # CLAUDE.md 上下文
             system_prompt_override=system_prompt_override, # 自定义 system prompt
+            memory_context=memory_context,   # 跨会话记忆
         )
         
         # 记录预填充消息的数量，用于后续保存时跳过已存在的消息
@@ -1020,10 +1057,25 @@ class AgentRunner:
                 # ========== 第五步：选择执行引擎 ==========
                 
                 if self._config.agent.engine == "langgraph":
-                    # 使用 LangGraph 引擎（支持 checkpoint 和状态管理）
+                    # 使用 LangGraph ReAct 引擎（chat→tools 循环，支持 checkpoint）
                     from iwan_claude.core.langgraph_loop import LangGraphAgentLoop
 
                     loop = LangGraphAgentLoop(
+                        provider, registry, bus,
+                        llm_model_name=self._config.llm.default_model,
+                        permission_manager=self._permission_manager,
+                        compactor=compactor,
+                        compact_threshold=self._config.compaction.auto_threshold,
+                        session_id=session_id_str,
+                        checkpointer=checkpointer,
+                        has_rag=has_rag,
+                        effort_level=self._permission_manager.get_effort_level() if self._permission_manager else "medium",
+                    )
+                elif self._config.agent.engine == "plan_execute":
+                    # 使用 Plan & Execute 引擎（先规划再执行再反思，适合复杂多步任务）
+                    from iwan_claude.core.langgraph_plan_execute import LangGraphPlanExecuteLoop
+
+                    loop = LangGraphPlanExecuteLoop(
                         provider, registry, bus,
                         llm_model_name=self._config.llm.default_model,
                         permission_manager=self._permission_manager,

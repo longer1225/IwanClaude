@@ -72,6 +72,8 @@ class ExecutionContext:
     result: str = ""
     # skill 或 subagent 角色可覆盖默认 system prompt
     system_prompt_override: str | None = None
+    # 跨会话记忆上下文（由 MemoryManager.recall() 检索得到，注入 system prompt）
+    memory_context: str = ""
 
     # 初始化消息历史，优先使用 session 完整回放内容
     def __post_init__(self) -> None:
@@ -127,7 +129,11 @@ class ExecutionContext:
                 + self.session_notes.strip()
                 + "\n\nRemember important durable facts by calling note_save."
             )
-        
+
+        # 追加跨会话记忆（由 MemoryManager.recall() 检索得到）
+        if self.memory_context.strip():
+            parts.append("\n\n## Memory\n" + self.memory_context.strip())
+
         # 合并所有部分
         return "".join(parts)
 

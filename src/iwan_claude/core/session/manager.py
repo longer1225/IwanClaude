@@ -31,6 +31,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import uuid
 from collections.abc import Callable
@@ -56,6 +57,7 @@ from iwan_claude.core.skills.loader import SkillLoader
 # 类型检查时导入（避免循环导入）
 if TYPE_CHECKING:
     from iwan_claude.core.llm.base import LLMProvider
+    from iwan_claude.core.memory.manager import MemoryManager
     from iwan_claude.core.runner import AgentRunner
 
 # 会话错误码定义
@@ -127,6 +129,7 @@ class SessionManager:
         runner_factory: Callable[[], AgentRunner],
         bus: EventBus,
         provider: LLMProvider | None = None,
+        memory_manager: MemoryManager | None = None,
     ) -> None:
         """
         初始化会话管理器
@@ -158,6 +161,8 @@ class SessionManager:
         self._bus = bus
         # LLM 提供商（用于消息压缩）
         self._provider = provider
+        # 跨会话记忆管理器（可选）：会话结束后存储对话，供后续检索
+        self._memory_manager = memory_manager
         # 内存中的会话字典（键为会话 ID，值为 Session 对象）
         self._sessions: dict[str, Session] = {}
         # 会话级别的锁字典（键为会话 ID，值为 asyncio.Lock）
@@ -366,7 +371,7 @@ class SessionManager:
             # 创建 AgentRunner 实例
             runner = self._runner_factory()
             # 执行运行并捕获结果
-            await runner.run_and_capture(
+            outcome = await runner.run_and_capture(
                 goal,
                 run_id=run_id,
                 session=session,
@@ -374,6 +379,24 @@ class SessionManager:
                 system_prompt_override=system_prompt_override,
                 tool_whitelist=tool_whitelist,
             )
+
+            # 存储对话到跨会话记忆（供后续会话语义检索）
+            # 用原始用户消息 content（而非 skill 展开后的 goal）作为查询锚点
+            if self._memory_manager is not None and outcome.result:
+                try:
+                    await self._memory_manager.remember_conversation(
+                        user_msg=content,
+                        assistant_msg=outcome.result,
+                        session_id=sid,
+                    )
+                    logging.getLogger(__name__).info(
+                        "memory: remembered conversation session=%s result_len=%d",
+                        sid, len(outcome.result),
+                    )
+                except Exception:
+                    logging.getLogger(__name__).exception(
+                        "memory: remember_conversation failed session=%s", sid
+                    )
 
             # ==================== 更新会话状态 ====================
             session.updated_at = _now()

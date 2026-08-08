@@ -39,6 +39,7 @@ from typing import Any
 
 from iwan_claude.core.rag.chunker import Chunk, DocumentChunker
 from iwan_claude.core.rag.embedding import EmbeddingProvider
+from iwan_claude.core.rag.llm_client import LLMClient
 from iwan_claude.core.rag.vectorstore import VectorStore
 
 
@@ -123,6 +124,8 @@ class KnowledgeIndexManager:
         embedding_provider: EmbeddingProvider,
         chunker: DocumentChunker,
         index_path: str = ".iwan/rag_index",
+        *,
+        llm_client: LLMClient | None = None,
     ) -> None:
         """
         初始化知识索引管理器
@@ -132,6 +135,9 @@ class KnowledgeIndexManager:
         - embedding_provider: EmbeddingProvider - 嵌入服务提供者
         - chunker: DocumentChunker - 文档分块器
         - index_path: str - 索引存储路径（默认 ".iwan/rag_index"）
+        - llm_client: LLMClient | None - 轻量 LLM 客户端（可选）
+            用于 Contextual Retrieval（生成上下文摘要）和查询重写。
+            传入 None 时降级为无上下文 + 硬编码同义词重写。
 
         【字段说明】
         - _vector_store: VectorStore - 向量存储
@@ -140,6 +146,7 @@ class KnowledgeIndexManager:
         - _index_path: Path - 索引存储路径
         - _meta_path: Path - 元数据文件路径
         - _meta: dict - 索引元数据
+        - _llm_client: LLMClient | None - LLM 客户端（可选）
 
         【初始化流程】
         1. 保存核心组件引用
@@ -151,7 +158,8 @@ class KnowledgeIndexManager:
         manager = KnowledgeIndexManager(
             vector_store=MemoryVectorStore(),
             embedding_provider=EmbeddingProvider(...),
-            chunker=DocumentChunker()
+            chunker=DocumentChunker(),
+            llm_client=LLMClient(...)  # 可选，启用 Contextual Retrieval
         )
         ```
         """
@@ -165,6 +173,8 @@ class KnowledgeIndexManager:
         self._index_path = Path(index_path)
         # 元数据文件路径
         self._meta_path = self._index_path / "index_meta.json"
+        # LLM 客户端（可选，用于 Contextual Retrieval 和查询重写）
+        self._llm_client = llm_client
         # 加载元数据
         self._load_meta()
 
@@ -322,18 +332,26 @@ class KnowledgeIndexManager:
         【执行流程】
         1. 使用分块器将文件分割为 Chunk
         2. 如果没有 Chunk，直接返回
-        3. 提取所有 Chunk 的文本内容
-        4. 调用嵌入服务将文本转换为向量
-        5. 删除该文件之前的所有索引（避免重复）
-        6. 添加新的 Chunk 和向量到向量存储
+        3. Contextual Retrieval：如果有 LLM 客户端，给每个 Chunk 生成上下文摘要
+        4. 提取文本用于 embedding（有 context 时拼接到 text 前面）
+        5. 调用嵌入服务将文本转换为向量
+        6. 删除该文件之前的所有索引（避免重复）
+        7. 添加新的 Chunk 和向量到向量存储
+
+        【Contextual Retrieval 策略】
+        Anthropic 提出的上下文增强检索策略：
+        - 在 embedding 前，用 LLM 给每个 chunk 生成 50-100 token 的上下文摘要
+        - 摘要说明该 chunk 在项目中的位置和作用
+        - embedding 时将摘要拼接到 chunk text 前面
+        - chunk.text 保持原始内容不变（检索返回时不含摘要）
+        - 检索失败率可降低 49%
+
+        【降级处理】
+        - 没有 LLM 客户端时，跳过上下文生成，直接用原始 text embedding
+        - LLM 调用失败时（返回空字符串），该 chunk 无上下文
 
         【设计目的】
         将单个文件转换为向量索引，便于后续检索。
-
-        【注意事项】
-        - 文件不存在或无法解析时，返回空 Chunk 列表
-        - 分块策略根据文件类型自动选择
-        - 索引前先删除旧索引，确保索引一致性
         """
         # 使用分块器将文件分割为 Chunk
         chunks = self._chunker.chunk_file(path)
@@ -341,8 +359,23 @@ class KnowledgeIndexManager:
         if not chunks:
             return
 
-        # 提取所有 Chunk 的文本内容
-        texts = [c.text for c in chunks]
+        # Contextual Retrieval：如果有 LLM 客户端，给每个 Chunk 生成上下文摘要
+        if self._llm_client:
+            for chunk in chunks:
+                context = await self._llm_client.generate_context(chunk.text, chunk.source_path)
+                if context:
+                    chunk.context = context
+
+        # 提取文本用于 embedding
+        # 如果有 context，拼接到 text 前面（Contextual Retrieval 策略）
+        # 注意：chunk.text 保持原始内容不变，拼接只用于 embedding
+        texts = []
+        for c in chunks:
+            if c.context:
+                texts.append(f"{c.context}\n\n{c.text}")
+            else:
+                texts.append(c.text)
+
         # 调用嵌入服务将文本转换为向量
         vectors = await self._embedding_provider.embed(texts)
 
@@ -502,8 +535,12 @@ class KnowledgeIndexManager:
         - 语义权重越高，越重视语义理解
         - 关键词权重越高，越重视精确匹配
         """
-        # 查询重写：生成同义词查询列表
-        rewritten_queries = self._rewrite_query(query)
+        # 查询重写：如果有 LLM 客户端，用 LLM 生成查询变体；否则降级为硬编码同义词
+        # LLM 重写能理解查询语义，生成更准确的变体，比硬编码同义词表覆盖面更广
+        if self._llm_client:
+            rewritten_queries = await self._llm_client.rewrite_query(query)
+        else:
+            rewritten_queries = self._rewrite_query(query)
         # 存储所有语义检索结果（chunk_id -> (Chunk, score)）
         all_results: dict[str, tuple[Chunk, float]] = {}
 
@@ -539,8 +576,12 @@ class KnowledgeIndexManager:
 
         # 按综合分数降序排序
         scored_results.sort(key=lambda x: x[1], reverse=True)
-        # 返回前 top_k 个结果
-        return scored_results[:top_k]
+        # 取前 top_k 个结果
+        top_results = scored_results[:top_k]
+        # Parent-Child：为有 parent_id 的 chunk 附带父级上下文
+        # 检索到子 chunk（如方法）后，返回其父级 chunk（如类）的文本，提供更完整的上下文
+        await self._enrich_with_parent_context(top_results)
+        return top_results
 
     def _rewrite_query(self, query: str) -> list[str]:
         """
@@ -674,6 +715,53 @@ class KnowledgeIndexManager:
                 results[chunk.chunk_id] = min(score / len(keywords), 1.0)
 
         return results
+
+    async def _enrich_with_parent_context(
+        self, results: list[tuple[Chunk, float]]
+    ) -> None:
+        """
+        为检索结果附带父级上下文（Parent-Child 策略）
+
+        【参数说明】
+        - results: list[tuple[Chunk, float]] - 检索结果列表（原地修改 chunk.metadata）
+
+        【执行流程】
+        1. 收集所有有 parent_id 的 chunk 的 parent_id（去重）
+        2. 批量查找父级 chunk（一次 API 调用）
+        3. 将父级 chunk 的 text 存入子 chunk 的 metadata["parent_context"]
+
+        【Parent-Child 策略说明】
+        检索到子 chunk（如类的方法）后，其上下文可能不够完整。
+        通过 parent_id 找到父级 chunk（如整个类），将父级文本存入 metadata，
+        供后续生成阶段使用。
+
+        【示例】
+        检索到 `def search(self, query)` → parent_id 指向 `class KnowledgeIndexManager`
+        → metadata["parent_context"] = "class KnowledgeIndexManager:\n    ..."
+
+        【性能优化】
+        批量查找父级 chunk，避免多次调用 get_by_ids。
+        """
+        # 收集所有需要查找的 parent_id（去重）
+        parent_ids = set()
+        for chunk, _ in results:
+            if chunk.parent_id:
+                parent_ids.add(chunk.parent_id)
+
+        # 如果没有需要查找的父级，直接返回
+        if not parent_ids:
+            return
+
+        # 批量查找父级 chunk（一次调用）
+        parent_chunks = await self._vector_store.get_by_ids(list(parent_ids))
+        # 构建 parent_id -> Chunk 的映射
+        parent_map = {c.chunk_id: c for c in parent_chunks}
+
+        # 将父级上下文存入子 chunk 的 metadata
+        for chunk, _ in results:
+            if chunk.parent_id and chunk.parent_id in parent_map:
+                parent = parent_map[chunk.parent_id]
+                chunk.metadata["parent_context"] = parent.text
 
     def rebuild_index(self) -> None:
         """

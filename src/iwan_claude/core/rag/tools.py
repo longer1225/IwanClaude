@@ -154,20 +154,26 @@ class SearchKnowledgeTool(BaseTool):
         "required": ["query"],
     }
 
-    def __init__(self, index_manager: Any) -> None:
+    def __init__(self, index_manager: Any, adaptive_retriever: Any = None) -> None:
         """
         初始化搜索知识库工具
 
         【参数说明】
         - index_manager: Any - 知识索引管理器
+        - adaptive_retriever: Any - 自适应检索器（可选）
+            传入时启用 Adaptive RAG + CRAG + Reranking 全流程。
+            传入 None 时降级为原始的 hybrid_search/search。
 
         【字段说明】
         - _index_manager: Any - 知识索引管理器引用
+        - _adaptive_retriever: Any - 自适应检索器引用（可选）
         """
         # 调用父类初始化
         super().__init__()
         # 保存知识索引管理器引用
         self._index_manager = index_manager
+        # 保存自适应检索器引用（可选）
+        self._adaptive_retriever = adaptive_retriever
 
     async def invoke(self, params: dict[str, object]) -> ToolResult:
         """
@@ -181,23 +187,94 @@ class SearchKnowledgeTool(BaseTool):
 
         【执行流程】
         1. 使用 Pydantic 验证参数
-        2. 根据 hybrid 参数选择检索方式
-        3. 如果没有结果，返回提示信息
-        4. 格式化检索结果
-        5. 返回 ToolResult
+        2. 如果有 adaptive_retriever，使用自适应检索（Adaptive RAG + CRAG + Reranking）
+        3. 否则根据 hybrid 参数选择检索方式（原始逻辑）
+        4. 如果没有结果，返回提示信息
+        5. 格式化检索结果
+        6. 返回 ToolResult
 
-        【检索方式】
+        【自适应检索模式】
+        当 adaptive_retriever 存在时：
+        - LLM 自动判断查询类型（direct/grep/rag）
+        - CRAG 质量评估 + 回退
+        - LLM Reranking 精排
+        - 返回结果包含策略信息
+
+        【原始检索模式】
+        当 adaptive_retriever 为 None 时：
         - hybrid=True: 使用混合检索（语义 + 关键词）
         - hybrid=False: 使用纯语义检索
 
         【结果格式化】
         - 每个结果包含：分数、来源、行号、符号/章节、内容预览
+        - 自适应模式额外显示策略信息
         - 内容预览超过 500 字符时截断
         """
         # 使用 Pydantic 验证参数
         p = SearchKnowledgeParams.model_validate(params)
 
-        # 根据 hybrid 参数选择检索方式
+        # 如果有 AdaptiveRetriever，使用自适应检索全流程
+        if self._adaptive_retriever:
+            result = await self._adaptive_retriever.retrieve(p.query, p.top_k)
+
+            # direct 策略：不需要检索
+            if result.strategy == "direct":
+                return ToolResult(
+                    content="Query classified as 'direct' - no retrieval needed. "
+                    "This appears to be a simple question that doesn't require code search."
+                )
+
+            # 没有结果
+            if not result.chunks:
+                return ToolResult(content="No results found in knowledge base.")
+
+            # 格式化结果（含策略信息）
+            lines: list[str] = [
+                f"[Strategy: {result.strategy} | Quality: {result.quality} "
+                f"| Rewritten: {result.rewritten} | Reranked: {result.reranked}]"
+            ]
+            for i, (chunk, score) in enumerate(result.chunks, 1):
+                header = f"--- Result {i} (score: {score:.4f}) ---"
+                source = f"Source: {chunk.source_path}"
+                location = f"Lines: {chunk.start_line}-{chunk.end_line}"
+                if chunk.symbol:
+                    symbol = f"Symbol: {chunk.symbol}"
+                elif chunk.section_path:
+                    symbol = f"Section: {' / '.join(chunk.section_path)}"
+                else:
+                    symbol = ""
+
+                # Contextual Retrieval 上下文摘要
+                context_line = ""
+                if chunk.context:
+                    context_line = f"Context: {chunk.context}"
+
+                # Parent-Child 父级上下文
+                parent_line = ""
+                if "parent_context" in chunk.metadata:
+                    parent_preview = chunk.metadata["parent_context"][:200]
+                    parent_line = f"Parent: {parent_preview}..."
+
+                content_preview = chunk.text.strip()
+                if len(content_preview) > 500:
+                    content_preview = content_preview[:500] + "..."
+
+                lines.append(header)
+                lines.append(source)
+                lines.append(location)
+                if symbol:
+                    lines.append(symbol)
+                if context_line:
+                    lines.append(context_line)
+                if parent_line:
+                    lines.append(parent_line)
+                lines.append("")
+                lines.append(content_preview)
+                lines.append("")
+
+            return ToolResult(content="\n".join(lines))
+
+        # 原始逻辑：根据 hybrid 参数选择检索方式
         if p.hybrid:
             # 使用混合检索
             results = await self._index_manager.hybrid_search(p.query, p.top_k, p.filters)

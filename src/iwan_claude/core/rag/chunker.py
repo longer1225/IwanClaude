@@ -65,15 +65,26 @@ class Chunk(BaseModel):
     - section_path: list[str] | None - Markdown 章节路径（如 ["第一章", "1.1 节"]）
     - chunk_id: str - 块的唯一标识（UUID 前 12 位）
     - metadata: dict[str, Any] - 自定义元数据
+    - context: str | None - Contextual Retrieval 上下文摘要
+        （LLM 生成的 50-100 token 上下文，说明该块在项目中的位置和作用，
+         embedding 时拼接到 text 前面以提升检索质量）
+    - parent_id: str | None - 父级 Chunk 的 ID
+        （Parent-Child 检索用：方法→类、段落→章节，
+         检索到子 chunk 后可返回父级 chunk 提供更完整的上下文）
 
     【使用场景】
     - 代码文件：symbol 字段存储函数/类名，便于定位
     - 文档文件：section_path 字段存储章节路径，便于导航
     - 数据文件：metadata 字段存储额外信息，便于过滤
+    - Contextual Retrieval：context 字段存储 LLM 生成的上下文摘要
+    - Parent-Child：parent_id 字段记录父子关系，支持上下文扩展
 
     【设计目的】
     每个 Chunk 对象包含足够的上下文信息，
     在检索时可以精确定位来源，并提供丰富的元数据用于过滤。
+    context 和 parent_id 字段支持高级 RAG 策略：
+    - context：解决"这个函数属于哪个模块"的上下文缺失问题
+    - parent_id：解决"检索到片段但周围上下文不够"的问题
     """
     text: str
     source_path: str
@@ -83,6 +94,10 @@ class Chunk(BaseModel):
     section_path: list[str] | None = None
     chunk_id: str = Field(default_factory=lambda: uuid.uuid4().hex[:12])
     metadata: dict[str, Any] = Field(default_factory=dict)
+    # Contextual Retrieval 上下文摘要（LLM 生成，embedding 时拼接到 text 前面）
+    context: str | None = None
+    # Parent-Child 父级 Chunk ID（方法→类、段落→章节）
+    parent_id: str | None = None
 
 
 @dataclass
@@ -233,7 +248,12 @@ class DocumentChunker:
             return ""
 
         # 递归遍历 AST 节点
-        def visit_node(node: ast.AST, parent_symbols: list[str] = []) -> None:
+        # parent_chunk_id 参数用于 Parent-Child 关系：方法的 parent_id 指向所属类的 chunk_id
+        def visit_node(
+            node: ast.AST,
+            parent_symbols: list[str] = [],
+            parent_chunk_id: str | None = None,
+        ) -> None:
             # 如果是函数或类定义
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 # 获取起始行号和结束行号
@@ -247,25 +267,33 @@ class DocumentChunker:
                 chunk_text = "".join(lines[start_line - 1:end_line])
 
                 # 如果文本不为空，创建 Chunk
+                # parent_id 设置为父级 Chunk 的 ID（Parent-Child：方法→类）
                 if chunk_text.strip():
-                    chunks.append(Chunk(
+                    chunk = Chunk(
                         text=chunk_text,
                         source_path=str(path),
                         start_line=start_line,
                         end_line=end_line,
                         symbol=full_symbol,
                         metadata={"header_context": symbol},
-                    ))
+                        parent_id=parent_chunk_id,
+                    )
+                    chunks.append(chunk)
+                    # 子节点的父级 ID 为当前 Chunk 的 ID
+                    child_parent_id = chunk.chunk_id
+                else:
+                    # 没有文本时，子节点继承当前父级 ID
+                    child_parent_id = parent_chunk_id
 
                 # 更新父符号列表（用于嵌套符号）
                 new_parent = parent_symbols + ([symbol] if symbol else [])
-                # 递归处理子节点
+                # 递归处理子节点，传入当前 Chunk 的 ID 作为子节点的 parent_id
                 for child in ast.iter_child_nodes(node):
-                    visit_node(child, new_parent)
+                    visit_node(child, new_parent, child_parent_id)
             else:
-                # 非函数/类节点，递归处理子节点
+                # 非函数/类节点，递归处理子节点（继承 parent_id）
                 for child in ast.iter_child_nodes(node):
-                    visit_node(child, parent_symbols)
+                    visit_node(child, parent_symbols, parent_chunk_id)
 
         # 开始遍历 AST
         visit_node(tree)
@@ -329,6 +357,8 @@ class DocumentChunker:
         current_lines: list[str] = []
         # 当前块的起始行号
         current_start_line = 1
+        # 每个层级当前章节的 chunk_id（用于 Parent-Child 关系：子章节→父章节）
+        section_chunk_ids: dict[int, str] = {}
 
         # 标题正则表达式：匹配 # 开头的行
         header_pattern = re.compile(r"^(#+)\s+(.*)$")
@@ -342,14 +372,22 @@ class DocumentChunker:
                 if current_lines:
                     chunk_text = "".join(current_lines)
                     if chunk_text.strip():
-                        chunks.append(Chunk(
+                        # parent_id 为上级章节的 chunk_id（Parent-Child：子章节→父章节）
+                        section_depth = len(current_section)
+                        parent_id = section_chunk_ids.get(section_depth - 1) if section_depth > 0 else None
+                        chunk = Chunk(
                             text=chunk_text,
                             source_path=str(path),
                             start_line=current_start_line,
                             end_line=i - 1,
                             section_path=list(current_section),
                             metadata={"header_context": "/".join(current_section)},
-                        ))
+                            parent_id=parent_id,
+                        )
+                        chunks.append(chunk)
+                        # 记录当前层级章节的 chunk_id，供子章节引用
+                        if section_depth > 0:
+                            section_chunk_ids[section_depth] = chunk.chunk_id
 
                 # 获取标题级别（# 的数量）
                 level = len(match.group(1))
@@ -371,14 +409,19 @@ class DocumentChunker:
         if current_lines:
             chunk_text = "".join(current_lines)
             if chunk_text.strip():
-                chunks.append(Chunk(
+                # parent_id 为上级章节的 chunk_id
+                section_depth = len(current_section)
+                parent_id = section_chunk_ids.get(section_depth - 1) if section_depth > 0 else None
+                chunk = Chunk(
                     text=chunk_text,
                     source_path=str(path),
                     start_line=current_start_line,
                     end_line=len(lines),
                     section_path=list(current_section),
                     metadata={"header_context": "/".join(current_section)},
-                ))
+                    parent_id=parent_id,
+                )
+                chunks.append(chunk)
 
         return chunks
 

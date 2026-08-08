@@ -184,6 +184,8 @@ class CoreApp:
         self._checkpointer: Any | None = None
         # 检查点上下文：用于异步资源的正确关闭
         self._checkpointer_ctx: Any | None = None
+        # 跨会话记忆管理器：LongTermMemory + VectorMemory（start 时初始化）
+        self._memory: Any | None = None
 
     # 初始化 LangGraph Checkpointer
     async def _init_checkpointer(self) -> None:
@@ -905,6 +907,43 @@ class CoreApp:
         # 根据配置选择检查点存储后端（none/memory/sqlite）
         await self._init_checkpointer()
 
+        # ===== 初始化跨会话记忆管理器 =====
+        # 三层记忆：LongTermMemory（JSONL 持久化）+ VectorMemory（复用 RAG 向量检索）
+        # 无 embedding API key 时 VectorMemory 降级为空，长期记忆仍可用
+        from iwan_claude.core.memory import (
+            LongTermMemory,
+            MemoryManager,
+            VectorMemory,
+        )
+        from iwan_claude.core.memory.claude_md import (
+            load_claude_md,
+            render_claude_md_prompt,
+        )
+        from iwan_claude.core.rag.embedding import get_embedding_provider
+        from iwan_claude.core.rag.vectorstore import get_vector_store
+
+        memory_dir = Path.home() / ".iwan_claude" / "memory"
+        memory_dir.mkdir(parents=True, exist_ok=True)
+        long_term = LongTermMemory(memory_dir / "long_term.jsonl")
+        try:
+            embedder = get_embedding_provider(self._config.rag, self._config.llm.base_url)
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "embedding provider init failed, vector memory disabled"
+            )
+            embedder = None
+        self._memory = MemoryManager(
+            long_term=long_term,
+            vector_memory=VectorMemory(
+                vector_store=get_vector_store(),
+                embedding_provider=embedder,
+                index_path=str(memory_dir / "vector_memory.json"),
+            ),
+            project_context=render_claude_md_prompt(load_claude_md()),
+        )
+        self._memory.load()
+        logging.getLogger(__name__).info("memory manager: initialized (long_term + vector)")
+
         # ===== 初始化会话管理器 =====
         # SessionManager 负责管理所有用户会话
         # 使用 lambda 作为 runner_factory，确保每个会话都有独立的 AgentRunner
@@ -917,9 +956,11 @@ class CoreApp:
                 permission_manager=self._permission_manager,
                 mcp_manager=self._mcp_manager,
                 checkpointer=self._checkpointer,
+                memory_manager=self._memory,
             ),
             bus=self._bus,
             provider=compact_provider,
+            memory_manager=self._memory,
         )
 
         # ===== 创建 Socket 服务器 =====
