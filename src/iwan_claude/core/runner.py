@@ -1086,6 +1086,21 @@ class AgentRunner:
                         has_rag=has_rag,
                         effort_level=self._permission_manager.get_effort_level() if self._permission_manager else "medium",
                     )
+                elif self._config.agent.engine == "debate":
+                    # 使用 Debate 引擎（worker-critic 多智能体辩论，适合质量敏感任务）
+                    from iwan_claude.core.langgraph_debate import LangGraphDebateLoop
+
+                    loop = LangGraphDebateLoop(
+                        provider, registry, bus,
+                        llm_model_name=self._config.llm.default_model,
+                        permission_manager=self._permission_manager,
+                        compactor=compactor,
+                        compact_threshold=self._config.compaction.auto_threshold,
+                        session_id=session_id_str,
+                        checkpointer=checkpointer,
+                        has_rag=has_rag,
+                        effort_level=self._permission_manager.get_effort_level() if self._permission_manager else "medium",
+                    )
                 else:
                     # 使用 Legacy 引擎（简单的循环实现）
                     loop = AgentLoop(
