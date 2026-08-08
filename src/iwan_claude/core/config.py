@@ -268,8 +268,8 @@ class RagConfig:
         index_path: 向量索引存储路径
     """
     enabled: bool = False
-    embedding_model: str = "deepseek-embed-v3"
-    embedding_base_url: str = ""
+    embedding_model: str = "text-embedding-v3"  # 通义 dashscope embedding 模型（DeepSeek 不提供 embedding 端点）
+    embedding_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"  # 通义 OpenAI 兼容端点
     max_chunk_size: int = 512
     chunk_overlap: int = 64
     top_k: int = 5

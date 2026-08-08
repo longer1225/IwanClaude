@@ -270,20 +270,19 @@ def get_embedding_provider(config: RagConfig, llm_base_url: str) -> EmbeddingPro
     """
     # 获取配置中的 embedding_base_url
     base_url = config.embedding_base_url
-    
-    # 如果 embedding_base_url 为空，使用 llm_base_url 作为 fallback
-    if not base_url and llm_base_url:
-        # 去除末尾斜杠
-        base_url = llm_base_url.rstrip("/")
-        # 如果以 /anthropic 结尾，替换为 /v1（适配 DeepSeek 等 API）
-        if base_url.endswith("/anthropic"):
-            base_url = base_url[:-len("/anthropic")] + "/v1"
-        # 如果不以 /v1 结尾，添加 /v1
-        elif not base_url.endswith("/v1"):
-            base_url = base_url + "/v1"
+
+    # 如果未显式配置 embedding_base_url，使用通义 dashscope 兼容端点作为默认。
+    # 【原因】DeepSeek 不提供 /v1/embeddings 端点（返回 404），
+    # 通义 dashscope 的 compatible-mode 兼容 OpenAI 协议，支持 text-embedding-v3。
+    # llm_base_url 参数保留用于显式 fallback 场景，但默认不再回退到 DeepSeek。
+    if not base_url:
+        base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
     # 创建并返回 EmbeddingProvider
+    # 【API Key】从 DASHSCOPE_API_KEY 环境变量读取；未配置时 EmbeddingProvider 构造会 raise ValueError，
+    # 由 app.py 的 try/except 捕获后降级为 embedder=None（向量记忆降级，不影响长期记忆和主流程）
     return EmbeddingProvider(
         model=config.embedding_model,
         base_url=base_url,
+        api_key_env="DASHSCOPE_API_KEY",
     )
