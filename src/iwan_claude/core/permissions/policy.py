@@ -91,6 +91,47 @@ OUTSIDE_CWD_HEURISTICS: list[str] = [
 _OUTSIDE_CWD_RE: list[re.Pattern[str]] = [re.compile(p) for p in OUTSIDE_CWD_HEURISTICS]
 
 
+# 网络外传命令正则（block_network_commands=True 时由 bash 工具二次校验阻断）
+# 覆盖：Unix 网络工具 + PowerShell 网络命令
+NETWORK_COMMAND_PATTERNS: list[str] = [
+    r"(?i)\bcurl\b",                # curl
+    r"(?i)\bwget\b",                # wget
+    r"(?i)\bnc\b",                  # netcat
+    r"(?i)\bssh\b",                 # ssh
+    r"(?i)\bscp\b",                 # scp
+    r"(?i)\bftp\b",                 # ftp
+    r"(?i)\btelnet\b",              # telnet
+    r"(?i)\bInvoke-WebRequest\b",   # PowerShell iwr
+    r"(?i)\bInvoke-RestMethod\b",   # PowerShell irm
+    r"(?i)\bStart-BitsTransfer\b",  # PowerShell Bits
+]
+
+# 预编译网络命令正则（提高匹配性能）
+_NETWORK_CMD_RE: list[re.Pattern[str]] = [re.compile(p) for p in NETWORK_COMMAND_PATTERNS]
+
+
+def matches_network_command(command: str) -> bool:
+    """
+    判断 bash 命令是否包含网络外传命令
+
+    【参数说明】
+    - command: str - bash/PowerShell 命令字符串
+
+    【返回值】
+    - bool: True 表示命令包含网络外传命令，False 表示不包含
+
+    【设计目的】
+    供 bash 工具在 block_network_commands=True 时调用，
+    阻断 curl/wget/nc/ssh 等网络命令，防止数据外传。
+
+    【与命令黑名单的区别】
+    - command_blacklist: 硬 DENY（不可被用户批准绕过），覆盖破坏性命令
+    - NETWORK_COMMAND_PATTERNS: 工具内阻断（返回 permission_denied），
+      可通过 sandbox.block_network_commands=false 关闭
+    """
+    return any(pat.search(command) for pat in _NETWORK_CMD_RE)
+
+
 def matches_outside_cwd(command: str) -> bool:
     """
     判断 bash 命令是否命中 outside-cwd 启发式规则
@@ -392,10 +433,19 @@ def evaluate(
     command = str(params.get("command", "")) if tool_name == "bash" else ""
 
     # Tier 1: deny_patterns（bash only）- 拒绝模式匹配
+    # 合并两个来源：policy.deny_patterns + sandbox.command_blacklist（硬 DENY，不可被用户批准绕过）
     if command:
+        # 1a. 策略文件中定义的 deny_patterns
         for pat in policy.deny_patterns:
             if re.search(pat, command):
                 return PermissionDecision.DENY
+        # 1b. 沙箱配置的 command_blacklist（进程内强化新增）
+        # 从沙箱动态读取，确保配置变更后立即生效
+        sandbox = get_sandbox()
+        if sandbox.enabled:
+            for pat in sandbox.command_blacklist:
+                if re.search(pat, command):
+                    return PermissionDecision.DENY
 
     # Tier 2: OUTSIDE_CWD_HEURISTICS — 强制 ASK，不可被 allow_patterns 绕过
     if command and matches_outside_cwd(command):

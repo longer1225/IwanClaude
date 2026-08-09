@@ -21,12 +21,14 @@ Shell 命令执行工具 - 在子进程中执行 shell 命令
 from __future__ import annotations
 
 import asyncio
+import os
+import re
 import sys
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from iwan_claude.core.tools.base import BaseTool, ToolResult
-from iwan_claude.core.sandbox import get_sandbox
+from iwan_claude.core.sandbox import get_sandbox, scrub_env
 
 # 最大输出字节数：64 KB，防止返回过多内容
 _MAX_OUTPUT_BYTES = 64 * 1024
@@ -142,6 +144,39 @@ class BashTool(BaseTool):
         sandbox = get_sandbox()
         cwd = str(sandbox.root) if sandbox.enabled else None
 
+        # ===== 进程内强化：网络命令阻断 =====
+        # block_network_commands=True 时，阻断 curl/wget/nc/ssh 等网络外传命令
+        # 防止 Agent 通过 bash 子进程外传沙箱内文件（如 .env、密钥配置）
+        # 可通过 sandbox.block_network_commands=false 关闭
+        if sandbox.enabled and sandbox.block_network_commands:
+            from iwan_claude.core.permissions.policy import matches_network_command
+            if matches_network_command(command):
+                # 记录审计日志
+                try:
+                    from iwan_claude.core.audit import log_sandbox_block
+                    log_sandbox_block(
+                        tool="bash",
+                        reason="network_command_blocked",
+                        command=command[:200],  # 截断防止日志膨胀
+                    )
+                except Exception:
+                    pass
+                return ToolResult(
+                    content=(
+                        "[blocked] network command detected in sandbox mode. "
+                        "To allow network egress, set sandbox.block_network_commands=false "
+                        "or use the http_request tool (which has its own safety controls)."
+                    ),
+                    is_error=True,
+                    error_type="permission_denied",
+                )
+
+        # ===== 进程内强化：环境变量脱敏 =====
+        # 移除 ANTHROPIC_API_KEY、DASHSCOPE_API_KEY 等敏感变量
+        # 防止子进程通过 env/echo $KEY/printenv 读取密钥
+        # 沙箱未启用时不脱敏（child_env=None 表示继承父进程 env）
+        child_env = scrub_env(dict(os.environ)) if sandbox.enabled else None
+
         try:
             if IS_WINDOWS:
                 # Windows：使用 PowerShell 执行命令
@@ -159,6 +194,7 @@ class BashTool(BaseTool):
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.STDOUT,  # 将 stderr 合并到 stdout
                     cwd=cwd,  # 沙箱根目录作为工作目录
+                    env=child_env,  # 脱敏后的环境变量（沙箱启用时）
                 )
             else:
                 # Linux / macOS：使用默认 shell 执行命令
@@ -167,6 +203,7 @@ class BashTool(BaseTool):
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.STDOUT,  # 将 stderr 合并到 stdout
                     cwd=cwd,  # 沙箱根目录作为工作目录
+                    env=child_env,  # 脱敏后的环境变量（沙箱启用时）
                 )
 
             # 2. 等待命令完成（带超时控制）

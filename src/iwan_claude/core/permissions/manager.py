@@ -391,11 +391,21 @@ class PermissionManager:
             auto_allowed = True
 
         # Tier 1: deny_patterns（bash only，不可被缓存绕过）
+        # 合并两个来源：policy.deny_patterns + sandbox.command_blacklist（硬 DENY）
         if command and policy:
+            # 1a. 策略文件中定义的 deny_patterns
             for pat in policy.deny_patterns:
                 if re.search(pat, command):
                     logger.debug("permission: deny_pattern hit tool=%s", tool_name)
                     return False, "auto_deny"
+            # 1b. 沙箱配置的 command_blacklist（进程内强化新增）
+            from iwan_claude.core.sandbox import get_sandbox
+            sandbox = get_sandbox()
+            if sandbox.enabled:
+                for pat in sandbox.command_blacklist:
+                    if re.search(pat, command):
+                        logger.debug("permission: command_blacklist hit tool=%s", tool_name)
+                        return False, "auto_deny"
 
         # Tier 2: OUTSIDE_CWD_HEURISTICS（bash only，强制 ASK，不可被任何缓存绕过）
         outside_cwd = bool(command and matches_outside_cwd(command))
@@ -500,12 +510,29 @@ class PermissionManager:
         # 从待审批请求映射中获取请求
         req = self._pending.pop(tool_use_id, None)
         if req is None:
-            # 如果请求不存在，记录警告日志
-            logger.warning("permission.respond: unknown tool_use_id=%s", tool_use_id)
+            # 请求不存在 —— 可能是：
+            #   a) 审批超时已被 timeout 分支 pop 走了
+            #   b) tool_use_id 错了（客户端回了旧的/拼错的）
+            #   c) 同一请求被重复 respond 了
+            logger.warning(
+                "permission.respond: unknown tool_use_id=%s  "
+                "(可能是审批超时已自动清理，或 id 不匹配，或重复点击)",
+                tool_use_id,
+            )
             return
-        # 如果 Future 未完成，设置结果
+        # Future 未完成 → 设置结果
         if not req.future.done():
             req.future.set_result(decision)
+            logger.info(
+                "permission.respond: resolved tool_use_id=%s session=%s tool=%s decision=%s",
+                tool_use_id, req.session_id, req.tool_name, decision,
+            )
+        else:
+            # Future 已经完成（极端情况：timeout 刚 set_exception，但 respond 也到了）
+            logger.warning(
+                "permission.respond: future already done tool_use_id=%s decision=%s",
+                tool_use_id, decision,
+            )
 
     def _apply_response(self, decision: str, session_id: str, tool_name: str) -> bool:
         """

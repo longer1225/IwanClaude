@@ -15,6 +15,11 @@ from textual.widgets import Static
 # 从 textual.app 导入 ComposeResult，compose() 方法的返回值类型
 from textual.app import ComposeResult
 
+# 从 textual.markup 导入 escape：把任意字符串中的 [ ] 转义成 \[ \]，
+# 防止 Textual 把错误消息里的 [sandbox] 这种方括号误解析为 markup 标签。
+# 注意：Textual 8.x 版名为 escape，新版本才改名为 escape_markup
+from textual.markup import escape
+
 # 从 typing 导入 Any，用于类型注解
 from typing import Any
 
@@ -81,7 +86,9 @@ class ToolCallBlock(Widget):
         # 保存原始参数字典
         self._params = params
         # 调用 _params_str() 将参数格式化为带缩进的 JSON 字符串，供详情展开时显示
-        self._params_full = _params_str(params)
+        # 同时 escape_markup 把可能出现的方括号（JSON 里的数组、错误消息片段等）转义，
+        # 防止 Static(markup=True) 在展开详情时把方括号解析成 Textual markup 标签导致崩溃
+        self._params_full = escape(_params_str(params))
         # 工具输出内容，初始为空（尚未执行）
         self._output = ""
         # 工具执行耗时（毫秒），初始为 0（尚未完成）
@@ -163,8 +170,10 @@ class ToolCallBlock(Widget):
         - 如果 widget 已挂载（有子 widget），更新摘要显示
         - 如果 widget 未挂载，跳过 DOM 更新（稍后挂载时会自动显示最新状态）
         """
-        # 保存工具输出内容
-        self._output = output
+        # 保存工具输出内容（escape 保证任何方括号都不会被 Textual 解析为 markup 标签）
+        # 典型场景：sandbox 错误消息 "[sandbox] quota exceeded" 中的方括号；
+        # 以及 json 输出里的任何方括号，都要安全渲染为普通文本。
+        self._output = escape(output)
         # 保存执行耗时
         self._elapsed_ms = elapsed_ms
         # 保存错误状态

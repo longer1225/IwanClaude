@@ -2572,7 +2572,11 @@ class IwanTuiApp(App[None]):
         # ========== 运行完成事件 ==========
 
         elif t == "run.finished":
-            # 运行完成：显示成功或失败状态
+            # 运行完成：显示成功或失败状态，并恢复输入框
+            # 【关键修复】无论成功还是失败，都必须重置 _busy=False 并启用输入框，
+            # 否则用户将无法继续输入（表现为"卡住"）。
+            # 正常流程中 session.waiting_for_input 事件会稍后到达并再次重置，
+            # 但如果该事件丢失或延迟，这里就是最后的兜底。
             status = event.get("status", "")
             steps = event.get("steps", 0)
             reason = event.get("reason") or ""
@@ -2582,11 +2586,28 @@ class IwanTuiApp(App[None]):
                     classes="run-ok",
                 ))
             else:
-                detail = f"  [dim]{reason}[/dim]" if reason else ""
-                self._append(Static(
-                    f"[bold red]✗ failed[/bold red]{detail}  [dim]{steps} steps[/dim]",
-                    classes="run-err",
-                ))
+                # 对 exceeded_max_steps 给出更友好的提示
+                if reason == "exceeded_max_steps":
+                    self._append(Static(
+                        f"[bold yellow]⚠ reached step limit[/bold yellow]  "
+                        f"[dim]({steps} steps — try /compact or increase IWAN_MAX_STEPS)[/dim]",
+                        classes="run-err",
+                    ))
+                else:
+                    detail = f"  [dim]{reason}[/dim]" if reason else ""
+                    self._append(Static(
+                        f"[bold red]✗ failed[/bold red]{detail}  [dim]{steps} steps[/dim]",
+                        classes="run-err",
+                    ))
+            # 重置忙碌状态，恢复输入框（兜底机制）
+            self._busy = False
+            prompt = self._prompt()
+            if prompt is not None:
+                prompt.disabled = False
+                prompt.read_only = False
+                prompt.border_title = "type a message — enter to send, ⌘/⇧/⌥+enter for newline"
+                prompt.focus()
+            self._update_header("ready")
 
         # ========== LLM 使用统计事件 ==========
 

@@ -227,11 +227,62 @@ class McpConfig:
     servers: list[McpServerConfig] = field(default_factory=list)
 
 
+# ===== 沙箱进程内强化默认常量 =====
+# 命令黑名单正则（跨平台，命中则硬 DENY，不可被用户批准绕过）
+# 覆盖：破坏性命令 + Windows 破坏性命令 + 凭证外传 + 凭证读取高敏路径
+_DEFAULT_COMMAND_BLACKLIST: tuple[str, ...] = (
+    # === Unix 破坏性命令 ===
+    r"\brm\s+-rf?\s+/(?:\s|$)",               # rm -rf /
+    r"\brm\s+-rf?\s+~",                        # rm -rf ~
+    r"\brm\s+-rf?\s+\*",                       # rm -rf *
+    r":\(\)\s*\{\s*:\|:&\s*\}\s*;?\s*:",       # fork 炸弹 :(){:|:&};:
+    r"\bmkfs\b",                               # 格式化文件系统
+    r"\bdd\s+if=.*of=/dev/",                   # dd 写设备
+    r"\bchmod\s+-R\s+777\s+/",                 # 递归改权限到根
+    # === Windows 破坏性命令 ===
+    r"(?i)\bformat\s+[A-Z]:",                  # format C:
+    r"(?i)\bdiskpart\b",                       # 磁盘分区
+    r"(?i)\brmdir\s+/s\s+/q",                  # rmdir /s /q
+    r"(?i)\bdel\s+/f\s+/s\s+/q",               # del /f /s /q
+    r"(?i)\breg\s+delete\s+/f",                # reg delete /f
+    r"(?i)\btaskkill\s+/f\s+/im",              # taskkill /f /im
+    r"(?i)\bshutdown\b",                       # 关机
+    r"(?i)\bschtasks\s+/create",               # 计划任务（持久化后门）
+    # === 凭证外传（远程执行）===
+    r"(?i)\bcurl\s+.*\|\s*(?:sh|bash|pwsh)",   # curl | sh
+    r"(?i)\bwget\s+.*\|\s*(?:sh|bash|pwsh)",   # wget | sh
+    r"(?i)\biex\s*\(\s*irm\s",                 # PowerShell iex(irm) 远程执行
+    r"(?i)\binvoke-expression.*net\.webclient", # PS 远程执行
+    # === 凭证读取高敏路径 ===
+    r"/etc/passwd",                            # Unix 密码文件
+    r"/etc/shadow",                            # Unix 影子密码
+    r"~/\.ssh/",                               # SSH 私钥
+    r"(?i)%USERPROFILE%.*\\\.ssh",             # Windows SSH 私钥
+    r"(?i)%USERPROFILE%.*\\\.aws",             # AWS 凭证
+    r"(?i)%APPDATA%.*\\Microsoft\\Credentials", # Windows 凭证管理器
+)
+
+# 环境变量脱敏正则（匹配变量名，命中则从子进程 env 中移除）
+# 覆盖：API key、密钥、令牌、密码、凭证等通用模式 + 已知厂商变量名
+_DEFAULT_ENV_SCRUB_PATTERNS: tuple[str, ...] = (
+    r"(?i).*_API_KEY$",          # ANTHROPIC_API_KEY, DASHSCOPE_API_KEY, OPENAI_API_KEY
+    r"(?i).*_SECRET.*",          # AWS_SECRET_ACCESS_KEY, CLIENT_SECRET
+    r"(?i).*_TOKEN$",            # GITHUB_TOKEN, GITLAB_TOKEN
+    r"(?i).*_PASSWORD$",         # DB_PASSWORD, SMTP_PASSWORD
+    r"(?i).*_CREDENTIAL.*",      # GOOGLE_APPLICATION_CREDENTIALS
+    r"(?i)^AWS_ACCESS_KEY_ID$",
+    r"(?i)^AWS_SESSION_TOKEN$",
+    r"(?i)^ANTHROPIC_AUTH_TOKEN$",
+    r"(?i)^DEEPSEEK_API_KEY$",
+    r"(?i)^DASHSCOPE_API_KEY$",
+)
+
+
 @dataclass
 class SandboxConfig:
     """
     沙箱配置类 - 对应 [sandbox] section
-    
+
     沙箱是一个受限的文件系统环境，用于限制 Agent 的文件操作范围。
     默认 root 为 "."（当前工作目录/项目根），Agent 可操作项目文件但不能越界。
 
@@ -243,6 +294,13 @@ class SandboxConfig:
         max_total_size: 沙箱总大小限制（字节）
         search_limited: 是否限制搜索范围（在沙箱内）
         ask_on_access_denied: 访问被拒绝时的错误提示措辞（不再影响拦截行为，越界始终抛 SandboxAccessError）
+
+    进程内强化属性（新增）：
+        command_blacklist: 命令黑名单正则列表，命中则硬 DENY（不可被用户批准绕过）
+        env_scrub_patterns: 环境变量脱敏正则列表，匹配变量名则从子进程 env 中移除
+        block_network_commands: 是否阻断网络外传命令（curl/wget/nc/ssh/scp/ftp/telnet/PS iwr）
+        audit_log: 是否启用审计日志
+        audit_log_path: 审计日志文件路径（相对路径基于 CWD）
     """
     enabled: bool = True
     root: str = "."
@@ -251,6 +309,23 @@ class SandboxConfig:
     max_total_size: int = 100 * 1024 * 1024  # 100MB
     search_limited: bool = False
     ask_on_access_denied: bool = True
+
+    # ===== 进程内强化字段 =====
+    # 命令黑名单（正则列表，命中则硬 DENY，不可被用户批准绕过）
+    # 默认覆盖：破坏性命令 + 外传命令 + 凭证读取高敏路径
+    command_blacklist: list[str] = field(
+        default_factory=lambda: list(_DEFAULT_COMMAND_BLACKLIST)
+    )
+    # 环境变量脱敏：变量名匹配这些正则的 env 将被从子进程中移除
+    # 默认覆盖：*_API_KEY、*_SECRET、*_TOKEN、*_PASSWORD、*_CREDENTIAL
+    env_scrub_patterns: list[str] = field(
+        default_factory=lambda: list(_DEFAULT_ENV_SCRUB_PATTERNS)
+    )
+    # 是否阻断网络外传命令（curl/wget/nc/ssh/scp/ftp/telnet/Invoke-WebRequest）
+    block_network_commands: bool = True
+    # 审计日志开关与路径
+    audit_log: bool = True
+    audit_log_path: str = ".iwan/audit.log"
 
 
 @dataclass
@@ -265,6 +340,7 @@ class RagConfig:
         enabled: 是否启用 RAG
         embedding_model: 嵌入模型名称
         embedding_base_url: 嵌入模型 API 基础 URL
+        embedding_api_key_env: 读取 Embedding API Key 的环境变量名（留空则启用兼容兜底）
         max_chunk_size: 文档分块最大大小（字符数）
         chunk_overlap: 分块重叠大小（字符数）
         top_k: 检索时返回的最相关文档数
@@ -273,6 +349,7 @@ class RagConfig:
     enabled: bool = False
     embedding_model: str = "text-embedding-v3"  # 通义 dashscope embedding 模型（DeepSeek 不提供 embedding 端点）
     embedding_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"  # 通义 OpenAI 兼容端点
+    embedding_api_key_env: str = ""  # 留空则启用兼容列表：QIANWEN_API_KEY / QWEN_API_KEY / DASHSCOPE_API_KEY 等
     max_chunk_size: int = 512
     chunk_overlap: int = 64
     top_k: int = 5
@@ -347,14 +424,15 @@ def get_config() -> IwanConfig:
 
     # ===== 确定 TOML 配置文件路径 =====
     # 如果显式指定了 IWAN_CONFIG 环境变量，只加载该文件
-    # 否则按优先级加载：全局配置 → 项目本地配置
+    # 否则按优先级加载：全局配置 → 项目本地配置（cwd → pkg_dir，避免 core 启动时 cwd 不对导致配置丢失）
     explicit = os.environ.get("IWAN_CONFIG")
     if explicit:
         config_paths = [Path(explicit).expanduser()]
     else:
         config_paths = [
-            Path(_DEFAULT_CONFIG_PATH).expanduser(),  # 全局配置：~/.iwan/config.toml
-            Path(".iwan/config.toml"),                # 项目本地配置
+            Path(_DEFAULT_CONFIG_PATH).expanduser(),            # 全局配置：~/.iwan/config.toml
+            Path(".iwan/config.toml"),                          # 项目本地配置（cwd 下）
+            Path(pkg_dir) / ".iwan" / "config.toml",            # 项目本地配置（package 根下，cwd 错时兜底）
         ]
 
     # ===== 加载 TOML 配置文件 =====
@@ -637,7 +715,7 @@ def _apply_toml(config: IwanConfig, data: dict[str, Any]) -> None:
         rag = data["rag"]
         if not isinstance(rag, dict):
             raise SystemExit("Config error: [rag] must be a table")
-        unknown_rag: set[str] = set(rag.keys()) - {"enabled", "embedding_model", "embedding_base_url", "max_chunk_size", "chunk_overlap", "top_k", "index_path"}
+        unknown_rag: set[str] = set(rag.keys()) - {"enabled", "embedding_model", "embedding_base_url", "embedding_api_key_env", "max_chunk_size", "chunk_overlap", "top_k", "index_path"}
         if unknown_rag:
             raise SystemExit(f"Unknown [rag] keys: {', '.join(sorted(unknown_rag))}")
         if "enabled" in rag:
@@ -655,6 +733,11 @@ def _apply_toml(config: IwanConfig, data: dict[str, Any]) -> None:
             if not isinstance(val, str):
                 raise SystemExit("Config error: rag.embedding_base_url must be a string")
             config.rag.embedding_base_url = val
+        if "embedding_api_key_env" in rag:
+            val = rag["embedding_api_key_env"]
+            if not isinstance(val, str):
+                raise SystemExit("Config error: rag.embedding_api_key_env must be a string")
+            config.rag.embedding_api_key_env = val
         if "max_chunk_size" in rag:
             val = rag["max_chunk_size"]
             if not isinstance(val, int) or val <= 0:
@@ -922,6 +1005,11 @@ def _apply_env(config: IwanConfig) -> None:
     rag_embedding_base_url = os.environ.get("IWAN_RAG_EMBEDDING_BASE_URL")
     if rag_embedding_base_url is not None:
         config.rag.embedding_base_url = rag_embedding_base_url
+
+    # 覆盖 Embedding API Key 读取的环境变量名（留空则启用兼容兜底）
+    rag_embedding_api_key_env = os.environ.get("IWAN_RAG_EMBEDDING_API_KEY_ENV")
+    if rag_embedding_api_key_env is not None:
+        config.rag.embedding_api_key_env = rag_embedding_api_key_env
 
     agent_engine = os.environ.get("IWAN_AGENT_ENGINE")
     if agent_engine is not None:

@@ -151,6 +151,21 @@ class AnthropicProvider:
             if not api_key:
                 raise SystemExit(f"{api_key_env} (or ANTHROPIC_API_KEY) not set")
             
+            # 【ASCII 校验】
+            # HTTP 头（x-api-key）必须是 ASCII，否则 httpx 在构建 headers 时会抛
+            # UnicodeEncodeError: 'ascii' codec can't encode characters ... 且不指出具体哪个字段。
+            # 这里尽早检查，给出用户可读的错误（并标出第一个非法字符位置）。
+            non_ascii = [(i, c) for i, c in enumerate(api_key) if ord(c) > 127]
+            if non_ascii:
+                bad_pos, bad_ch = non_ascii[0]
+                raise SystemExit(
+                    f"API key from env[{api_key_env}] contains non-ASCII char "
+                    f"'{bad_ch}' (U+{ord(bad_ch):04X}) at position {bad_pos}. "
+                    "Most likely you accidentally pasted Chinese prompt text / markdown quotes into the env var. "
+                    "Re-run: $env:DEEPSEEK_API_KEY = 'sk-xxxxxxxx' "
+                    "(use single straight quotes, no backticks / Chinese)."
+                )
+            
             # 构造客户端参数
             client_kwargs: dict[str, Any] = {"api_key": api_key}
             

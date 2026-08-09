@@ -33,6 +33,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from hashlib import md5
 
@@ -80,13 +81,15 @@ class EmbeddingProvider:
         - api_key_env: str - API 密钥环境变量名称（默认 "DEEPSEEK_API_KEY"）
         - http_client: httpx.AsyncClient | None - 自定义 HTTP 客户端（可选）
 
-        【环境变量优先级】
-        1. api_key_env 指定的环境变量（如 DEEPSEEK_API_KEY）
-        2. OPENAI_API_KEY（备选）
+        【环境变量读取顺序（按优先级从高到低）】
+        1. api_key_env 显式指定的环境变量（如 DASHSCOPE_API_KEY）
+        2. 通义/千问常用别名（QIANWEN_API_KEY / QWEN_API_KEY / DASHSCOPE_API_KEY）
+        3. OpenAI 通用备选（OPENAI_API_KEY）
+        4. DeepSeek 备选（DEEPSEEK_API_KEY）
 
         【初始化流程】
         1. 验证 base_url 是否为空
-        2. 从环境变量获取 API 密钥
+        2. 按优先级从环境变量获取 API 密钥
         3. 验证 API 密钥是否存在
         4. 初始化 HTTP 客户端（或使用传入的客户端）
 
@@ -97,19 +100,53 @@ class EmbeddingProvider:
         ```python
         provider = EmbeddingProvider(
             model="text-embedding-3-small",
-            base_url="https://api.deepseek.com/v1"
+            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1"
         )
         ```
         """
         # 验证 base_url 是否为空
         if not base_url:
             raise ValueError("base_url is required")
-        
-        # 从环境变量获取 API 密钥
-        api_key = os.environ.get(api_key_env) or os.environ.get("OPENAI_API_KEY")
+
+        # ===== 按优先级尝试从环境变量获取 API Key =====
+        # 【兼容设计】用户可能用不同的命名习惯存放通义 API Key：
+        #   - QIANWEN_API_KEY  : 千问中文拼音（本次用户实际使用的命名）
+        #   - QWEN_API_KEY     : 千问英文官方名
+        #   - DASHSCOPE_API_KEY: DashScope 官方文档推荐命名
+        # 优先使用调用方显式传入的 api_key_env，其次尝试上述别名，最后兜底 OPENAI/DEEPSEEK
+        fallback_list = [
+            api_key_env,                          # 1. 显式指定（优先级最高）
+            "QIANWEN_API_KEY",                    # 2. 千问中文拼音命名
+            "QWEN_API_KEY",                       # 3. 千问英文官方命名
+            "DASHSCOPE_API_KEY",                  # 4. DashScope 官方推荐命名
+            "OPENAI_API_KEY",                     # 5. OpenAI 协议通用兜底
+            "DEEPSEEK_API_KEY",                   # 6. DeepSeek 兼容端点兜底
+        ]
+        api_key: str | None = None
+        used_env: str | None = None
+        for env_name in fallback_list:
+            if env_name:
+                val = os.environ.get(env_name)
+                if val:
+                    api_key = val
+                    used_env = env_name
+                    break
+
         # 验证 API 密钥是否存在
         if not api_key:
-            raise ValueError(f"{api_key_env} or OPENAI_API_KEY environment variable is required")
+            tried = ", ".join(e for e in fallback_list if e)
+            raise ValueError(
+                f"Embedding API key not found. Tried environment variables: {tried}"
+            )
+
+        # 日志记录：只打印读取的环境变量名，**绝不打印 Key 本身**（安全红线）
+        # 这样用户可以一眼确认系统读到了他设置的 QIANWEN_API_KEY
+        logging.getLogger(__name__).info(
+            "embedding provider: using api_key from env=%s  model=%s  base_url=%s",
+            used_env,
+            model,
+            base_url.rstrip("/"),
+        )
 
         # 存储 API 密钥（注意：不要记录到日志中）
         self._api_key = api_key
@@ -239,33 +276,33 @@ def get_embedding_provider(config: RagConfig, llm_base_url: str) -> EmbeddingPro
     创建嵌入服务提供者
 
     【参数说明】
-    - config: RagConfig - RAG 配置（包含 embedding_model 和 embedding_base_url）
-    - llm_base_url: str - LLM API 基础地址（用于 fallback）
+    - config: RagConfig - RAG 配置（包含 embedding_model / embedding_base_url / embedding_api_key_env）
+    - llm_base_url: str - LLM API 基础地址（保留用于兼容旧 fallback 逻辑）
 
     【返回值】
     - EmbeddingProvider: 嵌入服务提供者
 
     【base_url 优先级】
     1. config.embedding_base_url（配置文件中指定）
-    2. llm_base_url（LLM API 地址作为 fallback）
+    2. 通义 dashscope 兼容端点（默认兜底，不再回退到 DeepSeek /anthropic）
 
-    【base_url 处理逻辑】
-    - 如果 embedding_base_url 为空，使用 llm_base_url
-    - 如果 llm_base_url 以 /anthropic 结尾，替换为 /v1
-    - 如果 llm_base_url 不以 /v1 结尾，添加 /v1
+    【api_key_env 读取规则】
+    1. config.embedding_api_key_env 非空 → 以此为最高优先级尝试
+    2. config.embedding_api_key_env 为空 → 走 EmbeddingProvider 内置兼容列表：
+       QIANWEN_API_KEY / QWEN_API_KEY / DASHSCOPE_API_KEY / OPENAI_API_KEY / DEEPSEEK_API_KEY
 
     【设计目的】
-    提供灵活的配置方式，允许用户在配置文件中指定单独的 Embedding API 地址，
-    如果未指定，则使用 LLM API 地址作为 fallback。
+    提供灵活的配置方式，同时默认支持多种常见的通义 API Key 环境变量命名，
+    避免用户因变量名不一致而报错。
 
     【示例】
     ```python
     config = RagConfig(
-        embedding_model="text-embedding-3-small",
-        embedding_base_url="https://api.deepseek.com/v1"
+        embedding_model="text-embedding-v3",
+        embedding_base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        embedding_api_key_env="",  # 留空 → 启用多命名兼容
     )
     provider = get_embedding_provider(config, "https://api.deepseek.com/anthropic")
-    # 如果 embedding_base_url 为空，会将 llm_base_url 转换为 https://api.deepseek.com/v1
     ```
     """
     # 获取配置中的 embedding_base_url
@@ -274,15 +311,19 @@ def get_embedding_provider(config: RagConfig, llm_base_url: str) -> EmbeddingPro
     # 如果未显式配置 embedding_base_url，使用通义 dashscope 兼容端点作为默认。
     # 【原因】DeepSeek 不提供 /v1/embeddings 端点（返回 404），
     # 通义 dashscope 的 compatible-mode 兼容 OpenAI 协议，支持 text-embedding-v3。
-    # llm_base_url 参数保留用于显式 fallback 场景，但默认不再回退到 DeepSeek。
     if not base_url:
         base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
+    # 决定传给 EmbeddingProvider 的首选 api_key_env：
+    #   - 用户显式配置了 config.embedding_api_key_env → 用它（优先级最高）
+    #   - 否则传空串，让 EmbeddingProvider 内部走完整的兼容兜底列表
+    preferred_env = config.embedding_api_key_env or ""
+
     # 创建并返回 EmbeddingProvider
-    # 【API Key】从 DASHSCOPE_API_KEY 环境变量读取；未配置时 EmbeddingProvider 构造会 raise ValueError，
+    # 未配置任何 API Key 时，EmbeddingProvider 构造会 raise ValueError，
     # 由 app.py 的 try/except 捕获后降级为 embedder=None（向量记忆降级，不影响长期记忆和主流程）
     return EmbeddingProvider(
         model=config.embedding_model,
         base_url=base_url,
-        api_key_env="DASHSCOPE_API_KEY",
+        api_key_env=preferred_env,
     )

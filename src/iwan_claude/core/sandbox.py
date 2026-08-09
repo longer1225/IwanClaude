@@ -98,6 +98,33 @@ class SandboxManager:
     def allow_parent_dirs(self) -> bool:
         return self._config.allow_parent_dirs
 
+    # ===== 进程内强化属性 =====
+
+    @property
+    def command_blacklist(self) -> list[str]:
+        """命令黑名单正则列表（命中则硬 DENY）"""
+        return self._config.command_blacklist
+
+    @property
+    def env_scrub_patterns(self) -> list[str]:
+        """环境变量脱敏正则列表（匹配变量名）"""
+        return self._config.env_scrub_patterns
+
+    @property
+    def block_network_commands(self) -> bool:
+        """是否阻断网络外传命令（curl/wget/nc/ssh 等）"""
+        return self._config.block_network_commands
+
+    @property
+    def audit_log_enabled(self) -> bool:
+        """是否启用审计日志"""
+        return self._config.audit_log
+
+    @property
+    def audit_log_path(self) -> str:
+        """审计日志文件路径（相对路径基于 CWD）"""
+        return self._config.audit_log_path
+
     def _is_path_allowed(self, path: Path) -> bool:
         """
         内部方法：判断已 resolve 的路径是否被允许访问
@@ -326,3 +353,54 @@ def get_search_root() -> Path:
     if sb._config.search_limited and sb._config.enabled:
         return sb._sandbox_root
     return Path.cwd()
+
+
+def scrub_env(env: dict[str, str]) -> dict[str, str]:
+    """
+    脱敏环境变量：移除匹配 env_scrub_patterns 的敏感变量
+
+    【安全目的】
+    防止 API key、密码等敏感凭证泄露给 bash/run_python 子进程。
+    恶意命令可通过 `env`、`echo $ANTHROPIC_API_KEY`、`printenv` 读取环境变量。
+
+    【参数】
+    - env: 原始环境变量字典（通常是 os.environ.copy()）
+
+    【返回】
+    - dict[str, str]: 脱敏后的环境变量字典（原 dict 不被修改）
+
+    【设计要点】
+    - 沙箱未启用时直接返回原 env（不脱敏）
+    - 匹配规则按变量名（key）正则匹配，不检查 value
+    - 被移除的变量名记录到审计日志（不记录值）
+    - 使用延迟导入 audit 模块，避免循环导入
+    """
+    import re
+
+    # 沙箱未初始化或未启用时，不脱敏
+    if _sandbox_manager is None or not _sandbox_manager.enabled:
+        return env
+
+    patterns = _sandbox_manager.env_scrub_patterns
+    if not patterns:
+        return env
+
+    compiled = [re.compile(p) for p in patterns]
+    scrubbed: dict[str, str] = {}
+    removed: list[str] = []
+    for key, value in env.items():
+        if any(pat.search(key) for pat in compiled):
+            removed.append(key)
+        else:
+            scrubbed[key] = value
+
+    # 记录审计日志（仅记录变量名，不记录值）
+    if removed:
+        try:
+            from iwan_claude.core.audit import log_env_scrub
+            log_env_scrub(removed_keys=removed)
+        except Exception:
+            # 审计日志写入失败不影响主流程
+            pass
+
+    return scrubbed

@@ -303,8 +303,27 @@ async def invoke_tool(
             )
         except Exception as exc:
             # 其他未知异常，标记为 runtime_error
+            # 【配额超限识别】sandbox 会抛 "sandbox quota exceeded: ..."（ValueError），
+            # 这种情况重试多少次都没用，直接返回，不消耗 _MAX_RETRIES。
+            exc_text = str(exc)
+            if "sandbox quota exceeded" in exc_text or "sandbox file size limit exceeded" in exc_text:
+                # 【Textual 转义】错误消息会在 TUI 渲染为 Static widget（markup=True），
+                # 其中的 [sandbox] 会被 Textual 误解析为 markup 标签（=value 属性语法），
+                # 触发 MarkupError。必须把 [ ] 用反斜杠转义成 \[ \]。
+                safe_exc = exc_text.replace("[", "\\[").replace("]", "\\]")
+                safe_fix = (
+                    "Fix: increase \\[sandbox\\].max_total_size in ~/.iwan/config.toml "
+                    "or set env IWAN_SANDBOX_MAX_TOTAL_SIZE=1000000000 then restart core."
+                )
+                return await _fail(
+                    bus, run_id, tool_call,
+                    "sandbox_quota",
+                    f"Sandbox quota exceeded. {safe_exc}. {safe_fix}",
+                    elapsed(),
+                    attempt=attempt,
+                )
             error_class = "runtime_error"
-            error_message = str(exc)
+            error_message = exc_text
 
         # 确保错误信息已设置
         assert error_class is not None and error_message is not None

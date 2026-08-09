@@ -59,7 +59,7 @@ from typing import ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from iwan_claude.core.sandbox import validate_path
+from iwan_claude.core.sandbox import validate_path, scrub_env
 from iwan_claude.core.tools.base import BaseTool, ToolResult
 
 # 输出最大字节数：128 KB，防止大输出导致内存问题
@@ -379,7 +379,7 @@ class RunPythonTool(BaseTool):
                         stderr=stderr_target,
                         stdin=asyncio.subprocess.PIPE,
                         cwd=proc_cwd,
-                        env=_child_env(os.environ.copy(), venv_path),
+                        env=_child_env(scrub_env(os.environ.copy()), venv_path),
                     )
                 except Exception as exc:
                     return ToolResult(
