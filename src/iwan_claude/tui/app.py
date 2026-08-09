@@ -867,6 +867,7 @@ class IwanTuiApp(App[None]):
             ("help", "显示帮助信息"),
             ("auto", "切换自动模式 (off|read_only|on)"),
             ("effort", "切换努力等级 (minimal|low|medium|high|max)"),
+            ("engine", "切换 Agent 引擎 (legacy|langgraph|plan_execute|debate|pipeline)"),
             ("compact", "压缩上下文窗口"),
             ("checkpoint list", "列出所有检查点"),
             ("checkpoint restore <n>", "恢复到指定检查点"),
@@ -1313,6 +1314,17 @@ class IwanTuiApp(App[None]):
                 self._append(Static("[yellow]agent busy or disconnected[/yellow]", classes="log-line"))
             return
 
+        # /engine 切换 Agent 引擎
+        if content.startswith("/engine"):
+            event.text_area.text = ""  # 清空输入框
+            parts = content.split(None, 1)  # 分割命令和参数
+            engine = parts[1].strip() if len(parts) > 1 else ""  # 提取引擎参数
+            if self._client is not None and self._session_id is not None and not self._busy:
+                self.run_worker(self._do_set_engine(engine), name="set_engine", exclusive=False)
+            else:
+                self._append(Static("[yellow]agent busy or disconnected[/yellow]", classes="log-line"))
+            return
+
         # /name 重命名会话
         if content.startswith("/name"):
             event.text_area.text = ""  # 清空输入框
@@ -1559,6 +1571,57 @@ class IwanTuiApp(App[None]):
         except (IpcError, RuntimeError, OSError) as e:
             self._append(Static(f"[red]model preset error: {e}[/red]", classes="log-line"))
 
+    async def _do_set_engine(self, engine: str) -> None:
+        """
+        执行 Agent 引擎切换命令
+
+        引擎决定 Agent 的执行模式：
+        - legacy: 简单循环
+        - langgraph: ReAct 引擎（chat→tools 循环）
+        - plan_execute: 规划→执行→反思
+        - debate: worker-critic 辩论
+        - pipeline: planner→executor→reviewer 三角色流水线
+
+        参数：
+            engine: str - 目标引擎名称
+                - 空字符串：循环切换五种引擎
+        """
+        # 连接检查
+        if self._client is None or self._session_id is None:
+            return
+
+        # 未指定引擎时循环切换
+        valid_engines = ["legacy", "langgraph", "plan_execute", "debate", "pipeline"]
+        if not engine:
+            current = getattr(self, "_engine", "legacy")
+            idx = valid_engines.index(current) if current in valid_engines else 0
+            engine = valid_engines[(idx + 1) % len(valid_engines)]
+
+        # 验证引擎名称有效性
+        if engine not in valid_engines:
+            self._append(Static(
+                f"[yellow]usage: /engine [{'|'.join(valid_engines)}], got {engine!r}[/yellow]",
+                classes="log-line",
+            ))
+            return
+
+        try:
+            # 发送设置命令到 core 服务
+            result = await self._client.send_command(
+                "session.set_engine",
+                {"session_id": self._session_id, "engine": engine},
+            )
+            # 更新本地状态
+            self._engine = result.get("engine", engine)
+            # 显示切换结果
+            self._append(Static(
+                f"[bold cyan]⚙️  Engine[/bold cyan]  [dim]{self._engine}[/dim]",
+                classes="log-line",
+            ))
+            self._update_header("ready")
+        except (IpcError, RuntimeError, OSError) as e:
+            self._append(Static(f"[red]engine switch error: {e}[/red]", classes="log-line"))
+
     async def _do_rename_session(self, title: str) -> None:
         """
         执行重命名会话操作
@@ -1751,6 +1814,7 @@ class IwanTuiApp(App[None]):
         self._append(Static("  [cyan]/auto [off|read_only|on][/cyan]  切换自动模式", classes="log-line"))
         self._append(Static("  [cyan]/effort [minimal|low|medium|high|max][/cyan]  切换努力等级", classes="log-line"))
         self._append(Static("  [cyan]/model [fast|balanced|powerful][/cyan]  切换模型预设", classes="log-line"))
+        self._append(Static("  [cyan]/engine [legacy|langgraph|plan_execute|debate|pipeline][/cyan]  切换 Agent 引擎", classes="log-line"))
         self._append(Static("  [cyan]/compact[/cyan]         压缩上下文窗口", classes="log-line"))
         self._append(Static("  [cyan]/checkpoint list[/cyan]  列出所有检查点", classes="log-line"))
         self._append(Static("  [cyan]/checkpoint restore <n>[/cyan]  恢复到指定检查点", classes="log-line"))

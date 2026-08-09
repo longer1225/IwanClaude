@@ -412,6 +412,38 @@ class SessionSetModelResult(BaseModel):
     preset: str
 
 
+class SessionSetEngineCommand(BaseModel):
+    """
+    设置 Agent 引擎命令 - 客户端请求动态切换执行引擎
+
+    【字段说明】
+    - type: Literal["session.set_engine"] - 命令类型
+    - session_id: str - 会话 ID
+    - engine: str - 引擎名称（legacy / langgraph / plan_execute / debate / pipeline）
+
+    【设计目的】
+    允许客户端在运行时动态切换 Agent 引擎，无需重启 core。
+    不同引擎适合不同任务：legacy（简单）、langgraph（ReAct）、plan_execute（规划执行）、
+    debate（辩论）、pipeline（多角色流水线）。
+
+    【响应】
+    SessionSetEngineResult - 包含设置后的引擎名称
+    """
+    type: Literal["session.set_engine"] = "session.set_engine"
+    session_id: str
+    engine: str
+
+
+class SessionSetEngineResult(BaseModel):
+    """
+    设置引擎响应 - 服务器返回的设置结果
+
+    【字段说明】
+    - engine: str - 当前引擎名称
+    """
+    engine: str
+
+
 class SessionListCommand(BaseModel):
     """
     会话列表命令 - 客户端请求列出所有会话

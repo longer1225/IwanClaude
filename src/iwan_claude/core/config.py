@@ -84,11 +84,12 @@ class AgentConfig:
     
     属性：
         max_steps: Agent 执行的最大步骤数（防止无限循环）
-        engine: Agent 引擎类型（legacy / langgraph / plan_execute / debate）
+        engine: Agent 引擎类型（legacy / langgraph / plan_execute / debate / pipeline）
             - legacy: 简单循环实现（AgentLoop）
             - langgraph: LangGraph ReAct 引擎（chat→tools 循环）
             - plan_execute: LangGraph Plan & Execute 引擎（先规划再执行再反思）
             - debate: LangGraph Worker-Critic 辩论引擎（worker 回答 → critic 审查 → 改进循环）
+            - pipeline: LangGraph 三角色流水线引擎（planner 规划 → executor 执行 → reviewer 审查）
         checkpoint_backend: 检查点存储后端（none, memory, sqlite）
         checkpoint_db_path: SQLite 检查点数据库路径
         auto_mode: 自动模式（off / read_only / on）

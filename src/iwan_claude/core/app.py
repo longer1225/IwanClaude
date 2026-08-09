@@ -95,6 +95,8 @@ from iwan_claude.core.bus.commands import (
     SessionSetEffortLevelResult,    # 设置努力等级结果
     SessionSetModelCommand,         # 设置模型预设命令
     SessionSetModelResult,          # 设置模型预设结果
+    SessionSetEngineCommand,        # 设置引擎命令
+    SessionSetEngineResult,         # 设置引擎结果
     SessionListCommand,             # 会话列表命令
     SessionListResult,              # 会话列表结果
     SessionInfo,                    # 会话信息
@@ -652,6 +654,38 @@ class CoreApp:
         # 返回设置后的预设
         return SessionSetModelResult(preset=cmd.preset)
 
+    # 设置 Agent 引擎（动态切换，无需重启 core）
+    async def _session_set_engine_handler(self, params: dict[str, Any]) -> SessionSetEngineResult:
+        """
+        处理 session.set_engine RPC 请求 - 动态切换 Agent 引擎
+
+        参数：
+            params: 请求参数，包含 session_id 和 engine 字段
+
+        返回：
+            SessionSetEngineResult: 包含设置后的引擎名称
+        """
+        assert self._sessions is not None
+
+        # 验证请求参数
+        cmd = SessionSetEngineCommand.model_validate(params)
+
+        # 确保会话存在
+        self._sessions._get_session(cmd.session_id)
+
+        # 验证引擎名称有效性
+        valid_engines = {"legacy", "langgraph", "plan_execute", "debate", "pipeline"}
+        if cmd.engine not in valid_engines:
+            raise ValueError(
+                f"Invalid engine '{cmd.engine}'. Valid engines: {', '.join(sorted(valid_engines))}"
+            )
+
+        # 修改配置中的引擎设置（下次 run_and_capture 时生效）
+        self._config.agent.engine = cmd.engine
+
+        # 返回设置后的引擎名称
+        return SessionSetEngineResult(engine=cmd.engine)
+
     # 列出所有会话
     async def _session_list_handler(self, params: dict[str, Any]) -> SessionListResult:
         """
@@ -988,6 +1022,7 @@ class CoreApp:
         server.register("session.set_auto_mode", self._session_set_auto_mode_handler)
         server.register("session.set_effort_level", self._session_set_effort_level_handler)
         server.register("session.set_model", self._session_set_model_handler)
+        server.register("session.set_engine", self._session_set_engine_handler)
         server.register("session.list", self._session_list_handler)
         server.register("session.rename", self._session_rename_handler)
         server.register("session.engine_info", self._session_engine_info_handler)
