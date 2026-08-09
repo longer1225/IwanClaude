@@ -131,6 +131,8 @@ from iwan_claude.core.tools.builtin import (                   # 内置工具
     ViewFileTool,
     WriteFileTool,
     ListCheckpointsTool,
+    ListCustomToolsTool,
+    ReloadToolsTool,
     RestoreCheckpointTool,
 )
 from iwan_claude.core.tools.registry import ToolRegistry       # 工具注册表
@@ -847,6 +849,33 @@ class AgentRunner:
                 registry.register(ListCheckpointsTool(lambda: checkpointer, lambda: session_id))
             if _ok("restore_checkpoint"):
                 registry.register(RestoreCheckpointTool(lambda: checkpointer, lambda: session, lambda: session_id))
+
+        # ========== 第十六类：自定义工具（热加载） ==========
+        # 从 .iwan/tools/（项目级）和 ~/.iwan/tools/（用户级）扫描 .py 文件，
+        # 动态加载 BaseTool 子类。用户放工具文件到约定目录即可扩展 Agent 能力，无需改代码、无需重启。
+        from iwan_claude.core.tools.loader import ToolLoader
+
+        tool_loader = ToolLoader()
+        # 构建依赖注入字典：自定义工具可通过 required_deps 声明需要的运行时依赖
+        # index_manager 可能不存在（RAG 未启用时），用 locals().get 安全获取
+        hot_reload_deps = {
+            "bus": bus,
+            "provider": provider,
+            "config": self._config,
+            "session_id": session_id,
+            "permission_manager": self._permission_manager,
+            "index_manager": locals().get("index_manager"),
+        }
+        # 启动时加载自定义工具
+        for custom_tool in tool_loader.load_all(hot_reload_deps):
+            if _ok(custom_tool.name):
+                registry.register(custom_tool)
+
+        # 注册热加载管理工具（Agent 可在对话中调用 reload_tools 加载新工具）
+        if _ok("reload_tools"):
+            registry.register(ReloadToolsTool(tool_loader, lambda: registry, hot_reload_deps))
+        if _ok("list_custom_tools"):
+            registry.register(ListCustomToolsTool(tool_loader, hot_reload_deps))
 
         # 返回构建完成的工具注册表
         return registry

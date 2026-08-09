@@ -84,6 +84,10 @@ class BaseTool(ABC):
     description: str
     input_schema: dict[str, object]
     params_model: ClassVar[type[BaseModel] | None] = None
+    # 热加载依赖声明：工具类列出需要的运行时依赖名（如 ["bus", "provider"]），
+    # ToolLoader 会从 deps dict 中取出对应依赖传给构造函数。
+    # 空列表表示无依赖，可直接无参实例化。详见 tools/loader.py。
+    required_deps: ClassVar[list[str]] = []
 
     @abstractmethod
     async def invoke(self, params: dict[str, object]) -> ToolResult:

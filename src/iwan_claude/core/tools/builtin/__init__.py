@@ -100,6 +100,10 @@ from iwan_claude.core.tools.builtin.task_get import TaskGetTool
 from iwan_claude.core.tools.builtin.task_list import TaskListTool
 from iwan_claude.core.tools.builtin.task_update import TaskUpdateTool
 from iwan_claude.core.tools.builtin.write_file import WriteFileTool
+from iwan_claude.core.tools.builtin.hot_reload import (
+    ListCustomToolsTool,
+    ReloadToolsTool,
+)
 
 __all__ = [
     "BashTool",
@@ -111,6 +115,7 @@ __all__ = [
     "FileExistsTool",
     "FileStatTool",
     "FindFilesTool",
+    "ListCustomToolsTool",
     "GitCheckoutTool",
     "GitCommitTool",
     "GitDiffTool",
@@ -143,6 +148,7 @@ __all__ = [
     "ListCheckpointsTool",
     "RestoreCheckpointTool",
     "ReadFileTool",
+    "ReloadToolsTool",
     "RenameFileTool",
     "RunPythonTool",
     "SkillCreateTool",
