@@ -249,6 +249,11 @@ class IwanTuiApp(App[None]):
         # 用户输入历史列表，用于 Ctrl+R 搜索历史功能
         # 最多保存 100 条记录，新记录插入头部
         self._history: list[str] = []
+        # ===== UI 心跳相关：顶部状态栏 running 时长显示 =====
+        # 记录最近一次传给 _update_header 的 state，供心跳回调读取
+        self._header_state: str = "connecting"
+        # 进入 running 状态时刻的 perf_counter()；非 running 时为 None
+        self._run_start_ts: float | None = None
 
     @property
     def _session_id(self) -> str | None:
@@ -836,6 +841,8 @@ class IwanTuiApp(App[None]):
         prompt.disabled = True
         # 设置边框标题显示连接状态
         prompt.border_title = "connecting..."
+        # 启动全局 UI 心跳定时器：每 2 秒检查一次 running 状态的时长并刷新显示
+        self.set_interval(2.0, self._ui_heartbeat_tick, pause=False)
 
     def _build_slash_items(self) -> list[tuple[str, str]]:
         """
@@ -2104,33 +2111,46 @@ class IwanTuiApp(App[None]):
         # 返回带样式的进度条
         return f"[{color}]{label} {bar}[/{color}]"
 
-    def _update_header(self, state: str) -> None:
+    # ========================================================================
+    # 全局运行心跳（顶部状态栏 running 时长显示）
+    # ========================================================================
+    # _run_start_ts: 状态进入 running 时记录 perf_counter，ready/disconnected 时置 None
+    # _header_state: 最近一次 _update_header 收到的 state 名称
+    # 设计思路：
+    #   - 进入 running 时开始计时，每 2 秒把状态重渲染为 "running (32s)"
+    #   - 给用户心理锚点：知道 Agent 真的在跑而不是卡住，也知道跑了多久
+    #   - 超 3 分钟和超 10 分钟还在 running 时，用更醒目的颜色提示"可能慢"
+    def _ui_heartbeat_tick(self) -> None:
+        """每 2 秒触发的 UI 心跳。若当前为 running，刷新带时长的状态文案。"""
+        state = getattr(self, "_header_state", "ready")
+        if state == "running" and self._run_start_ts is not None:
+            import time as _t
+            sec = _t.perf_counter() - self._run_start_ts
+            # 状态颜色 + 时长后缀
+            if sec >= 600:  # 10 分钟：非常长，怀疑卡住
+                color = "bold red"
+                hint = "(stuck? use /compact)"
+            elif sec >= 180:  # 3 分钟：较长
+                color = "bold magenta"
+                hint = "(slow)"
+            else:  # 正常
+                color = "yellow"
+                hint = ""
+            label = f"running ({sec:.0f}s) {hint}"
+            # 直接刷新 header 中的 state 部分，避免重复构造 engine_info 等
+            self._render_header_with(state_name="running", override_color=color, override_label=label)
+
+    def _render_header_with(
+        self,
+        *,
+        state_name: str,
+        override_color: str | None = None,
+        override_label: str | None = None,
+    ) -> None:
         """
-        根据连接和运行状态刷新顶部状态栏
-
-        状态栏是 TUI 的"信息中枢"，显示所有关键状态信息。
-        任何状态变更都应通过此方法反映到 UI。
-
-        参数：
-            state: str - 当前状态
-                - "ready": 就绪，绿色
-                - "running": 运行中，黄色
-                - "disconnected": 已断连，红色
-                - "connecting": 连接中，灰色
-
-        状态栏内容：
-        - 应用名称：IwanClaude
-        - 连接地址：host:port
-        - 会话 ID（如有）
-        - 引擎类型（langgraph 用青色高亮）
-        - 检查点后端（仅 langgraph 模式且非 none 时显示）
-        - 自动模式、努力等级、模型预设（带颜色编码）
-        - 状态指示（颜色编码）
-
-        响应式设计说明：
-            - 此方法集中管理状态栏渲染
-            - 所有属性变更（_busy, _auto_mode 等）都通过此方法反映
-            - 单一职责：只负责 UI 渲染，不涉及业务逻辑
+        内部方法：渲染顶部状态栏。
+        - override_color / override_label: 用于心跳刷新时替换 state 的颜色和文案，
+          不改动 _header_state 语义，只影响视觉显示。
         """
         try:
             header = self.query_one("#header", Label)
@@ -2138,13 +2158,15 @@ class IwanTuiApp(App[None]):
             return
         # 构建会话 ID 显示部分
         session = f"  [dim]{self._session_id}[/dim]" if self._session_id else ""
-        # 状态颜色映射
-        color = {
+        # 基础状态颜色
+        color = override_color or {
             "ready": "green",
             "running": "yellow",
             "disconnected": "red",
             "connecting": "dim",
-        }.get(state, "dim")
+        }.get(state_name, "dim")
+        # 状态显示文本
+        label = override_label or state_name
         # 引擎类型显示（LangGraph 系引擎用青色高亮，legacy 用暗色）
         engine_color = "cyan" if self._engine_type != "legacy" else "dim"
         engine_info = f"  [{engine_color}]{self._engine_type}[/{engine_color}]"
@@ -2163,8 +2185,30 @@ class IwanTuiApp(App[None]):
         # 组装并更新状态栏
         header.update(
             f"[bold]IwanClaude[/bold]  [dim]{self._host}:{self._port}[/dim]"
-            f"{session}{engine_info}{auto_info}{effort_info}{model_info}  [{color}]{state}[/{color}]"
+            f"{session}{engine_info}{auto_info}{effort_info}{model_info}  [{color}]{label}[/{color}]"
         )
+
+    def _update_header(self, state: str) -> None:
+        """
+        根据连接和运行状态刷新顶部状态栏，并在进入 running 时启动/重置时长计时。
+
+        参数：
+            state: str - 当前状态
+                - "ready": 就绪，绿色
+                - "running": 运行中，黄色（带每 2 秒心跳刷新）
+                - "disconnected": 已断连，红色
+                - "connecting": 连接中，灰色
+        """
+        # 记录最近状态，供心跳回调复用
+        self._header_state = state
+        # 进入 running 时开始计时；其他状态清零
+        import time as _t
+        if state == "running":
+            self._run_start_ts = _t.perf_counter()
+        else:
+            self._run_start_ts = None
+        # 用默认颜色和文案正常渲染
+        self._render_header_with(state_name=state)
 
     async def _socket_loop(self) -> None:
         """

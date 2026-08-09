@@ -2,8 +2,12 @@
 # ---------------------------------------------------------------------------
 # 可折叠的工具调用块模块
 # 本模块从 app.py 中提取 ToolCallBlock 类，负责在日志流中展示工具调用的摘要与详情。
-# 设计要点：使用 CSS 类（expanded）控制展开/折叠状态，点击切换显示。
+# 设计要点：使用 CSS 类（expanded）控制展开/折叠状态，点击切换显示；
+#         工具执行中每秒刷新 elapsed 耗时（心跳），让用户知道"还在跑，没卡死"。
 # ---------------------------------------------------------------------------
+
+# time.perf_counter：高精度计时（工具运行中心跳秒数计算）
+import time
 
 # 从 textual.widget 导入 Widget 基类，ToolCallBlock 继承 Widget 而非 Static
 # 因为需要包含多个子 widget（摘要 + 详情）
@@ -78,6 +82,7 @@ class ToolCallBlock(Widget):
             _elapsed_ms: 执行耗时（毫秒），初始为 0
             _is_error: 是否为错误状态，初始为 False
             _finished: 是否已完成，初始为 False
+            _start_ts: 工具调用开始时间戳（perf_counter），用于运行中心跳刷新
         """
         # 调用父类 Widget 的 __init__
         super().__init__()
@@ -97,6 +102,44 @@ class ToolCallBlock(Widget):
         self._is_error = False
         # 标记工具调用是否已完成，初始为 False
         self._finished = False
+        # 【新增】工具调用开始的高精度时间戳，用于运行中心跳刷新
+        # 工具块创建 ≈ 工具开始执行，所以这里直接记录当前 perf_counter
+        self._start_ts: float = time.perf_counter()
+
+    def _refresh_summary(self) -> None:
+        """
+        便捷方法：刷新 summary 子组件的内容（若已挂载）。
+        避免在多处重复写 if self.children: query_one(...).update(...)
+        """
+        if self.children:
+            self.query_one(".summary", Static).update(self._summary())
+
+    def on_mount(self) -> None:
+        """
+        Widget 挂载后启动运行中心跳定时器。
+        【心跳行为】
+        - 仅在 _finished=False 时刷新摘要，显示实时 elapsed
+        - 刷新间隔 1.0s，避免频繁渲染
+        - set_result() 完成时会调用 stop() 停止心跳
+        """
+        # set_interval 返回一个 Timer 对象，可以在 set_result 中 cancel
+        self._timer = self.set_interval(1.0, self._on_heartbeat, pause=False)
+
+    def _on_heartbeat(self) -> None:
+        """
+        每秒触发的心跳回调。
+        - 如果尚未完成：根据 perf_counter 计算实时耗时，刷新摘要
+        - 如果已完成：停止心跳定时器
+        """
+        if self._finished:
+            # 工具已经完成，停止心跳（防止"僵尸定时器"）
+            self._timer.pause()
+            return
+        # 根据当前时间与 _start_ts 差值计算实时毫秒数
+        now_ms = int((time.perf_counter() - self._start_ts) * 1000)
+        self._elapsed_ms = now_ms
+        # 刷新摘要（显示 "running  XX.Xs" 的状态）
+        self._refresh_summary()
 
     def compose(self) -> ComposeResult:
         """
@@ -124,11 +167,12 @@ class ToolCallBlock(Widget):
             str: 格式化的摘要文本
 
         特殊处理：
+        - 运行中：显示 "running ... Xs" 心跳状态，>30s 黄色警告，>120s 红色提示"可能卡住"
         - note_save 工具完成且无错误时显示 "remembered" 标签
-        - 其他工具显示工具名称、参数摘要和状态
+        - 其他完成工具显示工具名称、参数摘要和 done/failed 状态
 
         显示格式：
-            "tool" tool_name params_pre status elapsed_ms (click to expand)
+            "tool" tool_name params_pre running|done|failed elapsed (click to expand)
         """
         # note_save 工具在成功完成后显示特殊的 "remembered" 标签
         if self._tool_name == "note_save" and self._finished and not self._is_error:
@@ -141,8 +185,28 @@ class ToolCallBlock(Widget):
         # 如果有参数摘要，追加到摘要行
         if params_pre:
             line += f"  [dim]{params_pre}[/dim]"
-        # 如果工具调用已完成，追加状态信息
-        if self._finished:
+
+        # ========== 状态追加 ==========
+        if not self._finished:
+            # --- 运行中状态（带心跳 elapsed 和长时间警告）---
+            sec = self._elapsed_ms / 1000.0
+            # 根据耗时长度选择不同颜色和文案
+            if sec >= 120:
+                # 超过 2 分钟：红色提示，可能卡住
+                color = "bold red"
+                status = "running (slow?)"
+            elif sec >= 30:
+                # 超过 30 秒：黄色警告，脚本可能本来就慢
+                color = "bold yellow"
+                status = "running"
+            else:
+                # 30 秒内：正常运行，蓝色/青色
+                color = "bold cyan"
+                status = "running"
+            # 格式化成秒（一位小数），避免用户看"517046ms"看得头晕
+            line += f"  [{color}]{status}[/{color}]  [dim]{sec:.1f}s[/dim]"
+        else:
+            # --- 完成状态 ---
             # 根据是否为错误状态选择颜色
             color = "red" if self._is_error else "green"
             # 根据错误状态选择状态文本
@@ -159,6 +223,7 @@ class ToolCallBlock(Widget):
         工具调用完成时更新结果并刷新摘要
 
         更新工具调用的结果、耗时和状态，并刷新摘要显示。
+        【额外行为】完成后立即停止心跳定时器，避免无谓刷新。
 
         参数：
             output: str - 工具输出内容
@@ -174,16 +239,21 @@ class ToolCallBlock(Widget):
         # 典型场景：sandbox 错误消息 "[sandbox] quota exceeded" 中的方括号；
         # 以及 json 输出里的任何方括号，都要安全渲染为普通文本。
         self._output = escape(output)
-        # 保存执行耗时
+        # 保存执行耗时（以服务端返回的 elapsed_ms 为准，不使用本地心跳）
         self._elapsed_ms = elapsed_ms
         # 保存错误状态
         self._is_error = is_error
         # 标记工具调用已完成
         self._finished = True
+        # 完成后停止心跳定时器（防止"僵尸定时器"继续每秒刷新）
+        try:
+            if hasattr(self, "_timer") and self._timer is not None:
+                self._timer.pause()
+        except Exception:
+            # 极端情况：timer 操作抛异常不影响核心结果显示
+            pass
         # 如果 widget 已有子组件（即已挂载到 DOM），实时更新摘要显示
-        if self.children:
-            # 通过 query_one 查找 .summary 子 widget 并更新其内容为最新摘要
-            self.query_one(".summary", Static).update(self._summary())
+        self._refresh_summary()
 
     def on_click(self) -> None:
         """

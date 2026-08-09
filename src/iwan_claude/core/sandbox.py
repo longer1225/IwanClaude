@@ -54,6 +54,42 @@ class SandboxAccessError(PermissionError):
         )
 
 
+# 计算沙箱总配额时，需要排除的常见大体积非项目源文件目录
+# 【原因】
+#   sandbox_root 默认等于 CWD（项目根），项目目录里除了源码还有很多"环境产物"，
+#   如虚拟环境 .venv（>100MB）、Git 历史 .git（>10MB）、Python 字节码缓存等，
+#   这些都是开发者环境的一部分，不应该算到"Agent 写入沙箱"的配额里。
+#   如果不排除，随便一个新项目配 100MB quota 都会立即超限。
+_QUOTA_EXCLUDE_DIR_NAMES: frozenset[str] = frozenset(
+    {
+        # --- Python 生态 ---
+        ".venv", "venv",                 # 虚拟环境（常见 > 100MB）
+        "env", ".env_root",
+        "__pycache__",                   # 字节码缓存
+        ".pytest_cache",                 # pytest 缓存
+        ".mypy_cache", ".pytype",        # 类型检查缓存
+        ".ruff_cache",
+        "site-packages",
+        # --- 版本管理 ---
+        ".git", ".svn", ".hg",
+        # --- 前端生态 ---
+        "node_modules",                  # 前端依赖（常见 > 500MB）
+        ".next", ".nuxt", ".cache",
+        "dist", "build",
+        # --- IDE / 工具 ---
+        ".idea", ".vscode",
+        ".tox", ".nox",
+        "__pycache__",
+        # --- 本项目自身 ---
+        ".iwan",                         # 项目本地：rag_index / sessions / audit.log 等
+    }
+)
+# 排除的大体积文件扩展名（一般是二进制产物、数据库、日志轮转）
+_QUOTA_EXCLUDE_SUFFIXES: frozenset[str] = frozenset(
+    {".pyc", ".pyo", ".so", ".dll", ".pyd", ".o", ".a", ".lib", ".exe", ".log"}
+)
+
+
 class SandboxManager:
     """
     沙箱管理器 - 管理路径级别的文件访问控制
@@ -239,22 +275,41 @@ class SandboxManager:
 
     def get_total_used(self) -> int:
         """
-        获取沙箱目录当前已使用的总字节数
+        获取沙箱目录当前已使用的总字节数（排除非项目源目录）
+
+        【排除策略】
+        - 目录级：跳过 .venv / .git / __pycache__ / node_modules 等环境产物
+        - 后缀级：跳过 .pyc / .so / .dll / .log 等二进制/日志产物
+        - 剪枝：os.walk topdown=True，从 dirnames 原地移除被排除项，避免进入子树
 
         【返回】
-        - int: 沙箱内所有文件的总大小（字节）
+        - int: 沙箱内"用户/Agent真正写入的源码文件"的总大小（字节）
         """
         total = 0
         if not self._sandbox_root.exists() or not self._sandbox_root.is_dir():
             return 0
 
-        for dirpath, _dirnames, filenames in os.walk(self._sandbox_root):
+        # topdown=True：先拿到当前目录的子目录列表，再原地修改 dirnames 剪枝
+        # os.walk 会跳过被移除的目录，提高 scan 速度，避免 .venv 里的几十万文件
+        for dirpath, dirnames, filenames in os.walk(
+            self._sandbox_root, topdown=True, followlinks=False
+        ):
+            # --- 子目录剪枝：原地移除需要排除的目录名 ---
+            # 注意：必须用 dirnames[:] 切片赋值来修改"同一列表对象"，否则 os.walk 感知不到
+            dirnames[:] = [
+                d for d in dirnames if d not in _QUOTA_EXCLUDE_DIR_NAMES
+            ]
+            # --- 统计文件 ---
             for filename in filenames:
+                # 跳过大体积后缀（如 .pyc 字节码）
+                if Path(filename).suffix.lower() in _QUOTA_EXCLUDE_SUFFIXES:
+                    continue
                 filepath = Path(dirpath) / filename
                 try:
-                    total += filepath.stat().st_size
+                    st = filepath.stat()
                 except OSError:
                     continue
+                total += st.st_size
         return total
 
     def check_total_quota(self, additional_bytes: int = 0) -> None:
@@ -271,10 +326,30 @@ class SandboxManager:
             return
 
         current = self.get_total_used()
-        if current + additional_bytes > self._config.max_total_size:
-            raise ValueError(
-                f"sandbox quota exceeded: current {current} + {additional_bytes} bytes > limit {self._config.max_total_size} bytes"
+        limit = self._config.max_total_size
+        if current + additional_bytes > limit:
+            # --- 错误提示增强 ---
+            # 1) current 异常大（>5GB 基本意味着剪枝还不够或 sandbox_root 指错到了用户目录）
+            #    给出额外提示，不要只报天文数字让用户困惑
+            extras: list[str] = []
+            if current > 5 * 1024 * 1024 * 1024:  # > 5GB
+                extras.append(
+                    f"[warn] current_size is abnormally large ({current / (1024**3):.1f} GiB); "
+                    "sandbox root may not be pointing at your project dir, or excludes need tuning"
+                )
+            # 2) 标准修复建议
+            fix = (
+                "Fix: increase [sandbox].max_total_size in D:\\IwanClaude\\.iwan\\config.toml "
+                "or set env IWAN_SANDBOX_MAX_TOTAL_SIZE=3000000000 then restart core."
             )
+            msg = (
+                f"sandbox quota exceeded: current {current} + {additional_bytes} bytes "
+                f"> limit {limit} bytes"
+            )
+            if extras:
+                msg += "\n  " + "\n  ".join(extras)
+            msg += "\n  " + fix
+            raise ValueError(msg)
 
     def ensure_sandbox_exists(self) -> None:
         """确保沙箱根目录存在（不存在则创建）"""
