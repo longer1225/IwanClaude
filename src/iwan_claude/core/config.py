@@ -232,18 +232,19 @@ class SandboxConfig:
     沙箱配置类 - 对应 [sandbox] section
     
     沙箱是一个受限的文件系统环境，用于限制 Agent 的文件操作范围。
-    
+    默认 root 为 "."（当前工作目录/项目根），Agent 可操作项目文件但不能越界。
+
     属性：
         enabled: 是否启用沙箱
-        root: 沙箱根目录
-        allow_parent_dirs: 是否允许访问父目录（突破沙箱限制）
+        root: 沙箱根目录（默认 "."=CWD，Agent 可操作项目文件但不能越界到 ~/.ssh、/etc 等）
+        allow_parent_dirs: 是否允许访问 sandbox_root 的祖先目录（monorepo 场景）
         max_file_size: 单个文件最大大小（字节）
         max_total_size: 沙箱总大小限制（字节）
         search_limited: 是否限制搜索范围（在沙箱内）
-        ask_on_access_denied: 访问被拒绝时是否询问用户
+        ask_on_access_denied: 访问被拒绝时的错误提示措辞（不再影响拦截行为，越界始终抛 SandboxAccessError）
     """
     enabled: bool = True
-    root: str = "./sandbox"
+    root: str = "."
     allow_parent_dirs: bool = False
     max_file_size: int = 10 * 1024 * 1024  # 10MB
     max_total_size: int = 100 * 1024 * 1024  # 100MB

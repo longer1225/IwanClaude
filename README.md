@@ -2,7 +2,7 @@
 
 ![Python](https://img.shields.io/badge/Python-3.12-blue)
 ![Engines](https://img.shields.io/badge/Agent%20Engines-4-green)
-![Tests](https://img.shields.io/badge/Tests-589+-brightgreen)
+![Tests](https://img.shields.io/badge/Tests-635+-brightgreen)
 ![License](https://img.shields.io/badge/License-MIT-yellow)
 
 **本地优先的 AI Agent 系统** —— 4 种可切换执行引擎、三层记忆、RAG 检索、安全沙箱、多智能体并行，全部跑在你自己的机器上。
@@ -153,4 +153,4 @@ IWAN_AGENT_ENGINE=langgraph uv run iwan-core
 uv run python -m pytest tests/unit/ -q
 ```
 
-当前 52 个测试文件、589+ 个测试用例覆盖核心模块：引擎逻辑、工具调用、权限管理、RAG 检索、会话管理、IPC 通信、沙箱安全、工具热加载等。
+当前 53 个测试文件、635+ 个测试用例覆盖核心模块：引擎逻辑、工具调用、权限管理、RAG 检索、会话管理、IPC 通信、沙箱安全、工具热加载等。

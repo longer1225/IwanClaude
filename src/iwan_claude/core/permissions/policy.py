@@ -59,14 +59,32 @@ class PermissionDecision(StrEnum):
     ASK = "ask"
 
 
-# 检测 bash 命令是否操作 cwd 之外路径的正则规则列表（强制触发 ASK，不可被 allow_patterns 绕过）
+# 检测 bash/PowerShell 命令是否操作 cwd 之外路径的正则规则列表（强制触发 ASK，不可被 allow_patterns 绕过）
+# 同时覆盖 Unix 和 Windows 路径模式
 OUTSIDE_CWD_HEURISTICS: list[str] = [
-    r"(^|\s)/[^\s]",              # 绝对路径（如 /etc/passwd）
+    # === Unix 路径 ===
+    r"(^|\s)/[^\s]",              # Unix 绝对路径（如 /etc/passwd）
     r"(^|\s)~",                   # 波浪号 home（如 ~/.bashrc）
     r"(^|\s)\.\.(/|$|\s)",        # 父目录遍历（如 ../etc/passwd）
     r"\$\{?HOME\b",               # $HOME 环境变量
     r"\$\{?PWD\b",                # $PWD 环境变量
-    r"(^|\s|;|&&|\|\|)cd(\s|$)",  # 显式 cd 命令
+    r"(^|\s|;|&&|\|\|)cd(\s|$)",  # Unix cd 命令
+    # === Windows 路径 ===
+    r"(^|\s)[A-Za-z]:[\\/]",      # Windows 盘符绝对路径（如 C:\Users、D:\data）
+    r"(^|\s)\\\\[^\s]",           # UNC 路径（如 \\server\share）
+    r"(?i)%USERPROFILE%",         # %USERPROFILE% 环境变量
+    r"(?i)%TEMP%",                # %TEMP% / %TMP%
+    r"(?i)%APPDATA%",             # %APPDATA%
+    r"(?i)%LOCALAPPDATA%",        # %LOCALAPPDATA%
+    r"(?i)%WINDIR%",              # %WINDIR% / %SystemRoot%
+    r"(?i)%SYSTEMROOT%",          # %SYSTEMROOT%
+    r"(?i)%PROGRAMFILES%",        # %PROGRAMFILES%
+    # === PowerShell 目录切换命令 ===
+    r"(?i)(^|\s|;|&&|\|\|)Set-Location(\s|$)",   # PowerShell cd 等价
+    r"(?i)(^|\s|;|&&|\|\|)Push-Location(\s|$)",  # PowerShell pushd
+    r"(?i)(^|\s|;|&&|\|\|)Pop-Location(\s|$)",   # PowerShell popd
+    # === 通用父目录遍历（Windows 反斜杠）===
+    r"(^|\s)\.\.[\\/]",           # Windows 父目录遍历（如 ..\..\secret）
 ]
 
 # 编译正则表达式列表（预编译提高性能）
@@ -87,20 +105,30 @@ def matches_outside_cwd(command: str) -> bool:
     检测危险命令，强制触发用户确认，防止恶意操作。
 
     【启发式规则】
+    Unix:
     - 绝对路径：/etc/passwd
     - 波浪号 home：~/.bashrc
     - 父目录遍历：../etc/passwd
     - 环境变量：$HOME, $PWD
     - 显式 cd：cd /etc
 
+    Windows:
+    - 盘符绝对路径：C:\\Users\\...
+    - UNC 路径：\\\\server\\share
+    - 环境变量：%USERPROFILE%, %TEMP%, %APPDATA%, %WINDIR% 等
+    - PowerShell 目录切换：Set-Location, Push-Location, Pop-Location
+    - Windows 父目录遍历：..\\..\\secret
+
     【安全设计】
     命中规则的命令强制触发 ASK，不可被 allow_patterns 绕过。
 
     【示例】
     ```python
-    matches_outside_cwd("ls")        # False
-    matches_outside_cwd("ls /etc")   # True
-    matches_outside_cwd("cd ..")     # True
+    matches_outside_cwd("ls")              # False
+    matches_outside_cwd("ls /etc")         # True
+    matches_outside_cwd("cd ..")           # True
+    matches_outside_cwd("type C:\\\\...")  # True
+    matches_outside_cwd("echo %TEMP%")     # True
     ```
     """
     # 检查命令是否匹配任何 outside-cwd 规则

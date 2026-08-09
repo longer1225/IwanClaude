@@ -26,6 +26,7 @@ import sys
 from pydantic import BaseModel, ConfigDict, Field
 
 from iwan_claude.core.tools.base import BaseTool, ToolResult
+from iwan_claude.core.sandbox import get_sandbox
 
 # 最大输出字节数：64 KB，防止返回过多内容
 _MAX_OUTPUT_BYTES = 64 * 1024
@@ -135,6 +136,12 @@ class BashTool(BaseTool):
         command = p.command
         timeout = p.timeout
 
+        # 获取沙箱根目录作为子进程工作目录
+        # 沙箱启用时，命令在项目目录内执行（相对路径基于项目根）
+        # 沙箱未启用时，使用 None（继承父进程 CWD）
+        sandbox = get_sandbox()
+        cwd = str(sandbox.root) if sandbox.enabled else None
+
         try:
             if IS_WINDOWS:
                 # Windows：使用 PowerShell 执行命令
@@ -151,6 +158,7 @@ class BashTool(BaseTool):
                     ps_command,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.STDOUT,  # 将 stderr 合并到 stdout
+                    cwd=cwd,  # 沙箱根目录作为工作目录
                 )
             else:
                 # Linux / macOS：使用默认 shell 执行命令
@@ -158,6 +166,7 @@ class BashTool(BaseTool):
                     command,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.STDOUT,  # 将 stderr 合并到 stdout
+                    cwd=cwd,  # 沙箱根目录作为工作目录
                 )
 
             # 2. 等待命令完成（带超时控制）
