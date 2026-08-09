@@ -683,6 +683,16 @@ class CoreApp:
         # 修改配置中的引擎设置（下次 run_and_capture 时生效）
         self._config.agent.engine = cmd.engine
 
+        # 发布事件通知客户端引擎已变更（多客户端状态同步）
+        from iwan_claude.core.bus.events import SessionEngineChangedEvent
+        await self._bus.publish(
+            SessionEngineChangedEvent(
+                session_id=cmd.session_id,
+                engine=cmd.engine,
+                ts=_now(),
+            )
+        )
+
         # 返回设置后的引擎名称
         return SessionSetEngineResult(engine=cmd.engine)
 

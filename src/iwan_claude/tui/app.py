@@ -1114,9 +1114,9 @@ class IwanTuiApp(App[None]):
         if self._client is None or self._session_id is None or self._busy:
             self._append(Static("[yellow]agent busy or disconnected[/yellow]", classes="log-line"))
             return
-        # 检查引擎类型
-        if self._engine_type != "langgraph":
-            self._append(Static("[yellow]checkpoints only available in langgraph mode[/yellow]", classes="log-line"))
+        # 检查引擎类型（legacy 引擎不使用 LangGraph，无检查点支持）
+        if self._engine_type == "legacy":
+            self._append(Static("[yellow]checkpoints only available in LangGraph engines (langgraph/plan_execute/debate/pipeline)[/yellow]", classes="log-line"))
             return
         # 在 worker 中执行检查点列表操作
         self.run_worker(self._do_checkpoint("list", ""), name="checkpoint", exclusive=False)
@@ -1593,8 +1593,8 @@ class IwanTuiApp(App[None]):
         # 未指定引擎时循环切换
         valid_engines = ["legacy", "langgraph", "plan_execute", "debate", "pipeline"]
         if not engine:
-            current = getattr(self, "_engine", "legacy")
-            idx = valid_engines.index(current) if current in valid_engines else 0
+            current = self._engine_type if self._engine_type in valid_engines else "legacy"
+            idx = valid_engines.index(current)
             engine = valid_engines[(idx + 1) % len(valid_engines)]
 
         # 验证引擎名称有效性
@@ -1611,11 +1611,11 @@ class IwanTuiApp(App[None]):
                 "session.set_engine",
                 {"session_id": self._session_id, "engine": engine},
             )
-            # 更新本地状态
-            self._engine = result.get("engine", engine)
+            # 更新本地状态（与状态栏渲染使用的 _engine_type 保持一致）
+            self._engine_type = result.get("engine", engine)
             # 显示切换结果
             self._append(Static(
-                f"[bold cyan]⚙️  Engine[/bold cyan]  [dim]{self._engine}[/dim]",
+                f"[bold cyan]⚙️  Engine[/bold cyan]  [dim]{self._engine_type}[/dim]",
                 classes="log-line",
             ))
             self._update_header("ready")
@@ -2145,11 +2145,11 @@ class IwanTuiApp(App[None]):
             "disconnected": "red",
             "connecting": "dim",
         }.get(state, "dim")
-        # 引擎类型显示（langgraph 用青色高亮）
-        engine_color = "cyan" if self._engine_type == "langgraph" else "dim"
+        # 引擎类型显示（LangGraph 系引擎用青色高亮，legacy 用暗色）
+        engine_color = "cyan" if self._engine_type != "legacy" else "dim"
         engine_info = f"  [{engine_color}]{self._engine_type}[/{engine_color}]"
-        # 检查点后端信息（仅 langgraph 模式且非 none 时显示）
-        if self._engine_type == "langgraph" and self._checkpoint_backend != "none":
+        # 检查点后端信息（非 legacy 引擎且非 none 时显示）
+        if self._engine_type != "legacy" and self._checkpoint_backend != "none":
             engine_info += f"  [dim]({self._checkpoint_backend})[/dim]"
         # 自动模式显示（带颜色编码）
         auto_color = {"off": "dim", "read_only": "yellow", "on": "magenta"}.get(self._auto_mode, "dim")
@@ -2355,6 +2355,7 @@ class IwanTuiApp(App[None]):
         - session.auto_mode_changed: 自动模式变更
         - session.effort_level_changed: 努力等级变更
         - session.model_changed: 模型预设变更
+        - session.engine_changed: Agent 引擎变更
         - run.started: 运行开始，显示运行头部
         - skill.invoked: Skill 被调用，显示 Skill 名称和参数
         - subagent.started: 子 Agent 开始，记录信息并显示
@@ -2456,6 +2457,12 @@ class IwanTuiApp(App[None]):
             # 模型预设变更
             preset = event.get("preset", "balanced")
             self._model_preset = preset
+            self._update_header("ready")
+
+        elif t == "session.engine_changed":
+            # Agent 引擎变更（多客户端同步：其他客户端切换引擎时本端也更新状态栏）
+            engine = event.get("engine", "legacy")
+            self._engine_type = engine
             self._update_header("ready")
 
         # ========== 运行事件 ==========

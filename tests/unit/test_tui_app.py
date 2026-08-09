@@ -321,3 +321,93 @@ def test_update_header_includes_model_preset() -> None:
 
     assert len(updated) == 1
     assert "model:powerful" in updated[0]
+
+
+# 功能：验证 session.engine_changed 事件更新 TUI 内部 _engine_type 状态
+# 设计：直接发送事件，断言 _engine_type 字段被更新（多客户端同步场景）
+def test_engine_changed_event_updates_state() -> None:
+    app = IwanTuiApp("127.0.0.1", 9999)
+    assert app._engine_type == "legacy"  # type: ignore[attr-defined]
+
+    app._handle_event({
+        "type": "session.engine_changed",
+        "session_id": "s1",
+        "engine": "pipeline",
+        "ts": "t",
+    })
+
+    assert app._engine_type == "pipeline"  # type: ignore[attr-defined]
+
+
+# 功能：验证 _update_header 在 LangGraph 系引擎下高亮显示引擎名
+# 设计：设置 _engine_type 为 pipeline，断言渲染文本包含引擎名
+def test_update_header_includes_engine_pipeline() -> None:
+    app = IwanTuiApp("127.0.0.1", 9999)
+    app._session_id = "sess-1"  # type: ignore[assignment]
+    app._engine_type = "pipeline"  # type: ignore[assignment]
+    app._checkpoint_backend = "none"  # type: ignore[assignment]
+    app._auto_mode = "off"  # type: ignore[assignment]
+    app._effort_level = "medium"  # type: ignore[assignment]
+    app._model_preset = "balanced"  # type: ignore[assignment]
+
+    updated: list[str] = []
+
+    class _FakeHeader:
+        def update(self, text: str) -> None:
+            updated.append(text)
+
+    app.query_one = lambda _selector, _widget: _FakeHeader()  # type: ignore[method-assign]
+    app._update_header("ready")
+
+    assert len(updated) == 1
+    assert "pipeline" in updated[0]
+
+
+# 功能：验证 _update_header 在 LangGraph 系引擎 + 检查点后端时显示后端信息
+# 设计：设置 pipeline 引擎 + sqlite 后端，断言渲染文本包含 (sqlite)
+def test_update_header_shows_checkpoint_backend_for_non_legacy_engine() -> None:
+    app = IwanTuiApp("127.0.0.1", 9999)
+    app._session_id = "sess-1"  # type: ignore[assignment]
+    app._engine_type = "debate"  # type: ignore[assignment]
+    app._checkpoint_backend = "sqlite"  # type: ignore[assignment]
+    app._auto_mode = "off"  # type: ignore[assignment]
+    app._effort_level = "medium"  # type: ignore[assignment]
+    app._model_preset = "balanced"  # type: ignore[assignment]
+
+    updated: list[str] = []
+
+    class _FakeHeader:
+        def update(self, text: str) -> None:
+            updated.append(text)
+
+    app.query_one = lambda _selector, _widget: _FakeHeader()  # type: ignore[method-assign]
+    app._update_header("ready")
+
+    assert len(updated) == 1
+    assert "debate" in updated[0]
+    assert "(sqlite)" in updated[0]
+
+
+# 功能：验证 legacy 引擎不显示检查点后端信息
+# 设计：设置 legacy 引擎 + sqlite 后端，断言渲染文本不含 (sqlite)
+def test_update_header_hides_checkpoint_backend_for_legacy_engine() -> None:
+    app = IwanTuiApp("127.0.0.1", 9999)
+    app._session_id = "sess-1"  # type: ignore[assignment]
+    app._engine_type = "legacy"  # type: ignore[assignment]
+    app._checkpoint_backend = "sqlite"  # type: ignore[assignment]
+    app._auto_mode = "off"  # type: ignore[assignment]
+    app._effort_level = "medium"  # type: ignore[assignment]
+    app._model_preset = "balanced"  # type: ignore[assignment]
+
+    updated: list[str] = []
+
+    class _FakeHeader:
+        def update(self, text: str) -> None:
+            updated.append(text)
+
+    app.query_one = lambda _selector, _widget: _FakeHeader()  # type: ignore[method-assign]
+    app._update_header("ready")
+
+    assert len(updated) == 1
+    assert "legacy" in updated[0]
+    assert "(sqlite)" not in updated[0]

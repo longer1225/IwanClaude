@@ -15,7 +15,7 @@
 
 | 模块 | 能力 |
 |------|------|
-| **Agent 引擎** | 4 模式可切换：Legacy / ReAct / Plan&Execute / Debate(worker-critic) |
+| **Agent 引擎** | 5 模式可切换：Legacy / ReAct / Plan&Execute / Debate / Pipeline，支持 TUI 运行时动态路由 |
 | **三层记忆** | 长期记忆(JSONL) + 向量记忆(embedding) + 统一检索 Manager |
 | **RAG** | 6 种分块策略 + 语义+关键词混合检索 + 增量索引 + 查询重写 |
 | **安全沙箱** | 文件系统沙箱 + 6 级权限优先级 + auto_mode 状态机 |
@@ -42,7 +42,7 @@ graph TB
         APP["CoreApp 调度"]
         BUS["EventBus 事件总线"]
         RUNNER["AgentRunner"]
-        ENG["引擎层<br/>Legacy / ReAct / Plan&Execute / Debate"]
+        ENG["引擎层<br/>Legacy / ReAct / Plan&Execute / Debate / Pipeline"]
         TOOLS["ToolRegistry 40+ 工具"]
         PERM["权限管理 + 沙箱"]
         MEM["三层记忆"]
@@ -64,7 +64,7 @@ graph TB
 
 ## 🤖 Agent 引擎对比
 
-通过环境变量 `IWAN_AGENT_ENGINE` 一键切换，4 种引擎共享相同的工具/权限/记忆基础设施：
+通过环境变量 `IWAN_AGENT_ENGINE` 启动指定引擎，或在 TUI 中用 `/engine` 命令运行时动态路由切换，5 种引擎共享相同的工具/权限/记忆基础设施：
 
 | 引擎 | 模式 | 工作流 | 适用场景 |
 |------|------|--------|----------|
@@ -72,8 +72,11 @@ graph TB
 | `langgraph` | ReAct | 边想边做循环 | 探索性任务 |
 | `plan_execute` | Plan & Execute | plan → execute → reflect | 复杂多步骤 |
 | `debate` | Worker-Critic | worker 回答 → critic 评判 → 改进 | 质量敏感任务 |
+| `pipeline` | Planner-Executor-Reviewer | plan → execute → review → 返工 | 多角色协作任务 |
 
 **Debate 引擎**采用 worker-critic 多智能体辩论：worker 回答问题（可调用工具），独立的 critic agent 评判答案质量，不满意则 worker 改进，最多 3 轮。对标学术界 Multi-Agent Debate / LLM-as-a-Judge 方向。
+
+**Pipeline 引擎**采用三角色流水线协作：Planner 拆解任务生成计划，Executor 调用工具执行，Reviewer 审查结果并裁决（approved / needs_rework），不通过则回到 Executor 返工，最多 2 轮。相比 Debate 的"同角色迭代改进"，Pipeline 强调"职责分离"——规划、执行、审查由不同 prompt 驱动的角色承担，适合需要明确分工的复杂交付任务。
 
 ---
 
@@ -112,6 +115,8 @@ uv run iwan-tui             # 启动终端 UI
 
 ### 切换 Agent 引擎
 
+**方式一：启动时通过环境变量指定**（整个会话使用该引擎）
+
 ```bash
 # 使用 Debate 引擎（worker-critic 辩论）
 IWAN_AGENT_ENGINE=debate uv run iwan-core
@@ -119,11 +124,26 @@ IWAN_AGENT_ENGINE=debate uv run iwan-core
 # 使用 Plan & Execute 引擎（先规划再执行）
 IWAN_AGENT_ENGINE=plan_execute uv run iwan-core
 
+# 使用 Pipeline 引擎（planner→executor→reviewer 三角色流水线）
+IWAN_AGENT_ENGINE=pipeline uv run iwan-core
+
 # 使用 ReAct 引擎（边想边做）
 IWAN_AGENT_ENGINE=langgraph uv run iwan-core
 ```
 
 > Windows PowerShell 下使用 `$env:IWAN_AGENT_ENGINE="debate"; uv run iwan-core`
+
+**方式二：TUI 中运行时动态路由切换**（无需重启 core，下次对话即生效）
+
+在 TUI 输入框中输入：
+
+```
+/engine                 # 不带参数：在 5 种引擎间循环切换
+/engine pipeline        # 指定引擎：立即切到 pipeline
+/engine debate          # 切到 debate
+```
+
+切换后状态栏实时显示当前引擎（LangGraph 系引擎高亮青色，并显示检查点后端），多客户端场景下通过 `session.engine_changed` 事件广播同步。
 
 ---
 

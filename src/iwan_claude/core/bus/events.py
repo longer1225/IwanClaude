@@ -454,6 +454,27 @@ class SessionModelChangedEvent(BaseModel):
     ts: str
 
 
+class SessionEngineChangedEvent(BaseModel):
+    """
+    会话引擎变更事件 - Agent 引擎切换时发送
+
+    【字段说明】
+    - type: Literal["session.engine_changed"] - 事件类型
+    - session_id: str - 会话 ID
+    - engine: str - 新的引擎名称（legacy / langgraph / plan_execute / debate / pipeline）
+    - ts: str - 时间戳（ISO 8601）
+
+    【设计目的】
+    通知客户端 Agent 引擎已变更，
+    客户端可以更新状态栏显示并刷新检查点可用性。
+    多客户端场景下确保所有连接的 TUI 状态同步。
+    """
+    type: Literal["session.engine_changed"] = "session.engine_changed"
+    session_id: str
+    engine: str
+    ts: str
+
+
 class SessionRenamedEvent(BaseModel):
     """
     会话重命名事件 - 会话标题变更时发送

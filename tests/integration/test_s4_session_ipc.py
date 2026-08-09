@@ -209,3 +209,76 @@ async def test_session_model_preset_over_ipc(
 
     writer.close()
     await writer.wait_closed()
+
+
+# 功能：验证 daemon 暴露 session.set_engine 命令，动态切换 Agent 引擎
+# 设计：创建会话后切换为 langgraph、pipeline，断言每次返回的引擎正确；
+#       通过 session.engine_info 验证配置已更新；非法引擎应返回 error
+async def test_session_set_engine_over_ipc(
+    running_daemon: subprocess.Popen[bytes],
+    free_port: int,
+) -> None:
+    reader, writer = await asyncio.open_connection("127.0.0.1", free_port)
+
+    created = await _send_recv(
+        reader,
+        writer,
+        "session.create",
+        {"mode": "chat", "title": "engine test"},
+        req_id="create",
+    )
+    assert "result" in created, created
+    session_id = created["result"]["session_id"]
+
+    # 初始引擎应为 legacy（默认值）
+    info0 = await _send_recv(
+        reader,
+        writer,
+        "session.engine_info",
+        {},
+        req_id="info0",
+    )
+    assert info0["result"]["engine"] == "legacy"
+
+    # 切换到 langgraph
+    set_lg = await _send_recv(
+        reader,
+        writer,
+        "session.set_engine",
+        {"session_id": session_id, "engine": "langgraph"},
+        req_id="engine_lg",
+    )
+    assert set_lg["result"]["engine"] == "langgraph"
+
+    # 切换到 pipeline
+    set_pl = await _send_recv(
+        reader,
+        writer,
+        "session.set_engine",
+        {"session_id": session_id, "engine": "pipeline"},
+        req_id="engine_pl",
+    )
+    assert set_pl["result"]["engine"] == "pipeline"
+
+    # engine_info 应反映最新引擎
+    info1 = await _send_recv(
+        reader,
+        writer,
+        "session.engine_info",
+        {},
+        req_id="info1",
+    )
+    assert info1["result"]["engine"] == "pipeline"
+
+    # 非法引擎应返回 error
+    invalid = await _send_recv(
+        reader,
+        writer,
+        "session.set_engine",
+        {"session_id": session_id, "engine": "turbo"},
+        req_id="engine_invalid",
+    )
+    assert "error" in invalid
+
+    writer.close()
+    await writer.wait_closed()
