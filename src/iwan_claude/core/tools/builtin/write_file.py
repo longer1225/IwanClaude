@@ -241,11 +241,13 @@ class WriteFileTool(BaseTool, _WriteToolMixin):
         """
         # 1. 验证输入参数
         p = WriteFileParams.model_validate(params)
+        logger.debug("write_file: start path=%s mode=%s content_len=%d", p.path, p.mode, len(p.content))
 
         # 2. 验证路径安全性
         # 注意：PermissionError 直接抛出，不包装为 ToolResult，
         # 这样 invoke_tool 可以统一检测路径遍历尝试并发布事件
         path = _validate_rel_path(p.path, "write")
+        logger.debug("write_file: path validated -> %s", path)
 
         # 3. 检查内容大小
         encoded = p.content.encode("utf-8")
@@ -259,7 +261,9 @@ class WriteFileTool(BaseTool, _WriteToolMixin):
         # 4. 检查配额
         try:
             check_file_size(encoded)  # 检查单文件大小限制
+            logger.debug("write_file: check_file_size OK")
             check_total_quota(len(encoded))  # 检查总磁盘使用量
+            logger.debug("write_file: check_total_quota OK")
         except ValueError as exc:
             return ToolResult(
                 content=str(exc),
@@ -293,6 +297,7 @@ class WriteFileTool(BaseTool, _WriteToolMixin):
         try:
             # 创建父目录（如果不存在）
             path.parent.mkdir(parents=True, exist_ok=True)
+            logger.debug("write_file: parent dir ready, writing...")
 
             # 根据模式执行写入
             if p.mode == "append":
@@ -301,6 +306,7 @@ class WriteFileTool(BaseTool, _WriteToolMixin):
             else:
                 # overwrite 模式
                 path.write_text(p.content, encoding="utf-8")
+            logger.debug("write_file: write complete -> %s", path)
         except OSError as exc:
             return ToolResult(
                 content=f"write failed for {p.path}: {exc}",
@@ -312,6 +318,7 @@ class WriteFileTool(BaseTool, _WriteToolMixin):
         msg_bits = [f"wrote {len(encoded)} bytes to {p.path} (mode={p.mode})"]
         if backup_path is not None:
             msg_bits.append(f"backup={backup_path.name}")
+        logger.debug("write_file: done, returning result")
         return ToolResult(content="; ".join(msg_bits))
 
 

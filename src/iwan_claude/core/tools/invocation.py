@@ -238,6 +238,10 @@ async def invoke_tool(
                         ts=_now(),
                     )
                 )
+            logging.getLogger(__name__).debug(
+                "invoke_tool: permission allowed, executing tool=%s id=%s",
+                tool_call.name, tool_call.id[:16],
+            )
         else:
             # 权限拒绝，发布拒绝事件（非自动拒绝时）
             if decision != "auto_deny":
@@ -267,10 +271,16 @@ async def invoke_tool(
 
         try:
             # 使用 asyncio.wait_for 实现超时控制
+            logging.getLogger(__name__).debug(
+                "invoke_tool: calling tool.invoke %s (timeout=%ss)", tool_call.name, timeout,
+            )
             result = await asyncio.wait_for(
                 tool.invoke(dict(tool_call.input)), timeout=timeout
             )
             ms = elapsed()
+            logging.getLogger(__name__).debug(
+                "invoke_tool: tool.invoke returned %s in %dms", tool_call.name, ms,
+            )
 
             if result.is_error:
                 # 工具内部返回错误
