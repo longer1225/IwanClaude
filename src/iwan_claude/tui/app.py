@@ -567,7 +567,9 @@ class IwanTuiApp(App[None]):
         if session_id in self._sessions:
             return
         # 创建新的会话状态对象，包含会话 ID 和标题
-        state = _SessionState(session_id=session_id, title=title or session_id)
+        # title 为空时不使用 session_id 兜底，而是用空字符串，
+        # 这样标签栏会显示 "(untitled)" 直到第一条消息触发自动起名
+        state = _SessionState(session_id=session_id, title=title)
         # 将状态对象存入字典
         self._sessions[session_id] = state
         # 将新会话 ID 插入到顺序列表首位（最新的会话在最前）

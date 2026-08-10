@@ -498,7 +498,10 @@ def _apply_toml(config: IwanConfig, data: dict[str, Any]) -> None:
         agent = data["agent"]
         if not isinstance(agent, dict):
             raise SystemExit("Config error: [agent] must be a table")
-        unknown_agent: set[str] = set(agent.keys()) - {"max_steps", "auto_mode", "effort_level", "model_preset"}
+        unknown_agent: set[str] = set(agent.keys()) - {
+            "max_steps", "auto_mode", "effort_level", "model_preset",
+            "engine", "checkpoint_backend", "checkpoint_db_path",
+        }
         if unknown_agent:
             raise SystemExit(f"Unknown [agent] keys: {', '.join(sorted(unknown_agent))}")
         if "max_steps" in agent:
@@ -521,6 +524,22 @@ def _apply_toml(config: IwanConfig, data: dict[str, Any]) -> None:
             if not isinstance(val, str) or val not in ("fast", "balanced", "powerful"):
                 raise SystemExit("Config error: agent.model_preset must be 'fast', 'balanced', or 'powerful'")
             config.agent.model_preset = val
+        if "engine" in agent:
+            val = agent["engine"]
+            valid_engines = ("legacy", "langgraph", "plan_execute", "debate", "pipeline")
+            if not isinstance(val, str) or val not in valid_engines:
+                raise SystemExit(f"Config error: agent.engine must be one of {valid_engines}")
+            config.agent.engine = val
+        if "checkpoint_backend" in agent:
+            val = agent["checkpoint_backend"]
+            if not isinstance(val, str) or val not in ("none", "memory", "sqlite"):
+                raise SystemExit("Config error: agent.checkpoint_backend must be 'none', 'memory', or 'sqlite'")
+            config.agent.checkpoint_backend = val
+        if "checkpoint_db_path" in agent:
+            val = agent["checkpoint_db_path"]
+            if not isinstance(val, str):
+                raise SystemExit("Config error: agent.checkpoint_db_path must be a string")
+            config.agent.checkpoint_db_path = val
 
     if "llm" in data:
         llm = data["llm"]
@@ -672,7 +691,11 @@ def _apply_toml(config: IwanConfig, data: dict[str, Any]) -> None:
         sb = data["sandbox"]
         if not isinstance(sb, dict):
             raise SystemExit("Config error: [sandbox] must be a table")
-        unknown_sb: set[str] = set(sb.keys()) - {"enabled", "root", "allow_parent_dirs", "max_file_size", "max_total_size", "search_limited", "ask_on_access_denied"}
+        unknown_sb: set[str] = set(sb.keys()) - {
+            "enabled", "root", "allow_parent_dirs", "max_file_size", "max_total_size",
+            "search_limited", "ask_on_access_denied",
+            "block_network_commands", "audit_log", "audit_log_path",
+        }
         if unknown_sb:
             raise SystemExit(f"Unknown [sandbox] keys: {', '.join(sorted(unknown_sb))}")
         if "enabled" in sb:
@@ -710,6 +733,21 @@ def _apply_toml(config: IwanConfig, data: dict[str, Any]) -> None:
             if not isinstance(val, bool):
                 raise SystemExit("Config error: sandbox.ask_on_access_denied must be a boolean")
             config.sandbox.ask_on_access_denied = val
+        if "block_network_commands" in sb:
+            val = sb["block_network_commands"]
+            if not isinstance(val, bool):
+                raise SystemExit("Config error: sandbox.block_network_commands must be a boolean")
+            config.sandbox.block_network_commands = val
+        if "audit_log" in sb:
+            val = sb["audit_log"]
+            if not isinstance(val, bool):
+                raise SystemExit("Config error: sandbox.audit_log must be a boolean")
+            config.sandbox.audit_log = val
+        if "audit_log_path" in sb:
+            val = sb["audit_log_path"]
+            if not isinstance(val, str):
+                raise SystemExit("Config error: sandbox.audit_log_path must be a string")
+            config.sandbox.audit_log_path = val
 
     if "rag" in data:
         rag = data["rag"]

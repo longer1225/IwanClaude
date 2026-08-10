@@ -292,9 +292,30 @@ class SessionManager:
                 SessionMessageReceivedEvent(session_id=sid, content=content, ts=_now())
             )
 
-            # 9. 如果会话没有标题，使用消息前 40 个字符作为标题
+            # 9. 如果会话没有标题，根据第一条消息自动起名
+            # 【设计思路】取第一条用户消息的前 30 个字符，在词边界截断
+            # 不调用 LLM（避免额外延迟），保持轻量；后续可通过 /rename 手动修改
             if not session.title:
-                session.title = content[:40]
+                # 取消息的第一行（避免多行消息标题过长）
+                first_line = content.strip().split("\n")[0].strip()
+                if len(first_line) > 30:
+                    # 在词边界截断：找 30 字符内最后一个空格
+                    cut = first_line[:30].rfind(" ")
+                    if cut > 10:  # 空格位置合理才截断
+                        session.title = first_line[:cut] + "…"
+                    else:
+                        session.title = first_line[:30] + "…"
+                else:
+                    session.title = first_line or "(untitled)"
+                # 发布重命名事件，通知 TUI 刷新标签栏
+                from iwan_claude.core.bus.events import SessionRenamedEvent
+                await self._bus.publish(
+                    SessionRenamedEvent(
+                        session_id=sid,
+                        title=session.title,
+                        ts=_now(),
+                    )
+                )
 
             # 10. 生成运行 ID（如果没有提供）
             run_id = run_id or new_run_id()

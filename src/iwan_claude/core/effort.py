@@ -141,7 +141,7 @@ EFFORT_PRESETS: dict[str, EffortParams] = {
     EffortLevel.HIGH.value: EffortParams(
         max_files_read=50,       # 最多读 50 个文件
         max_verify_rounds=2,     # 验证 2 轮
-        max_steps_override=0,     # 使用全局配置的 max_steps
+        max_steps_override=30,   # 最多 30 步（比 medium 多 50%，适合复杂任务）
         search_max_depth=5,      # 搜索深度 5 层
         auto_run_tests=True,     # 自动跑测试
         read_full_file=True,      # 读完整文件
@@ -150,7 +150,7 @@ EFFORT_PRESETS: dict[str, EffortParams] = {
     EffortLevel.MAX.value: EffortParams(
         max_files_read=0,        # 不限制读取文件数
         max_verify_rounds=3,     # 验证 3 轮
-        max_steps_override=0,     # 使用全局配置的 max_steps
+        max_steps_override=40,   # 最多 40 步（适合 RAG 测试等超复杂任务）
         search_max_depth=0,       # 不限制搜索深度
         auto_run_tests=True,     # 自动跑测试
         read_full_file=True,      # 读完整文件
