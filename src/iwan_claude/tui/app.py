@@ -2114,7 +2114,7 @@ class IwanTuiApp(App[None]):
         return f"[{color}]{label} {bar}[/{color}]"
 
     # ========================================================================
-    # 全局运行心跳（顶部状态栏 running 时长显示）
+    # 全局运行心跳（顶部状态栏 running 时长显示 + watchdog 卡死检测）
     # ========================================================================
     # _run_start_ts: 状态进入 running 时记录 perf_counter，ready/disconnected 时置 None
     # _header_state: 最近一次 _update_header 收到的 state 名称
@@ -2122,11 +2122,37 @@ class IwanTuiApp(App[None]):
     #   - 进入 running 时开始计时，每 2 秒把状态重渲染为 "running (32s)"
     #   - 给用户心理锚点：知道 Agent 真的在跑而不是卡住，也知道跑了多久
     #   - 超 3 分钟和超 10 分钟还在 running 时，用更醒目的颜色提示"可能慢"
+    #   - watchdog：如果 _busy=True 且 header 是 running 超过 60 秒，强制恢复（防止事件丢失卡死）
     def _ui_heartbeat_tick(self) -> None:
-        """每 2 秒触发的 UI 心跳。若当前为 running，刷新带时长的状态文案。"""
+        """每 2 秒触发的 UI 心跳。刷新 running 时长 + 检查是否卡死。"""
+        import time as _t
         state = getattr(self, "_header_state", "ready")
+        # ---- watchdog 卡死检测 ----
+        # 条件：_busy=True（还在工作） + header 是 running + 超过 60 秒
+        # 说明 waiting_for_input 事件可能丢了，强制恢复
+        if self._busy and state == "running" and self._run_start_ts is not None:
+            elapsed = _t.perf_counter() - self._run_start_ts
+            if elapsed > 60:
+                logging.getLogger(__name__).warning(
+                    "watchdog: force-unstick after %.0s (still busy, no waiting_for_input)",
+                    elapsed,
+                )
+                self._busy = False
+                prompt = self._prompt()
+                if prompt is not None:
+                    prompt.disabled = False
+                    prompt.read_only = False
+                    prompt.border_title = "⚠ agent unresponsive — try /compact or resend"
+                    prompt.focus()
+                self._update_header("ready")
+                self._append(Static(
+                    f"[bold yellow]⚠ agent unresponsive after {elapsed:.0f}s[/bold yellow]  "
+                    f"[dim]try /compact or send a new message[/dim]",
+                    classes="log-line",
+                ))
+                return  # 已恢复，不再渲染 running 时长
+        # ---- 正常 running 时长刷新 ----
         if state == "running" and self._run_start_ts is not None:
-            import time as _t
             sec = _t.perf_counter() - self._run_start_ts
             # 状态颜色 + 时长后缀
             if sec >= 600:  # 10 分钟：非常长，怀疑卡住
@@ -2425,6 +2451,17 @@ class IwanTuiApp(App[None]):
         """
         t = event.get("type", "")
 
+        # 【日志埋点】关键事件流转追踪（帮助排查卡死/状态不一致问题）
+        # 只追踪关键事件，避免日志过于膨胀
+        if t in ("run.started", "run.finished", "session.waiting_for_input",
+                 "step.started", "tool.call_started", "tool.call_finished",
+                 "tool.call_failed", "session.closed", "session.renamed"):
+            logging.getLogger(__name__).debug(
+                "UI event: type=%s session=%s busy=%s header_state=%s",
+                t, event.get("session_id"), self._busy,
+                getattr(self, "_header_state", "?"),
+            )
+
         # 获取事件的会话 ID（如果有）
         event_sid = event.get("session_id")
 
@@ -2618,14 +2655,20 @@ class IwanTuiApp(App[None]):
         # ========== 运行完成事件 ==========
 
         elif t == "run.finished":
-            # 运行完成：显示成功或失败状态，并恢复输入框
-            # 【关键修复】无论成功还是失败，都必须重置 _busy=False 并启用输入框，
-            # 否则用户将无法继续输入（表现为"卡住"）。
-            # 正常流程中 session.waiting_for_input 事件会稍后到达并再次重置，
-            # 但如果该事件丢失或延迟，这里就是最后的兜底。
+            # 运行完成：仅显示结果，不修改 _busy 和 header 状态
+            # 【设计原则】
+            #   - run.finished 只表示"本轮 LLM+工具循环结束了"
+            #   - Agent 可能立即进入下一轮循环，真正回到 ready 要等 session.waiting_for_input
+            #   - 这里如果提前把 _busy=False，会导致：状态栏假 ready → 用户误操作 → 状态冲突
+            #   - 兜底：如果 30 秒内没有 waiting_for_input 事件，_watchdog_tick 会强制恢复
             status = event.get("status", "")
             steps = event.get("steps", 0)
             reason = event.get("reason") or ""
+            # 日志埋点：帮助排查卡死问题
+            logging.getLogger(__name__).info(
+                "run.finished received: status=%s steps=%d reason=%s session=%s",
+                status, steps, reason, self._session_id,
+            )
             if status == "success":
                 self._append(Static(
                     f"[bold green]✓ completed[/bold green]  [dim]{steps} steps[/dim]",
@@ -2645,15 +2688,35 @@ class IwanTuiApp(App[None]):
                         f"[bold red]✗ failed[/bold red]{detail}  [dim]{steps} steps[/dim]",
                         classes="run-err",
                     ))
-            # 重置忙碌状态，恢复输入框（兜底机制）
-            self._busy = False
-            prompt = self._prompt()
-            if prompt is not None:
-                prompt.disabled = False
-                prompt.read_only = False
-                prompt.border_title = "type a message — enter to send, ⌘/⇧/⌥+enter for newline"
-                prompt.focus()
-            self._update_header("ready")
+            # --- 不修改 _busy / header --- 留给 waiting_for_input 或 watchdog
+
+        # ========== 事件丢失兜底（watchdog）==========
+        # 场景：run.finished 到达后 30 秒内没有 waiting_for_input，
+        # 说明事件可能丢失了（Agent 端异常退出、事件总线问题等），
+        # 此时强制恢复 _busy=False，避免用户永远卡在"running"状态。
+        elif t == "_watchdog_tick":
+            import time as _t
+            if self._busy and self._run_start_ts is not None:
+                elapsed = _t.perf_counter() - self._run_start_ts
+                # 只有当状态是 running 且超过 30 秒还没恢复时才介入
+                state = getattr(self, "_header_state", "")
+                if state == "running" and elapsed > 30:
+                    logging.getLogger(__name__).warning(
+                        "watchdog: force-unstick after %.0fs (no waiting_for_input event)", elapsed,
+                    )
+                    self._busy = False
+                    prompt = self._prompt()
+                    if prompt is not None:
+                        prompt.disabled = False
+                        prompt.read_only = False
+                        prompt.border_title = "[dim]agent timed out — try /compact or restart[/dim]"
+                        prompt.focus()
+                    self._update_header("ready")
+                    self._append(Static(
+                        f"[bold yellow]⚠ agent unresponsive after {elapsed:.0f}s[/bold yellow]  "
+                        f"[dim]try /compact or send a new message[/dim]",
+                        classes="log-line",
+                    ))
 
         # ========== LLM 使用统计事件 ==========
 
