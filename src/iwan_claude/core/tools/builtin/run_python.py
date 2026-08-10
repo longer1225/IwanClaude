@@ -62,10 +62,26 @@ from pydantic import BaseModel, ConfigDict, Field
 from iwan_claude.core.sandbox import validate_path, scrub_env
 from iwan_claude.core.tools.base import BaseTool, ToolResult
 
-# 输出最大字节数：128 KB，防止大输出导致内存问题
-_MAX_OUTPUT_BYTES = 128 * 1024
-# 默认超时时间，单位秒
-_DEFAULT_TIMEOUT = 60
+# 输出最大字节数兜底值：128 KB，防止大输出导致内存问题
+_FALLBACK_OUTPUT_MAX_BYTES = 128 * 1024
+# 默认超时时间兜底值，单位秒
+_FALLBACK_TIMEOUT_S = 60
+
+
+def _output_max_bytes() -> int:
+    try:
+        from iwan_claude.core.config import get_config
+        return int(get_config().tools.run_python_output_max_bytes)
+    except Exception:
+        return _FALLBACK_OUTPUT_MAX_BYTES
+
+
+def _timeout_s() -> int:
+    try:
+        from iwan_claude.core.config import get_config
+        return int(get_config().tools.run_python_timeout_s)
+    except Exception:
+        return _FALLBACK_TIMEOUT_S
 # 检测是否为 Windows 平台，用于跨平台兼容
 _IS_WINDOWS = sys.platform == "win32"
 
@@ -113,7 +129,7 @@ class RunPythonParams(BaseModel):
     # 需要安装的 pip 依赖列表
     requirements: list[str] = []
     # 执行超时时间，范围 1-300 秒
-    timeout: int = Field(default=_DEFAULT_TIMEOUT, ge=1, le=300)
+    timeout: int = Field(default_factory=_timeout_s, ge=1, le=300)
     # 是否使用虚拟环境，推荐开启以实现隔离
     use_venv: bool = True
     # 可复用的虚拟环境目录路径
@@ -176,8 +192,7 @@ class RunPythonTool(BaseTool):
             },
             "timeout": {
                 "type": "integer",
-                "default": _DEFAULT_TIMEOUT,
-                "description": "Seconds before the process is killed (max 300).",
+                "description": "Seconds before the process is killed (max 300). Default from tools.run_python_timeout_s config.",
             },
             "use_venv": {
                 "type": "boolean",
@@ -423,9 +438,10 @@ class RunPythonTool(BaseTool):
         # 解码输出
         output = (stdout_bytes or b"").decode("utf-8", errors="replace")
         # 检查输出大小，超过限制则截断
-        truncated = len(stdout_bytes or b"") > _MAX_OUTPUT_BYTES
+        max_bytes = _output_max_bytes()
+        truncated = len(stdout_bytes or b"") > max_bytes
         if truncated:
-            output = output[:_MAX_OUTPUT_BYTES] + "\n[truncated]"
+            output = output[:max_bytes] + "\n[truncated]"
 
         # 检查返回码
         returncode = proc.returncode or 0

@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -45,14 +46,62 @@ from iwan_claude.core.tools.registry import ToolRegistry
 if TYPE_CHECKING:
     from iwan_claude.core.permissions.manager import PermissionManager
 
-# 工具调用的默认超时时间（秒）
-_DEFAULT_TIMEOUT: float = 120.0
-# 最大重试次数（不包括首次尝试）
-_MAX_RETRIES: int = 2
-# 重试退避的基础时间（秒），指数退避公式：base * 2^(attempt-1)
-_RETRY_BASE_S: float = 2.0
+# ===== 兜底默认常量（当配置加载失败时使用，通常不会触发） =====
+_FALLBACK_TIMEOUT: float = 120.0               # 总兜底超时（秒）
+_FALLBACK_MAX_RETRIES: int = 2                  # 最大重试次数（不含首次尝试）
+_FALLBACK_RETRY_BASE_S: float = 2.0             # 指数退避基础秒数
+_FALLBACK_READS_MAX: int = 200                  # read_file 单会话读取次数上限
 # 可重试的错误类型集合
 _RETRYABLE: frozenset[str] = frozenset({"runtime_error", "rate_limited"})
+
+
+def _tool_timeout_s() -> float:
+    """从全局配置读取 invoke_tool 超时兜底秒数"""
+    try:
+        from iwan_claude.core.config import get_config
+        return float(get_config().tools.invocation_timeout_s)
+    except Exception:
+        return _FALLBACK_TIMEOUT
+
+
+def _tool_reads_max() -> int:
+    """从全局配置读取 read_file 单会话允许的最大读取次数"""
+    try:
+        from iwan_claude.core.config import get_config
+        return int(get_config().tools.read_file_reads_max)
+    except Exception:
+        return _FALLBACK_READS_MAX
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 模块级「可变」全局变量
+# 设计：
+#   1. 默认值在模块首次 import 时通过 getter 从全局配置动态注入
+#   2. 保留旧变量名（_MAX_RETRIES / _RETRY_BASE_S）供单元测试 monkeypatch.setattr
+#      覆盖（例如 test_tool_retry.py 把 _RETRY_BASE_S 置 0 消除 sleep）
+#   3. invoke_tool 里直接引用模块级变量（而不是局部缓存），
+#      这样 monkeypatch 替换后立即生效
+# ═══════════════════════════════════════════════════════════════════════════════
+_MAX_RETRIES: int = _FALLBACK_MAX_RETRIES       # 默认 2，可被 monkeypatch 覆盖 / 配置注入
+_RETRY_BASE_S: float = _FALLBACK_RETRY_BASE_S   # 默认 2.0，可被 monkeypatch 覆盖 / 配置注入
+
+
+def _sync_retry_params_from_config() -> None:
+    """（模块加载时调用一次）把 ToolsConfig 里的重试参数同步到模块级可变变量。
+    这样既支持配置化，也保留了 monkeypatch 覆盖的测试能力。
+    """
+    global _MAX_RETRIES, _RETRY_BASE_S
+    try:
+        from iwan_claude.core.config import get_config
+        _MAX_RETRIES = int(get_config().tools.invocation_max_retries)
+        _RETRY_BASE_S = float(get_config().tools.invocation_retry_base_s)
+    except Exception:
+        # 配置加载失败（例如测试时最小环境）→ 保留兜底值，不抛异常
+        pass
+
+
+# 模块首次加载时，尝试把配置同步到模块级变量
+_sync_retry_params_from_config()
 
 
 def _now() -> str:
@@ -120,7 +169,7 @@ async def invoke_tool(
     tool_call: ToolCallBlock,
     bus: EventBus,
     run_id: str,
-    timeout: float = _DEFAULT_TIMEOUT,
+    timeout: float | None = None,
     *,
     permission_manager: PermissionManager | None = None,
     session_id: str = "",
@@ -161,7 +210,7 @@ async def invoke_tool(
     - tool_call: ToolCallBlock - 工具调用信息（名称、参数、调用 ID）
     - bus: EventBus - 事件总线，用于发布调用事件
     - run_id: str - 当前运行的唯一标识
-    - timeout: float - 工具执行超时时间（默认 120 秒）
+    - timeout: float | None - 工具执行超时时间（秒），None 时从 config.tools.invocation_timeout_s 读取
     - permission_manager: PermissionManager | None - 权限管理器（可选）
     - session_id: str - 会话 ID，用于权限持久化
 
@@ -174,6 +223,10 @@ async def invoke_tool(
     - 第 2 次重试：等待 4s (2 * 2^1)
     总共最多尝试 3 次（首次 + 2 次重试）
     """
+    # 未显式传入 timeout，走全局配置（避免硬编码）
+    if timeout is None:
+        timeout = _tool_timeout_s()
+
     # 记录调用开始时间，用于计算耗时
     t0 = time.monotonic()
 
@@ -228,31 +281,29 @@ async def invoke_tool(
         )
 
         if allowed:
-            # 权限通过，发布授权事件（非自动授权时）
-            if decision not in ("auto_allow",):
-                await bus.publish(
-                    PermissionGrantedEvent(
-                        run_id=run_id,
-                        tool_use_id=tool_call.id,
-                        decision=decision,
-                        ts=_now(),
-                    )
+            # 权限通过，发布授权事件（包括 auto_allow，让 TUI 能感知自动审批）
+            await bus.publish(
+                PermissionGrantedEvent(
+                    run_id=run_id,
+                    tool_use_id=tool_call.id,
+                    decision=decision,
+                    ts=_now(),
                 )
+            )
             logging.getLogger(__name__).debug(
                 "invoke_tool: permission allowed, executing tool=%s id=%s",
                 tool_call.name, tool_call.id[:16],
             )
         else:
-            # 权限拒绝，发布拒绝事件（非自动拒绝时）
-            if decision != "auto_deny":
-                await bus.publish(
-                    PermissionDeniedEvent(
-                        run_id=run_id,
-                        tool_use_id=tool_call.id,
-                        decision=decision,
-                        ts=_now(),
-                    )
+            # 权限拒绝，发布拒绝事件（包括 auto_deny，让 TUI 能感知自动拒绝）
+            await bus.publish(
+                PermissionDeniedEvent(
+                    run_id=run_id,
+                    tool_use_id=tool_call.id,
+                    decision=decision,
+                    ts=_now(),
                 )
+            )
             # 返回权限拒绝错误
             return await _fail(
                 bus, run_id, tool_call,
@@ -263,8 +314,8 @@ async def invoke_tool(
             )
 
     # 5. 执行工具（带重试逻辑）
-    # 循环次数：_MAX_RETRIES + 2 = 4 次（range(1, 4) → 1, 2, 3）
-    # 实际上首次尝试 + 最多 2 次重试 = 最多 3 次执行
+    # 循环次数：_MAX_RETRIES + 1（首次尝试 + 最多 N 次重试）
+    # 使用模块级可变变量，以便单元测试通过 monkeypatch 覆盖（消除 sleep / 调小重试）
     for attempt in range(1, _MAX_RETRIES + 2):
         error_class: str | None = None
         error_message: str | None = None
@@ -314,7 +365,7 @@ async def invoke_tool(
         except Exception as exc:
             # 其他未知异常，标记为 runtime_error
             # 【配额超限识别】sandbox 会抛 "sandbox quota exceeded: ..."（ValueError），
-            # 这种情况重试多少次都没用，直接返回，不消耗 _MAX_RETRIES。
+            # 这种情况重试多少次都没用，直接返回，不消耗重试配额。
             exc_text = str(exc)
             if "sandbox quota exceeded" in exc_text or "sandbox file size limit exceeded" in exc_text:
                 # 【Textual 转义】错误消息会在 TUI 渲染为 Static widget（markup=True），
@@ -354,7 +405,8 @@ async def invoke_tool(
                     ts=_now(),
                 )
             )
-            # 指数退避等待：base * 2^(attempt-1)
+            # 指数退避等待：_RETRY_BASE_S * 2^(attempt-1)
+            # 使用模块级变量，测试可通过 monkeypatch.setattr(inv_mod, "_RETRY_BASE_S", 0.0) 消除 sleep
             await asyncio.sleep(_RETRY_BASE_S * (2 ** (attempt - 1)))
             # 继续下一次尝试
             continue

@@ -193,15 +193,22 @@ def cmd_core_status(config: IwanConfig) -> None:
 def cmd_core_start(config: IwanConfig) -> None:
     """
     在后台启动 daemon 进程
-    
+
     使用方式：iwan core start
-    
+
     工作流程：
     1. 检查 daemon 是否已运行
-    2. 如果未运行，创建后台进程
-    3. 将 PID 写入 PID 文件
-    4. 打印启动信息
-    
+    2. 获取当前工作目录（作为初始 CWD）
+    3. 创建后台进程
+    4. 将 PID 写入 PID 文件
+    5. 打印启动信息
+
+    【关于 CWD 和沙箱根】
+    - daemon 的 CWD = 当前工作目录（启动时所在的目录）
+    - 每个会话的沙箱根由 TUI 创建会话时传入的 cwd 参数控制
+    - 会话 cwd 会覆盖 daemon 的初始 CWD，实现多项目隔离
+    - 详见 SessionManager.create() 和 SandboxManager.set_root()
+
     参数：
         config: IwanConfig 配置对象
     """
@@ -214,10 +221,15 @@ def cmd_core_start(config: IwanConfig) -> None:
         # 未运行，继续启动流程
         pass
 
+    # 获取当前工作目录作为 daemon 的初始 CWD
+    # 会话创建时会通过 cwd 参数覆盖沙箱根
+    current_cwd = Path.cwd()
+
     # 后台进程参数
     popen_kwargs: dict = dict(
         stdout=subprocess.DEVNULL,  # 标准输出重定向到空设备（丢弃）
         stderr=subprocess.DEVNULL,  # 标准错误重定向到空设备（丢弃）
+        cwd=str(current_cwd),       # 设置子进程的工作目录为当前目录
     )
     
     if IS_WINDOWS:
@@ -244,6 +256,7 @@ def cmd_core_start(config: IwanConfig) -> None:
     
     # 打印启动信息
     print(f"started  pid={proc.pid}  ({config.host}:{config.port})")
+    print(f"  cwd: {current_cwd}")
 
 
 # 终止 daemon 进程，若未运行则提示

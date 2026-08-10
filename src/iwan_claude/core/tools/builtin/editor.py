@@ -38,10 +38,19 @@ from pydantic import BaseModel, ConfigDict, Field
 from iwan_claude.core.sandbox import validate_path
 from iwan_claude.core.tools.base import BaseTool, ToolResult
 
-# 最大编辑器负载限制：2 MB，防止处理过大文件
-_MAX_BYTES = 2 * 1024 * 1024
+# ===== 兜底常量（配置加载失败时使用，通常不会触发） =====
+_FALLBACK_MAX_BYTES = 2 * 1024 * 1024  # 2 MB，editor 可处理的最大文件大小
 # 备份文件存储目录
 _BACKUP_SUBDIR = Path(".iwan") / "backups"
+
+
+def _max_bytes() -> int:
+    """从全局配置读取 editor 系列工具可处理的最大文件字节数"""
+    try:
+        from iwan_claude.core.config import get_config
+        return int(get_config().tools.editor_max_bytes)
+    except Exception:
+        return _FALLBACK_MAX_BYTES
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -349,17 +358,17 @@ def _normalized_lines(raw: str, eol: str, keep_final_eol: bool) -> list[str]:
     return out
 
 
-def _read_text_safe(path: Path, max_bytes: int = _MAX_BYTES) -> str:
+def _read_text_safe(path: Path, max_bytes: int | None = None) -> str:
     """
-    安全读取文本文件
+    安全读取文本文件（editor 系列工具共享）
 
     【安全机制】
-    - 大小限制：超过 max_bytes 的文件会抛出 ValueError
+    - 大小限制：超过 max_bytes 的文件抛出 ValueError；默认从 tools.editor_max_bytes 读取
     - 编码处理：使用 UTF-8 解码，遇到非法字符用 replace 替换
 
     【参数说明】
     - path: Path - 文件路径
-    - max_bytes: int - 最大读取字节数（默认 2MB）
+    - max_bytes: int | None - 最大读取字节数；None 时走全局配置（默认 2MB）
 
     【返回值】
     - str: 文件内容
@@ -367,6 +376,8 @@ def _read_text_safe(path: Path, max_bytes: int = _MAX_BYTES) -> str:
     【异常处理】
     - ValueError: 文件超过大小限制时抛出
     """
+    if max_bytes is None:
+        max_bytes = _max_bytes()
     data = path.read_bytes()
     if len(data) > max_bytes:
         raise ValueError(f"file too large to edit: {len(data)} bytes (limit {max_bytes})")

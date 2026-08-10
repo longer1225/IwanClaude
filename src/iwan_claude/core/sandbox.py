@@ -109,6 +109,33 @@ class SandboxManager:
     def __init__(self, config: SandboxConfig) -> None:
         self._config = config
         self._sandbox_root = Path(config.root).resolve()
+        # 记录初始化根目录，便于后续判断是否是默认根
+        self._default_root = self._sandbox_root
+
+    def set_root(self, new_root: str | Path) -> None:
+        """
+        动态切换沙箱根目录（会话级隔离）
+
+        【使用场景】
+        每个会话可绑定不同的项目目录，类似 Claude Code 的 workspace 概念。
+        - TUI 在 D:/project-a 启动 → 会话 A 沙箱根 = D:/project-a
+        - TUI 在 E:/project-b 启动 → 会话 B 沙箱根 = E:/project-b
+        - 切换会话时自动切换沙箱根
+
+        【参数】
+        - new_root: str | Path - 新的沙箱根目录路径
+
+        【设计说明】
+        - 路径会被 resolve() 规范化，消除 .. 和 symlink
+        - 新根目录不存在时自动创建
+        - 切换后立即生效，无需重启
+        """
+        self._sandbox_root = Path(new_root).resolve()
+        self.ensure_sandbox_exists()
+        import logging
+        logging.getLogger(__name__).info(
+            "sandbox root changed: %s", self._sandbox_root,
+        )
 
     @property
     def enabled(self) -> bool:
@@ -373,6 +400,13 @@ def init_sandbox(config: SandboxConfig) -> None:
     global _sandbox_manager
     _sandbox_manager = SandboxManager(config)
     _sandbox_manager.ensure_sandbox_exists()
+    # 关键日志：启动时明确记录沙箱根目录，便于排查 CWD 错误导致的配额问题
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(
+        "sandbox initialized: root=%s  enabled=%s  max_total_size=%d",
+        _sandbox_manager.root, config.enabled, config.max_total_size,
+    )
 
 
 def _ensure_default_sandbox() -> None:
@@ -428,6 +462,25 @@ def get_search_root() -> Path:
     if sb._config.search_limited and sb._config.enabled:
         return sb._sandbox_root
     return Path.cwd()
+
+
+def set_sandbox_root(new_root: str | Path) -> None:
+    """
+    动态切换全局沙箱根目录
+
+    【使用场景】
+    会话切换时调用此函数，将沙箱根目录绑定到新会话的项目目录。
+    这是实现多会话多项目隔离的核心入口。
+
+    【参数】
+    - new_root: str | Path - 新的沙箱根目录路径（通常来自 TUI 启动时的 CWD）
+
+    【示例】
+    # TUI 在 D:/my-project 启动时
+    set_sandbox_root("D:\\my-project")
+    # 之后所有文件操作都会限制在 D:/my-project 内
+    """
+    get_sandbox().set_root(new_root)
 
 
 def scrub_env(env: dict[str, str]) -> dict[str, str]:

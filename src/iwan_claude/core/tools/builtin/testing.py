@@ -51,10 +51,26 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from iwan_claude.core.tools.base import BaseTool, ToolResult
 
-# 输出最大字节数，防止大输出导致内存问题
-_MAX_OUTPUT_BYTES = 64 * 1024
-# 默认超时时间，单位秒（测试可能需要较长时间）
-_DEFAULT_TIMEOUT = 180
+# 输出最大字节数兜底值，防止大输出导致内存问题
+_FALLBACK_OUTPUT_MAX_BYTES = 64 * 1024
+# 默认超时时间兜底值，单位秒（测试可能需要较长时间）
+_FALLBACK_TIMEOUT_S = 180
+
+
+def _output_max_bytes() -> int:
+    try:
+        from iwan_claude.core.config import get_config
+        return int(get_config().tools.testing_output_max_bytes)
+    except Exception:
+        return _FALLBACK_OUTPUT_MAX_BYTES
+
+
+def _timeout_s() -> int:
+    try:
+        from iwan_claude.core.config import get_config
+        return int(get_config().tools.testing_timeout_s)
+    except Exception:
+        return _FALLBACK_TIMEOUT_S
 
 
 class GenerateTestsParams(BaseModel):
@@ -386,7 +402,7 @@ class RunTestsTool(BaseTool):
                 stderr=asyncio.subprocess.PIPE,
             )
             # 等待命令完成，设置超时
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=_DEFAULT_TIMEOUT)
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=_timeout_s())
 
             # 解码输出
             output = stdout.decode("utf-8", errors="replace")
@@ -395,8 +411,9 @@ class RunTestsTool(BaseTool):
                 output += "\nSTDERR:\n" + stderr.decode("utf-8", errors="replace")
 
             # 检查输出大小，超过限制则截断
-            if len(output) > _MAX_OUTPUT_BYTES:
-                output = output[:_MAX_OUTPUT_BYTES] + "\n[truncated]"
+            max_bytes = _output_max_bytes()
+            if len(output) > max_bytes:
+                output = output[:max_bytes] + "\n[truncated]"
 
             return ToolResult(content=output)
         except FileNotFoundError:
@@ -502,7 +519,7 @@ class TestCoverageTool(BaseTool):
                 stderr=asyncio.subprocess.PIPE,
             )
             # 等待命令完成，设置超时
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=_DEFAULT_TIMEOUT)
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=_timeout_s())
 
             # 第二步：运行 coverage report -m 生成详细报告
             proc2 = await asyncio.create_subprocess_exec(
@@ -513,7 +530,7 @@ class TestCoverageTool(BaseTool):
                 stderr=asyncio.subprocess.PIPE,
             )
             # 等待命令完成，设置超时
-            stdout2, stderr2 = await asyncio.wait_for(proc2.communicate(), timeout=_DEFAULT_TIMEOUT)
+            stdout2, stderr2 = await asyncio.wait_for(proc2.communicate(), timeout=_timeout_s())
 
             # 解码覆盖率报告
             output = stdout2.decode("utf-8", errors="replace")
@@ -522,8 +539,9 @@ class TestCoverageTool(BaseTool):
                 output += "\nSTDERR:\n" + stderr2.decode("utf-8", errors="replace")
 
             # 检查输出大小，超过限制则截断
-            if len(output) > _MAX_OUTPUT_BYTES:
-                output = output[:_MAX_OUTPUT_BYTES] + "\n[truncated]"
+            max_bytes = _output_max_bytes()
+            if len(output) > max_bytes:
+                output = output[:max_bytes] + "\n[truncated]"
 
             return ToolResult(content=output)
         except FileNotFoundError:

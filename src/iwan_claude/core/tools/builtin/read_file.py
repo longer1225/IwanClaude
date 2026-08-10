@@ -21,8 +21,17 @@ from pydantic import BaseModel, ConfigDict
 from iwan_claude.core.sandbox import validate_path
 from iwan_claude.core.tools.base import BaseTool, ToolResult
 
-# 最大读取字节数：512 KB
-_MAX_BYTES = 512 * 1024
+# ===== 兜底常量（配置加载失败时使用，通常不会触发） =====
+_FALLBACK_MAX_BYTES = 512 * 1024  # 512 KB
+
+
+def _max_bytes() -> int:
+    """从全局配置读取 read_file 单次读取的最大字节数"""
+    try:
+        from iwan_claude.core.config import get_config
+        return int(get_config().tools.read_file_max_bytes)
+    except Exception:
+        return _FALLBACK_MAX_BYTES
 
 
 class ReadFileParams(BaseModel):
@@ -112,9 +121,10 @@ class ReadFileTool(BaseTool):
         path = Path(path_str)
         raw = path.read_bytes()  # 文件不存在时抛出 FileNotFoundError
 
-        # 5. 处理大小限制
-        truncated = len(raw) > _MAX_BYTES
-        text = raw[:_MAX_BYTES].decode("utf-8", errors="replace")
+        # 5. 处理大小限制（阈值从全局配置读取）
+        max_b = _max_bytes()
+        truncated = len(raw) > max_b
+        text = raw[:max_b].decode("utf-8", errors="replace")
 
         # 6. 添加截断标记
         if truncated:

@@ -39,6 +39,7 @@ from __future__ import annotations  # 启用延迟类型注解求值，支持前
 
 import asyncio  # 异步编程核心库，用于事件循环和非阻塞 IO
 import logging  # 日志记录，用于调试和运行时信息输出
+import os  # 操作系统接口，用于获取当前工作目录
 import time  # 时间模块，用于子 Agent 执行耗时计算
 
 # 第三方库导入
@@ -562,10 +563,22 @@ class IwanTuiApp(App[None]):
             - 如果 session_id 已存在则跳过（幂等操作）
             - 新会话总是插入到 _session_order 首位，成为当前活动会话
             - 创建 _SessionState 实例管理该会话的所有 UI 状态
+            - 清理残留的权限审批控件，防止跨会话状态污染
         """
         # 幂等检查：如果会话已存在则直接返回
         if session_id in self._sessions:
             return
+
+        # 清理当前会话残留的权限审批控件（新会话应有干净的状态）
+        try:
+            select = self.query_one(PermissionSelect)
+            select.remove()
+        except Exception:
+            pass
+        # 清理当前会话的 pending_permission_blocks
+        if self._state is not None:
+            self._state.pending_permission_blocks.clear()
+
         # 创建新的会话状态对象，包含会话 ID 和标题
         # title 为空时不使用 session_id 兜底，而是用空字符串，
         # 这样标签栏会显示 "(untitled)" 直到第一条消息触发自动起名
@@ -589,9 +602,10 @@ class IwanTuiApp(App[None]):
 
         执行流程：
         1. 保存当前会话的 UI 状态（widget 列表）
-        2. 将目标会话移到 _session_order 首位
-        3. 清空 log-view 并加载目标会话的 widgets
-        4. 更新状态栏和标签栏
+        2. 清理残留的权限审批控件和 pending  blocks
+        3. 将目标会话移到 _session_order 首位
+        4. 清空 log-view 并加载目标会话的 widgets
+        5. 更新状态栏和标签栏
 
         注意：
             - 切换不会中断后台会话的运行
@@ -607,6 +621,17 @@ class IwanTuiApp(App[None]):
 
         # 步骤 1：保存当前会话的 UI 状态到其 _SessionState
         self._save_current_state()
+
+        # 步骤 1.5：清理当前会话残留的权限审批控件
+        # 移除屏幕上可能存在的 PermissionSelect（属于旧会话的审批流程）
+        try:
+            select = self.query_one(PermissionSelect)
+            select.remove()
+        except Exception:
+            pass
+        # 清理当前会话的 pending_permission_blocks（防止跨会话残留）
+        if self._state is not None:
+            self._state.pending_permission_blocks.clear()
 
         # 步骤 2：将目标会话移到 _session_order 首位
         self._session_order.remove(session_id)  # 先移除旧位置
@@ -1189,8 +1214,10 @@ class IwanTuiApp(App[None]):
             return
         try:
             # 发送创建会话命令，模式为 "chat"
+            # 传递当前工作目录作为会话的沙箱根（类似 VS Code 的 workspace 概念）
+            # 这样 Agent 的文件操作会被限制在 TUI 启动时的目录内
             result = await self._client.send_command(
-                "session.create", {"mode": "chat"}
+                "session.create", {"mode": "chat", "cwd": os.getcwd()}
             )
             # 从响应中解析会话 ID 和标题
             new_sid = str(result["session_id"])
@@ -2335,7 +2362,10 @@ class IwanTuiApp(App[None]):
                 await client.send_command("event.subscribe", params)
 
                 # 创建初始会话
-                created = await client.send_command("session.create", {"mode": "chat"})
+                # 传递当前工作目录作为会话的沙箱根（类似 VS Code 的 workspace）
+                created = await client.send_command(
+                    "session.create", {"mode": "chat", "cwd": os.getcwd()}
+                )
                 sid = str(created["session_id"])
                 title = str(created.get("title", "")) or sid
                 self._add_session(sid, title)
@@ -2783,12 +2813,46 @@ class IwanTuiApp(App[None]):
 
         # ========== 权限拒绝事件 ==========
 
+        elif t == "permission.granted":
+            # 权限授予事件（包括 auto_allow 和用户批准的 allow_once/always_allow）
+            tool_use_id = str(event.get("tool_use_id", ""))
+            decision = str(event.get("decision", "allow_once"))
+            if decision == "auto_allow":
+                # 自动批准：显示自动授权提示
+                self._append(Static(
+                    f"[dim]⚡ auto-allowed[/dim]  [cyan]{tool_use_id[:16]}[/cyan]",
+                    classes="log-line",
+                ))
+            else:
+                # 用户批准：清理审批块（如果存在）
+                if tool_use_id in self._pending_permission_blocks:
+                    perm_block = self._pending_permission_blocks.pop(tool_use_id)
+                    perm_block._resolve(decision)
+                    try:
+                        select = self.query_one(PermissionSelect)
+                        select.remove()
+                    except Exception:
+                        pass
+                    if not self._pending_permission_blocks:
+                        p = self._prompt()
+                        if p is not None:
+                            p.disabled = False
+                            p.read_only = False
+                            p.border_title = "type a message — enter to send, ⌘/⇧/⌥+enter for newline"
+                            p.focus()
+
         elif t == "permission.denied":
-            # 权限被拒绝（非用户交互触发的超时或断连等情况）
+            # 权限被拒绝（包括 auto_deny 和用户拒绝的 deny_once/always_deny）
             tool_use_id = str(event.get("tool_use_id", ""))
             decision = str(event.get("decision", "denied"))
-            if tool_use_id in self._pending_permission_blocks:
-                # 更新审批块状态
+            if decision == "auto_deny":
+                # 自动拒绝：显示自动拒绝提示
+                self._append(Static(
+                    f"[dim]⛔ auto-denied[/dim]  [cyan]{tool_use_id[:16]}[/cyan]",
+                    classes="log-line",
+                ))
+            elif tool_use_id in self._pending_permission_blocks:
+                # 用户拒绝：清理审批块
                 perm_block = self._pending_permission_blocks.pop(tool_use_id)
                 perm_block._resolve(decision)
                 # 移除权限选择控件

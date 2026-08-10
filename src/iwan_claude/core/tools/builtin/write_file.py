@@ -21,6 +21,7 @@
 """
 from __future__ import annotations
 
+import logging
 import shutil
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -32,10 +33,21 @@ from pydantic import BaseModel, ConfigDict
 from iwan_claude.core.sandbox import check_file_size, check_total_quota, validate_path
 from iwan_claude.core.tools.base import BaseTool, ToolResult
 
-# 最大写入字节数：1 MB
-_MAX_BYTES = 1 * 1024 * 1024
+logger = logging.getLogger(__name__)
+
+# ===== 兜底常量（配置加载失败时使用，通常不会触发） =====
+_FALLBACK_MAX_BYTES = 1 * 1024 * 1024  # 1 MB
 # 支持的写入模式
 _WRITE_MODES = ("overwrite", "append", "fail_if_exists")
+
+
+def _max_bytes() -> int:
+    """从全局配置读取 write_file 单次写入的最大字节数"""
+    try:
+        from iwan_claude.core.config import get_config
+        return int(get_config().tools.write_file_max_bytes)
+    except Exception:
+        return _FALLBACK_MAX_BYTES
 
 
 def _validate_rel_path(path_str: str, operation: str = "write") -> Path:
@@ -249,11 +261,12 @@ class WriteFileTool(BaseTool, _WriteToolMixin):
         path = _validate_rel_path(p.path, "write")
         logger.debug("write_file: path validated -> %s", path)
 
-        # 3. 检查内容大小
+        # 3. 检查内容大小（阈值从全局配置读取）
         encoded = p.content.encode("utf-8")
-        if len(encoded) > _MAX_BYTES:
+        max_b = _max_bytes()
+        if len(encoded) > max_b:
             return ToolResult(
-                content=f"content too large: {len(encoded)} bytes (limit 1 MB)",
+                content=f"content too large: {len(encoded)} bytes (limit {max_b} bytes)",
                 is_error=True,
                 error_type="runtime_error",
             )

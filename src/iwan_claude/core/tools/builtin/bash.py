@@ -21,22 +21,123 @@ Shell 命令执行工具 - 在子进程中执行 shell 命令
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import re
 import sys
+from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from iwan_claude.core.tools.base import BaseTool, ToolResult
 from iwan_claude.core.sandbox import get_sandbox, scrub_env
 
-# 最大输出字节数：64 KB，防止返回过多内容
-_MAX_OUTPUT_BYTES = 64 * 1024
-# 默认超时时间：60 秒
-_DEFAULT_TIMEOUT = 60
+# 兜底最大输出字节数：64 KB，防止返回过多内容
+_FALLBACK_OUTPUT_MAX_BYTES = 64 * 1024
+# 兜底默认超时时间：60 秒
+_FALLBACK_TIMEOUT_S = 60
+
+
+def _output_max_bytes() -> int:
+    """从全局配置读取 bash 工具输出截断字节数"""
+    try:
+        from iwan_claude.core.config import get_config
+        return int(get_config().tools.bash_output_max_bytes)
+    except Exception:
+        return _FALLBACK_OUTPUT_MAX_BYTES
+
+
+def _timeout_s() -> int:
+    """从全局配置读取 bash 工具默认超时秒数"""
+    try:
+        from iwan_claude.core.config import get_config
+        return int(get_config().tools.bash_timeout_s)
+    except Exception:
+        return _FALLBACK_TIMEOUT_S
 
 # 检测当前平台：Windows 使用 PowerShell，其他平台使用默认 shell
 IS_WINDOWS = sys.platform == "win32"
+
+# 日志记录器
+logger = logging.getLogger(__name__)
+
+# Windows 绝对路径正则：匹配 C:\xxx 或 D:/xxx 等形式
+# 提取完整的绝对路径（盘符 + 路径部分）
+_WIN_ABS_PATH_RE = re.compile(
+    r'([A-Za-z]):[\\/]([^\s"\'|&;()\[\]{}<>,`]*)'
+)
+# Unix 绝对路径正则：匹配 /etc/xxx 或 /usr/local 等形式
+_UNIX_ABS_PATH_RE = re.compile(
+    r'(?:^|[\s;|&])(/[^\s"\'|&;()\[\]{}<>,`]+)'
+)
+
+
+def _check_bash_paths(command: str, sandbox_root: Path, allow_parent: bool) -> list[str]:
+    """
+    检查 bash 命令中是否包含指向沙箱外的绝对路径
+
+    【安全目的】
+    防止通过 bash 工具绕过沙箱的路径级文件访问限制。
+    即使 write_file/read_file 被沙箱正确拦截，bash 仍可能通过
+    绝对路径访问系统任意文件（如 type C:\\Windows\\win.ini）。
+
+    【检测策略】
+    1. 提取命令中所有 Windows 绝对路径（C:\\xxx）
+    2. 提取命令中所有 Unix 绝对路径（/etc/xxx）
+    3. resolve() 每个路径并检查是否在沙箱根内
+    4. 收集所有越界路径并返回
+
+    【参数】
+    - command: str - 要执行的 shell 命令
+    - sandbox_root: Path - 沙箱根目录（已 resolve）
+    - allow_parent: bool - 是否允许访问沙箱根的父目录
+
+    【返回】
+    - list[str]: 越界路径列表（空列表表示全部合法）
+
+    【示例】
+    >>> _check_bash_paths("type C:\\\\Windows\\\\win.ini", Path("D:\\\\Test"), False)
+    ["C:\\\\Windows\\\\win.ini"]  # 越界，应被拦截
+    >>> _check_bash_paths("type file.txt", Path("D:\\\\Test"), False)
+    []  # 相对路径，合法
+    """
+    violations: list[str] = []
+    root_lower = str(sandbox_root).lower()
+
+    def _is_within(abs_path: str) -> bool:
+        """检查路径是否在沙箱根内"""
+        try:
+            resolved = str(Path(abs_path).resolve()).lower()
+            # 路径在沙箱根内
+            if resolved.startswith(root_lower):
+                return True
+            # allow_parent 模式：允许访问沙箱根的父目录
+            if allow_parent:
+                parent = str(sandbox_root.parent.resolve()).lower()
+                if resolved.startswith(parent):
+                    return True
+            return False
+        except Exception:
+            # resolve 失败（路径不存在等）时，保守判断为越界
+            return False
+
+    # 检测 Windows 绝对路径
+    for m in _WIN_ABS_PATH_RE.finditer(command):
+        drive = m.group(1).upper()
+        rest = m.group(2)
+        abs_path = f"{drive}:\\{rest}"
+        if not _is_within(abs_path):
+            violations.append(abs_path)
+            logger.debug("bash sandbox check: blocked Windows path %s", abs_path)
+
+    # 检测 Unix 绝对路径
+    for m in _UNIX_ABS_PATH_RE.finditer(command):
+        abs_path = m.group(1)
+        if not _is_within(abs_path):
+            violations.append(abs_path)
+            logger.debug("bash sandbox check: blocked Unix path %s", abs_path)
+
+    return violations
 
 
 class BashParams(BaseModel):
@@ -49,7 +150,7 @@ class BashParams(BaseModel):
     """
     model_config = ConfigDict(extra="ignore")
     command: str
-    timeout: int = Field(default=_DEFAULT_TIMEOUT, ge=1, le=120)
+    timeout: int = Field(default_factory=_timeout_s, ge=1, le=120)
 
 
 class BashTool(BaseTool):
@@ -100,7 +201,7 @@ class BashTool(BaseTool):
             },
             "timeout": {
                 "type": "integer",
-                "description": f"Maximum seconds to wait (default {_DEFAULT_TIMEOUT}, max 120).",
+                "description": "Maximum seconds to wait (default from tools.bash_timeout_s, max 120).",
             },
         },
         "required": ["command"],
@@ -143,6 +244,40 @@ class BashTool(BaseTool):
         # 沙箱未启用时，使用 None（继承父进程 CWD）
         sandbox = get_sandbox()
         cwd = str(sandbox.root) if sandbox.enabled else None
+
+        # ===== 沙箱路径级硬拦截 =====
+        # 检测命令中是否包含指向沙箱外的绝对路径
+        # 这是强制安全限制：即使权限系统通过也会拦截
+        # 防止 Agent 通过 bash 绕过 write_file/read_file 的路径限制
+        if sandbox.enabled:
+            violations = _check_bash_paths(
+                command, sandbox.root, sandbox.allow_parent_dirs
+            )
+            if violations:
+                logger.warning(
+                    "bash sandbox block: command=%s  violations=%s",
+                    command[:100], violations,
+                )
+                # 记录审计日志
+                try:
+                    from iwan_claude.core.audit import log_sandbox_block
+                    log_sandbox_block(
+                        tool="bash",
+                        reason="path_outside_sandbox",
+                        command=command[:200],
+                    )
+                except Exception:
+                    pass
+                return ToolResult(
+                    content=(
+                        f"[blocked by sandbox] command accesses path(s) outside "
+                        f"the project directory: {', '.join(violations)}\n\n"
+                        f"To fix: use relative paths or move the file into "
+                        f"the project root ({sandbox.root})."
+                    ),
+                    is_error=True,
+                    error_type="sandbox_violation",
+                )
 
         # ===== 进程内强化：网络命令阻断 =====
         # block_network_commands=True 时，阻断 curl/wget/nc/ssh 等网络外传命令
@@ -229,9 +364,10 @@ class BashTool(BaseTool):
         output = stdout_bytes.decode("utf-8", errors="replace")
 
         # 4. 处理输出大小限制
-        truncated = len(stdout_bytes) > _MAX_OUTPUT_BYTES
+        max_bytes = _output_max_bytes()
+        truncated = len(stdout_bytes) > max_bytes
         if truncated:
-            output = output[:_MAX_OUTPUT_BYTES] + "\n[truncated]"
+            output = output[:max_bytes] + "\n[truncated]"
 
         # 5. 根据退出码返回结果
         returncode = proc.returncode or 0

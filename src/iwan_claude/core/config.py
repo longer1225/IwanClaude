@@ -147,6 +147,10 @@ class LlmConfig:
     context_window: int = 128_000
     # 模型路由策略
     router: str = "static"  # "static" | "rule_based" (S4) | "cost_budget" (S6)
+    # LLM 请求超时（秒）
+    timeout_s: float = 120.0
+    # Embedding 请求超时（秒）
+    embedding_timeout_s: float = 120.0
 
 
 @dataclass
@@ -357,6 +361,78 @@ class RagConfig:
 
 
 @dataclass
+class ToolsConfig:
+    """
+    工具运行默认参数 - 对应 [tools] section
+
+    这里统一管理散落在各个工具文件中的硬编码常量：
+    输出字节数上限、默认超时秒数、HTTP 请求体上限、重试次数等。
+
+    属性：
+        default_output_max_bytes: 工具输出默认截断阈值（字节），大部分内置工具共享
+        default_timeout_s: 工具默认超时（秒），具体工具可覆盖
+
+        工具级输出与超时覆盖：
+        bash_* / git_* / run_python_* / testing_* / dependency_* / code_quality_* / system_*
+
+        文件 I/O 阈值（字节）：
+        read_file_max_bytes: read_file 单次读取的最大字节数（文件本身截断阈值）
+        write_file_max_bytes: write_file 单次写入的最大字节数（单文件写入上限）
+        editor_max_bytes: editor 系列工具可处理的文件大小上限（字节）
+
+        HTTP 工具：
+        http_timeout_s: http_request 默认超时（秒）
+        http_max_body_size: http_request 响应体上限（字节），防止下载大文件时爆内存
+        http_max_redirects: http_request 最大跟随重定向次数
+
+        invoke_tool 包装层（超时/重试兜底）：
+        invocation_timeout_s: invoke_tool 总超时（秒），兜底防止工具挂死
+        invocation_max_retries: invoke_tool 最大重试次数（不含首次尝试）
+        invocation_retry_base_s: invoke_tool 指数退避基础秒数
+
+        其他：
+        read_file_reads_max: read_file 单会话最大读取次数（配合 effort level 用）
+    """
+    # 共享默认值
+    default_output_max_bytes: int = 64 * 1024  # 64 KB
+    default_timeout_s: int = 60
+
+    # 工具级：输出截断 + 超时
+    bash_output_max_bytes: int = 64 * 1024         # 64 KB
+    bash_timeout_s: int = 60
+    git_output_max_bytes: int = 64 * 1024          # 64 KB
+    git_timeout_s: int = 60
+    run_python_output_max_bytes: int = 128 * 1024  # 128 KB（Python 执行输出较多）
+    run_python_timeout_s: int = 60
+    testing_output_max_bytes: int = 64 * 1024      # 64 KB
+    testing_timeout_s: int = 180                    # 测试执行较慢，给更长超时
+    dependency_output_max_bytes: int = 64 * 1024    # 64 KB
+    dependency_timeout_s: int = 120
+    code_quality_output_max_bytes: int = 64 * 1024  # 64 KB
+    code_quality_timeout_s: int = 120
+    system_output_max_bytes: int = 64 * 1024        # 64 KB
+    system_timeout_s: int = 30
+
+    # 文件 I/O 阈值
+    read_file_max_bytes: int = 512 * 1024           # 512 KB（read_file 单次读取）
+    write_file_max_bytes: int = 1 * 1024 * 1024     # 1 MB  （write_file 单次写入）
+    editor_max_bytes: int = 2 * 1024 * 1024         # 2 MB  （editor 可处理文件大小）
+
+    # HTTP 工具
+    http_timeout_s: int = 30
+    http_max_body_size: int = 10 * 1024 * 1024      # 10 MB
+    http_max_redirects: int = 5                      # 最大重定向次数
+
+    # invoke_tool 包装层
+    invocation_timeout_s: float = 120.0              # 总兜底超时
+    invocation_max_retries: int = 2                   # 最大重试次数（不含首次）
+    invocation_retry_base_s: float = 2.0              # 指数退避基础秒数
+
+    # 其他
+    read_file_reads_max: int = 200                    # 单会话 read_file 次数上限
+
+
+@dataclass
 class IwanConfig:
     """
     主配置类 - 整合所有子配置类
@@ -388,6 +464,7 @@ class IwanConfig:
     mcp: McpConfig = field(default_factory=McpConfig)
     sandbox: SandboxConfig = field(default_factory=SandboxConfig)
     rag: RagConfig = field(default_factory=RagConfig)
+    tools: ToolsConfig = field(default_factory=ToolsConfig)
 
 
 # 构建并返回运行时配置：默认值 → 全局 TOML → 项目本地 TOML → .env → 系统环境变量（后者优先级最高）
@@ -458,7 +535,7 @@ def get_config() -> IwanConfig:
 
 # 将已解析的 TOML 根表写入 config；未知小节或类型错误时退出进程
 def _apply_toml(config: IwanConfig, data: dict[str, Any]) -> None:
-    unknown = set(data.keys()) - {"core", "logging", "agent", "llm", "trace", "permission", "compaction", "mcp", "sandbox", "rag"}
+    unknown = set(data.keys()) - {"core", "logging", "agent", "llm", "trace", "permission", "compaction", "mcp", "sandbox", "rag", "tools"}
     if unknown:
         raise SystemExit(f"Unknown top-level config keys: {', '.join(sorted(unknown))}")
 
@@ -547,6 +624,7 @@ def _apply_toml(config: IwanConfig, data: dict[str, Any]) -> None:
             raise SystemExit("Config error: [llm] must be a table")
         unknown_llm: set[str] = set(llm.keys()) - {
             "provider", "base_url", "api_key_env", "default_model", "context_window", "router",
+            "timeout_s", "embedding_timeout_s",
         }
         if unknown_llm:
             raise SystemExit(f"Unknown [llm] keys: {', '.join(sorted(unknown_llm))}")
@@ -580,6 +658,16 @@ def _apply_toml(config: IwanConfig, data: dict[str, Any]) -> None:
             if not isinstance(val, str):
                 raise SystemExit("Config error: llm.router must be a string")
             config.llm.router = val
+        if "timeout_s" in llm:
+            val = llm["timeout_s"]
+            if not isinstance(val, (int, float)) or val <= 0:
+                raise SystemExit("Config error: llm.timeout_s must be a positive number")
+            config.llm.timeout_s = float(val)
+        if "embedding_timeout_s" in llm:
+            val = llm["embedding_timeout_s"]
+            if not isinstance(val, (int, float)) or val <= 0:
+                raise SystemExit("Config error: llm.embedding_timeout_s must be a positive number")
+            config.llm.embedding_timeout_s = float(val)
 
     if "trace" in data:
         trace = data["trace"]
@@ -796,6 +884,76 @@ def _apply_toml(config: IwanConfig, data: dict[str, Any]) -> None:
             if not isinstance(val, str):
                 raise SystemExit("Config error: rag.index_path must be a string")
             config.rag.index_path = val
+
+    # ===== 加载 [tools] section：工具输出/超时默认参数 =====
+    if "tools" in data:
+        t = data["tools"]
+        if not isinstance(t, dict):
+            raise SystemExit("Config error: [tools] must be a table")
+        tools_allowed = {
+            # 共享默认
+            "default_output_max_bytes", "default_timeout_s",
+            # 工具级：输出 + 超时
+            "bash_output_max_bytes", "bash_timeout_s",
+            "git_output_max_bytes", "git_timeout_s",
+            "run_python_output_max_bytes", "run_python_timeout_s",
+            "testing_output_max_bytes", "testing_timeout_s",
+            "dependency_output_max_bytes", "dependency_timeout_s",
+            "code_quality_output_max_bytes", "code_quality_timeout_s",
+            "system_output_max_bytes", "system_timeout_s",
+            # 文件 I/O 阈值
+            "read_file_max_bytes", "write_file_max_bytes", "editor_max_bytes",
+            # HTTP 工具
+            "http_timeout_s", "http_max_body_size", "http_max_redirects",
+            # invoke_tool 包装层
+            "invocation_timeout_s", "invocation_max_retries", "invocation_retry_base_s",
+            # 其他
+            "read_file_reads_max",
+        }
+        unknown = set(t.keys()) - tools_allowed
+        if unknown:
+            raise SystemExit(f"Unknown [tools] keys: {', '.join(sorted(unknown))}")
+        for key_name, required_type, must_positive in [
+            # 共享默认
+            ("default_output_max_bytes", int, True),
+            ("default_timeout_s", int, True),
+            # 工具级：输出 + 超时
+            ("bash_output_max_bytes", int, True),
+            ("bash_timeout_s", int, True),
+            ("git_output_max_bytes", int, True),
+            ("git_timeout_s", int, True),
+            ("run_python_output_max_bytes", int, True),
+            ("run_python_timeout_s", int, True),
+            ("testing_output_max_bytes", int, True),
+            ("testing_timeout_s", int, True),
+            ("dependency_output_max_bytes", int, True),
+            ("dependency_timeout_s", int, True),
+            ("code_quality_output_max_bytes", int, True),
+            ("code_quality_timeout_s", int, True),
+            ("system_output_max_bytes", int, True),
+            ("system_timeout_s", int, True),
+            # 文件 I/O 阈值
+            ("read_file_max_bytes", int, True),
+            ("write_file_max_bytes", int, True),
+            ("editor_max_bytes", int, True),
+            # HTTP 工具
+            ("http_timeout_s", int, True),
+            ("http_max_body_size", int, True),
+            ("http_max_redirects", int, True),
+            # invoke_tool 包装层
+            ("invocation_timeout_s", float, True),
+            ("invocation_max_retries", int, True),
+            ("invocation_retry_base_s", float, True),
+            # 其他
+            ("read_file_reads_max", int, True),
+        ]:
+            if key_name in t:
+                val = t[key_name]
+                if not isinstance(val, required_type):
+                    raise SystemExit(f"Config error: tools.{key_name} must be {required_type.__name__}")
+                if must_positive and val <= 0:
+                    raise SystemExit(f"Config error: tools.{key_name} must be positive")
+                setattr(config.tools, key_name, val)
 
 
 # 用 IWAN_* 环境变量覆盖 config 中对应字段（若变量已设置）

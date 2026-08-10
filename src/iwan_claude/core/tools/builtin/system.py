@@ -34,10 +34,26 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from iwan_claude.core.tools.base import BaseTool, ToolResult
 
-# 最大输出字节数：64 KB
-_MAX_OUTPUT_BYTES = 64 * 1024
-# 默认超时时间：30 秒
-_DEFAULT_TIMEOUT = 30
+# 最大输出字节数兜底值：64 KB
+_FALLBACK_OUTPUT_MAX_BYTES = 64 * 1024
+# 默认超时时间兜底值：30 秒
+_FALLBACK_TIMEOUT_S = 30
+
+
+def _output_max_bytes() -> int:
+    try:
+        from iwan_claude.core.config import get_config
+        return int(get_config().tools.system_output_max_bytes)
+    except Exception:
+        return _FALLBACK_OUTPUT_MAX_BYTES
+
+
+def _timeout_s() -> int:
+    try:
+        from iwan_claude.core.config import get_config
+        return int(get_config().tools.system_timeout_s)
+    except Exception:
+        return _FALLBACK_TIMEOUT_S
 
 # 检测当前平台：Windows 使用 PowerShell，其他平台使用标准命令
 IS_WINDOWS = sys.platform == "win32"
@@ -174,7 +190,7 @@ class ProcessListTool(BaseTool):
                 )
 
             # 等待命令完成（带超时控制）
-            stdout_bytes, _ = await asyncio.wait_for(proc.communicate(), timeout=_DEFAULT_TIMEOUT)
+            stdout_bytes, _ = await asyncio.wait_for(proc.communicate(), timeout=_timeout_s())
 
         except TimeoutError:
             return ToolResult(content="[timeout]", is_error=True, error_type="timeout")
@@ -183,9 +199,10 @@ class ProcessListTool(BaseTool):
 
         # 处理输出（解码、截断）
         output = stdout_bytes.decode("utf-8", errors="replace")
-        truncated = len(stdout_bytes) > _MAX_OUTPUT_BYTES
+        max_bytes = _output_max_bytes()
+        truncated = len(stdout_bytes) > max_bytes
         if truncated:
-            output = output[:_MAX_OUTPUT_BYTES] + "\n[truncated]"
+            output = output[:max_bytes] + "\n[truncated]"
 
         # 如果指定了 filter，进行客户端过滤
         if p.filter:

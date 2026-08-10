@@ -170,32 +170,34 @@ class SessionManager:
         # Skill 加载器
         self._skill_loader = SkillLoader()
 
-    async def create(self, mode: SessionMode, title: str = "") -> Session:
+    async def create(self, mode: SessionMode, title: str = "", cwd: str = "") -> Session:
         """
         创建新会话
 
         【参数说明】
         - mode: SessionMode - 会话模式（one_shot / chat）
         - title: str - 会话标题（可选）
+        - cwd: str - 会话绑定的工作目录（沙箱根），实现多项目隔离
+          空字符串时使用当前 Core 的 CWD
 
         【返回值】
         - Session: 创建的会话对象
 
         【执行流程】
         1. 生成会话 ID（格式：sess-<12位随机字符串>）
-        2. 创建 Session 对象（状态为 active）
-        3. 将会话添加到内存字典
-        4. 为会话创建锁
-        5. 将会话元数据写入文件
-        6. 发布 SessionCreatedEvent 事件
-        7. 返回会话对象
+        2. 创建 Session 对象（状态为 active，绑定 cwd）
+        3. 切换沙箱根到会话 cwd（如果指定了 cwd）
+        4. 将会话添加到内存字典
+        5. 为会话创建锁
+        6. 将会话元数据写入文件
+        7. 发布 SessionCreatedEvent 事件
+        8. 返回会话对象
 
-        【会话 ID 生成】
-        使用 uuid.uuid4().hex[:12] 生成 12 位随机字符串
-        这样既保证唯一性，又保持较短的长度
-
-        【事件发布】
-        发布 SessionCreatedEvent，包含会话 ID、模式和时间戳
+        【cwd 的作用】
+        每个会话绑定独立的项目目录（类似 VS Code 的 workspace），
+        Agent 的文件操作被限制在此目录内。
+        - 在 D:/project-a 启动 TUI → 会话 A 的 cwd = D:/project-a
+        - 在 E:/project-b 启动 TUI → 会话 B 的 cwd = E:/project-b
         """
         # 生成会话 ID（格式：sess-<12位随机字符串>）
         sid = f"sess-{uuid.uuid4().hex[:12]}"
@@ -210,7 +212,12 @@ class SessionManager:
             created_at=ts,
             updated_at=ts,
             run_ids=[],
+            cwd=cwd,
         )
+        # 如果指定了 cwd，切换沙箱根目录
+        if cwd:
+            from iwan_claude.core.sandbox import set_sandbox_root
+            set_sandbox_root(cwd)
         # 将会话添加到内存字典
         self._sessions[sid] = session
         # 为会话创建锁（确保并发安全）
@@ -275,7 +282,14 @@ class SessionManager:
         if lock.locked():
             raise HandlerError(SESSION_BUSY, "session busy")
 
-        # 4. 加锁处理消息
+        # 4. 如果会话绑定了 cwd，切换沙箱根目录
+        # 这确保 Agent 的文件操作（read_file, write_file, bash 等）
+        # 被限制在会话指定的项目目录内
+        if session.cwd:
+            from iwan_claude.core.sandbox import set_sandbox_root
+            set_sandbox_root(session.cwd)
+
+        # 5. 加锁处理消息
         async with lock:
             # 5. 检查会话是否已关闭
             if session.status == "closed":

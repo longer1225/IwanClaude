@@ -31,10 +31,26 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from iwan_claude.core.tools.base import BaseTool, ToolResult
 
-# 最大输出字节数：64 KB，防止返回过多内容
-_MAX_OUTPUT_BYTES = 64 * 1024
-# 默认超时时间：120 秒（2 分钟），pip 安装可能需要较长时间
-_DEFAULT_TIMEOUT = 120
+# 最大输出字节数（兜底值）：64 KB，防止返回过多内容
+_FALLBACK_OUTPUT_MAX_BYTES = 64 * 1024
+# 默认超时时间（兜底值）：120 秒（2 分钟），pip 安装可能需要较长时间
+_FALLBACK_TIMEOUT_S = 120
+
+
+def _output_max_bytes() -> int:
+    try:
+        from iwan_claude.core.config import get_config
+        return int(get_config().tools.dependency_output_max_bytes)
+    except Exception:
+        return _FALLBACK_OUTPUT_MAX_BYTES
+
+
+def _timeout_s() -> int:
+    try:
+        from iwan_claude.core.config import get_config
+        return int(get_config().tools.dependency_timeout_s)
+    except Exception:
+        return _FALLBACK_TIMEOUT_S
 
 
 class PipManageParams(BaseModel):
@@ -212,7 +228,7 @@ class PipManageTool(BaseTool):
                 return ToolResult(content=f"Unknown action: {action}", is_error=True, error_type="schema_error")
 
             # 4. 等待命令完成（带超时控制）
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=_DEFAULT_TIMEOUT)
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=_timeout_s())
 
             # 5. 合并 stdout 和 stderr
             output = stdout.decode("utf-8", errors="replace")
@@ -220,8 +236,8 @@ class PipManageTool(BaseTool):
                 output += "\nSTDERR:\n" + stderr.decode("utf-8", errors="replace")
 
             # 6. 处理输出大小限制
-            if len(output) > _MAX_OUTPUT_BYTES:
-                output = output[:_MAX_OUTPUT_BYTES] + "\n[truncated]"
+            if len(output) > _output_max_bytes():
+                output = output[:_output_max_bytes()] + "\n[truncated]"
 
             # 7. 返回结果
             return ToolResult(content=output)
@@ -332,7 +348,7 @@ class DependencyCheckTool(BaseTool):
             )
 
             # 4. 等待命令完成（带超时控制）
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=_DEFAULT_TIMEOUT)
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=_timeout_s())
 
             # 5. 合并 stdout 和 stderr
             output = stdout.decode("utf-8", errors="replace")
@@ -340,8 +356,8 @@ class DependencyCheckTool(BaseTool):
                 output += "\nSTDERR:\n" + stderr.decode("utf-8", errors="replace")
 
             # 6. 处理输出大小限制
-            if len(output) > _MAX_OUTPUT_BYTES:
-                output = output[:_MAX_OUTPUT_BYTES] + "\n[truncated]"
+            if len(output) > _output_max_bytes():
+                output = output[:_output_max_bytes()] + "\n[truncated]"
 
             # 7. 返回结果
             return ToolResult(content=output)

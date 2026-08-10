@@ -50,10 +50,28 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from iwan_claude.core.tools.base import BaseTool, ToolResult
 
-# 输出最大字节数，防止大输出导致内存问题
-_MAX_OUTPUT_BYTES = 64 * 1024
-# 默认超时时间，单位秒
-_DEFAULT_TIMEOUT = 60
+# 兜底输出最大字节数，防止大输出导致内存问题
+_FALLBACK_OUTPUT_MAX_BYTES = 64 * 1024
+# 兜底默认超时时间，单位秒
+_FALLBACK_TIMEOUT_S = 60
+
+
+def _output_max_bytes() -> int:
+    """从全局配置读取 git 工具输出截断字节数"""
+    try:
+        from iwan_claude.core.config import get_config
+        return int(get_config().tools.git_output_max_bytes)
+    except Exception:
+        return _FALLBACK_OUTPUT_MAX_BYTES
+
+
+def _timeout_s() -> int:
+    """从全局配置读取 git 工具默认超时秒数"""
+    try:
+        from iwan_claude.core.config import get_config
+        return int(get_config().tools.git_timeout_s)
+    except Exception:
+        return _FALLBACK_TIMEOUT_S
 
 # 检测是否为 Windows 平台，用于跨平台兼容
 IS_WINDOWS = sys.platform == "win32"
@@ -145,7 +163,7 @@ class GitStatusTool(BaseTool):
                 stderr=asyncio.subprocess.PIPE,
             )
             # 等待命令完成，设置超时
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=_DEFAULT_TIMEOUT)
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=_timeout_s())
         except TimeoutError:
             return ToolResult(content="[timeout]", is_error=True, error_type="timeout")
         except FileNotFoundError:
@@ -259,7 +277,7 @@ class GitLogTool(BaseTool):
                 stderr=asyncio.subprocess.PIPE,
             )
             # 等待命令完成，设置超时
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=_DEFAULT_TIMEOUT)
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=_timeout_s())
         except TimeoutError:
             return ToolResult(content="[timeout]", is_error=True, error_type="timeout")
         except FileNotFoundError:
@@ -381,7 +399,7 @@ class GitDiffTool(BaseTool):
                 stderr=asyncio.subprocess.PIPE,
             )
             # 等待命令完成，设置超时
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=_DEFAULT_TIMEOUT)
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=_timeout_s())
         except TimeoutError:
             return ToolResult(content="[timeout]", is_error=True, error_type="timeout")
         except FileNotFoundError:
@@ -397,9 +415,10 @@ class GitDiffTool(BaseTool):
         # 解码输出
         output = stdout.decode("utf-8", errors="replace")
         # 检查输出大小，超过限制则截断
-        truncated = len(stdout) > _MAX_OUTPUT_BYTES
+        max_bytes = _output_max_bytes()
+        truncated = len(stdout) > max_bytes
         if truncated:
-            output = output[:_MAX_OUTPUT_BYTES] + "\n[truncated]"
+            output = output[:max_bytes] + "\n[truncated]"
         # 检查是否为空输出（无差异）
         if not output.strip():
             return ToolResult(content="No changes to show")
@@ -505,7 +524,7 @@ class GitCommitTool(BaseTool):
                     stderr=asyncio.subprocess.PIPE,
                 )
                 # 等待命令完成，设置超时
-                await asyncio.wait_for(add_proc.communicate(), timeout=_DEFAULT_TIMEOUT)
+                await asyncio.wait_for(add_proc.communicate(), timeout=_timeout_s())
                 # 检查暂存命令返回码
                 if add_proc.returncode != 0:
                     return ToolResult(
@@ -530,7 +549,7 @@ class GitCommitTool(BaseTool):
                 stderr=asyncio.subprocess.PIPE,
             )
             # 等待命令完成，设置超时
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=_DEFAULT_TIMEOUT)
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=_timeout_s())
         except TimeoutError:
             return ToolResult(content="[timeout]", is_error=True, error_type="timeout")
         except FileNotFoundError:
@@ -639,7 +658,7 @@ class GitCheckoutTool(BaseTool):
                 stderr=asyncio.subprocess.PIPE,
             )
             # 等待命令完成，设置超时
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=_DEFAULT_TIMEOUT)
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=_timeout_s())
         except TimeoutError:
             return ToolResult(content="[timeout]", is_error=True, error_type="timeout")
         except FileNotFoundError:

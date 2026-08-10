@@ -144,9 +144,17 @@ class SessionCreateCommand(BaseModel):
     - type: Literal["session.create"] - 命令类型
     - mode: SessionMode - 会话模式（默认 "chat"）
     - title: str - 会话标题（默认空字符串）
+    - cwd: str - 会话绑定的工作目录（沙箱根），实现多项目隔离
+
+    【cwd 的作用】
+    每个会话可绑定独立的项目目录（类似 VS Code 的 workspace），
+    Agent 的文件操作被限制在此目录内。
+    - 在 D:/project-a 启动 TUI → 会话 A 的 cwd = D:/project-a
+    - 在 E:/project-b 启动 TUI → 会话 B 的 cwd = E:/project-b
+    - cwd 为空时使用 Core 启动时的 CWD 作为兜底
 
     【设计目的】
-    创建新的会话，设置会话模式和标题。
+    创建新的会话，设置会话模式、标题和工作目录。
 
     【响应】
     SessionCreateResult - 包含会话 ID 和状态
@@ -154,6 +162,7 @@ class SessionCreateCommand(BaseModel):
     type: Literal["session.create"] = "session.create"
     mode: SessionMode = "chat"
     title: str = ""
+    cwd: str = ""
 
 
 class SessionCreateResult(BaseModel):

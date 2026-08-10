@@ -349,7 +349,11 @@ class CoreApp:
         cmd = SessionCreateCommand.model_validate(params)
         
         # 创建会话
-        session = await self._sessions.create(mode=cmd.mode, title=cmd.title)
+        session = await self._sessions.create(
+            mode=cmd.mode,
+            title=cmd.title,
+            cwd=cmd.cwd,  # 传递会话绑定的工作目录（沙箱根）
+        )
 
         # 返回会话 ID、状态和当前配置
         auto_mode = self._permission_manager.get_auto_mode() if self._permission_manager is not None else "off"

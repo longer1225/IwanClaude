@@ -52,10 +52,26 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from iwan_claude.core.tools.base import BaseTool, ToolResult
 
-# 输出最大字节数，防止大输出导致内存问题
-_MAX_OUTPUT_BYTES = 64 * 1024
-# 默认超时时间，单位秒
-_DEFAULT_TIMEOUT = 120
+# 输出最大字节数（兜底值），防止大输出导致内存问题
+_FALLBACK_OUTPUT_MAX_BYTES = 64 * 1024
+# 默认超时时间（兜底值），单位秒
+_FALLBACK_TIMEOUT_S = 120
+
+
+def _output_max_bytes() -> int:
+    try:
+        from iwan_claude.core.config import get_config
+        return int(get_config().tools.code_quality_output_max_bytes)
+    except Exception:
+        return _FALLBACK_OUTPUT_MAX_BYTES
+
+
+def _timeout_s() -> int:
+    try:
+        from iwan_claude.core.config import get_config
+        return int(get_config().tools.code_quality_timeout_s)
+    except Exception:
+        return _FALLBACK_TIMEOUT_S
 
 
 class ReviewCodeParams(BaseModel):
@@ -420,7 +436,7 @@ class LintCodeTool(BaseTool):
                 stderr=asyncio.subprocess.PIPE,
             )
             # 等待命令完成，设置超时
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=_DEFAULT_TIMEOUT)
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=_timeout_s())
             # 解码输出
             output = stdout.decode("utf-8", errors="replace")
             if output.strip():
@@ -445,7 +461,7 @@ class LintCodeTool(BaseTool):
                 stderr=asyncio.subprocess.PIPE,
             )
             # 等待命令完成，设置超时
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=_DEFAULT_TIMEOUT)
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=_timeout_s())
             # 解码输出
             output = stdout.decode("utf-8", errors="replace")
             if output.strip():
@@ -460,8 +476,8 @@ class LintCodeTool(BaseTool):
         # 合并结果
         output = "\n".join(results)
         # 检查输出大小，超过限制则截断
-        if len(output) > _MAX_OUTPUT_BYTES:
-            output = output[:_MAX_OUTPUT_BYTES] + "\n[truncated]"
+        if len(output) > _output_max_bytes():
+            output = output[:_output_max_bytes()] + "\n[truncated]"
 
         return ToolResult(content=output)
 

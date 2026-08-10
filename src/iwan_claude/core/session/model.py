@@ -55,40 +55,15 @@ class Session:
     - created_at: str - 创建时间（ISO 格式）
     - updated_at: str - 更新时间（ISO 格式）
     - run_ids: list[str] - 会话包含的运行 ID 列表
+    - cwd: str - 会话绑定的工作目录（沙箱根），实现多项目隔离
 
-    【设计说明】
-    使用 dataclass 装饰器自动生成：
-    - __init__: 构造函数
-    - __repr__: 字符串表示
-    - __eq__: 相等比较
-    - __hash__: 哈希值（如果所有字段都是不可变的）
-
-    run_ids 使用 field(default_factory=list) 设置默认值，
-    这样每个实例都会有独立的列表，不会共享同一个列表对象。
-
-    【使用示例】
-    ```python
-    from iwan_claude.core.session.model import Session, SessionMode, SessionStatus
-    
-    # 创建会话
-    session = Session(
-        id="session_123",
-        mode="chat",
-        status="active",
-        title="代码审查",
-        created_at="2024-01-15T10:30:00",
-        updated_at="2024-01-15T10:30:00",
-    )
-    
-    # 添加运行 ID
-    session.run_ids.append("run_456")
-    
-    # 转换为字典
-    data = session.to_dict()
-    
-    # 从字典还原
-    session2 = Session.from_dict(data)
-    ```
+    【cwd 字段的作用】
+    每个会话可绑定独立的项目目录（类似 VS Code 的 workspace），
+    Agent 的文件操作被限制在此目录内。
+    - 在 D:/project-a 启动 TUI → 会话 A 的 cwd = D:/project-a
+    - 在 E:/project-b 启动 TUI → 会话 B 的 cwd = E:/project-b
+    - 切换会话时，沙箱根会自动切换到对应 cwd
+    - cwd 为空时，使用 Core 启动时的 CWD 作为兜底
     """
     id: str
     mode: SessionMode
@@ -97,6 +72,7 @@ class Session:
     created_at: str
     updated_at: str
     run_ids: list[str] = field(default_factory=list)
+    cwd: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         """
@@ -116,6 +92,7 @@ class Session:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "run_ids": list(self.run_ids),
+            "cwd": self.cwd,
         }
 
     @classmethod
@@ -140,4 +117,5 @@ class Session:
             created_at=str(data["created_at"]),
             updated_at=str(data["updated_at"]),
             run_ids=[str(x) for x in data.get("run_ids", [])],
+            cwd=str(data.get("cwd", "")),
         )

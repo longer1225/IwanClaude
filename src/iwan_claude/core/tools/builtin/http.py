@@ -43,12 +43,38 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from iwan_claude.core.tools.base import BaseTool, ToolResult
 
-# 响应体最大字节数：10MB，防止大响应导致内存问题
-_MAX_BODY_SIZE = 10 * 1024 * 1024
-# 最大重定向次数，防止无限重定向攻击
-_MAX_REDIRECTS = 5
-# 默认超时时间，单位秒
-_DEFAULT_TIMEOUT = 30
+# ===== 兜底常量（配置加载失败时使用，通常不会触发） =====
+_FALLBACK_MAX_BODY_SIZE = 10 * 1024 * 1024  # 10 MB，响应体上限
+_FALLBACK_MAX_REDIRECTS = 5                  # 最大重定向次数
+_FALLBACK_DEFAULT_TIMEOUT = 30               # 默认超时秒数
+
+
+def _max_body_size() -> int:
+    """从全局配置读取 http_request 响应体最大字节数"""
+    try:
+        from iwan_claude.core.config import get_config
+        return int(get_config().tools.http_max_body_size)
+    except Exception:
+        return _FALLBACK_MAX_BODY_SIZE
+
+
+def _max_redirects() -> int:
+    """从全局配置读取 http_request 最大重定向次数"""
+    try:
+        from iwan_claude.core.config import get_config
+        return int(get_config().tools.http_max_redirects)
+    except Exception:
+        return _FALLBACK_MAX_REDIRECTS
+
+
+def _default_timeout_s() -> int:
+    """从全局配置读取 http_request 默认超时秒数"""
+    try:
+        from iwan_claude.core.config import get_config
+        return int(get_config().tools.http_timeout_s)
+    except Exception:
+        return _FALLBACK_DEFAULT_TIMEOUT
+
 
 # 允许的 HTTP 方法集合，限制只能使用安全的 HTTP 方法
 _ALLOWED_METHODS = {"GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS"}
@@ -65,7 +91,7 @@ class HttpRequestParams(BaseModel):
     配置 extra="ignore" 表示忽略未定义的字段，增强兼容性。
     """
     model_config = ConfigDict(extra="ignore")
-    
+
     # 请求目标 URL，必填字段
     url: str = Field(description="URL to send the request to")
     # HTTP 方法，默认为 GET
@@ -74,8 +100,10 @@ class HttpRequestParams(BaseModel):
     headers: dict[str, str] | None = Field(default=None, description="HTTP headers")
     # 请求体，适用于 POST/PUT 等方法
     body: str | None = Field(default=None, description="Request body (for POST/PUT)")
-    # 超时时间，范围 1-120 秒，防止长时间阻塞
-    timeout: int = Field(default=_DEFAULT_TIMEOUT, ge=1, le=120, description="Request timeout in seconds")
+
+    # 超时时间：默认值从全局配置 tools.http_timeout_s 读取（Pydantic default_factory 动态求值）
+    timeout: int = Field(default_factory=_default_timeout_s, ge=1, le=120,
+                         description="Request timeout in seconds")
 
 
 class HttpRequestTool(BaseTool):
@@ -120,7 +148,7 @@ class HttpRequestTool(BaseTool):
             },
             "timeout": {
                 "type": "integer",
-                "description": f"Request timeout in seconds (default: {_DEFAULT_TIMEOUT}, max: 120)",
+                "description": "Request timeout in seconds (default from tools.http_timeout_s, max: 120)",
             },
         },
         "required": ["url"],
@@ -212,11 +240,13 @@ class HttpRequestTool(BaseTool):
         headers.setdefault("User-Agent", "IwanClaude/1.0")
 
         # 创建 httpx 异步客户端并发送请求
+        # 重定向次数从全局配置读取（tools.http_max_redirects）
         try:
             async with httpx.AsyncClient(
-                timeout=httpx.Timeout(p.timeout, connect=10),  # 总超时 + 连接超时
-                follow_redirects=True,  # 自动跟随重定向
-                limits=httpx.Limits(max_connections=10),  # 连接池限制
+                timeout=httpx.Timeout(p.timeout, connect=10),        # 总超时 + 连接超时
+                follow_redirects=True,                                # 自动跟随重定向
+                max_redirects=_max_redirects(),                       # 最大重定向次数（配置化）
+                limits=httpx.Limits(max_connections=10),              # 连接池限制
             ) as client:
                 response = await client.request(
                     method=method,
@@ -239,11 +269,12 @@ class HttpRequestTool(BaseTool):
         # 获取响应体文本
         body = response.text
 
-        # 检查响应体大小，超过限制则截断
+        # 检查响应体大小，超过限制则截断（阈值从全局配置 tools.http_max_body_size 读取）
+        max_b = _max_body_size()
         content_length = len(body.encode("utf-8"))
-        truncated = content_length > _MAX_BODY_SIZE
+        truncated = content_length > max_b
         if truncated:
-            body = body[:_MAX_BODY_SIZE] + "\n[truncated]"
+            body = body[:max_b] + "\n[truncated]"
 
         # 组合结果：状态行 + 响应头 + 空行 + 响应体
         result_parts = [status_line, headers_str, "", body]
