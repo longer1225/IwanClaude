@@ -620,11 +620,12 @@ class LangGraphPlanExecuteLoop:
         # 设置 run_id：优先用 context.run_id（每次运行唯一），兜底用 session_id
         self._run_id = context.run_id or self._session_id
 
-        # 构建系统提示词（注入 CLAUDE.md 项目上下文，与 ReAct 引擎保持一致）
+        # 构建系统提示词（注入 CLAUDE.md 和 AGENTS.md 项目上下文，与 ReAct 引擎保持一致）
         system_prompt = build_base_system_prompt(
             model_name=self._llm_model_name,
             has_rag=self._has_rag,
             claude_md_context=context.claude_md_context,
+            agents_md_context=context.agents_md_context,
         )
 
         # 努力等级：如果指定了 max_steps_override，覆盖 context 的 max_steps

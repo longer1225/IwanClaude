@@ -608,11 +608,12 @@ class LangGraphPipelineLoop:
         # 设置 run_id：优先用 context.run_id（每次运行唯一），兜底用 session_id
         self._run_id = context.run_id or self._session_id
 
-        # 构建 base system prompt（注入 CLAUDE.md 项目上下文）
+        # 构建 base system prompt（注入 CLAUDE.md 和 AGENTS.md 项目上下文）
         base_prompt = build_base_system_prompt(
             model_name=self._llm_model_name,
             has_rag=self._has_rag,
             claude_md_context=context.claude_md_context,
+            agents_md_context=context.agents_md_context,
         )
 
         # planner 用 base prompt + 角色指令 + 记忆（规划需要历史记忆）

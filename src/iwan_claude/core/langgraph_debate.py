@@ -504,11 +504,12 @@ class LangGraphDebateLoop:
         # 设置 run_id：优先用 context.run_id（每次运行唯一），兜底用 session_id
         self._run_id = context.run_id or self._session_id
 
-        # 构建 base system prompt（注入 CLAUDE.md 项目上下文，与其它引擎保持一致）
+        # 构建 base system prompt（注入 CLAUDE.md 和 AGENTS.md 项目上下文，与其它引擎保持一致）
         base_prompt = build_base_system_prompt(
             model_name=self._llm_model_name,
             has_rag=self._has_rag,
             claude_md_context=context.claude_md_context,
+            agents_md_context=context.agents_md_context,
         )
 
         # worker 用 base prompt + 角色指令 + 记忆上下文（回答需要历史记忆）

@@ -39,6 +39,7 @@ from iwan_claude.core.tools.builtin.editor import (
     EditByLinesTool,
     EditBySearchTool,
     InsertAtLineTool,
+    MultiEditTool,
     ViewFileTool,
 )
 from iwan_claude.core.tools.builtin.fs_ops import (
@@ -83,9 +84,11 @@ from iwan_claude.core.tools.builtin.collaboration import (
 from iwan_claude.core.tools.builtin.http import HttpRequestTool
 from iwan_claude.core.tools.builtin.list_dir import ListDirTool
 from iwan_claude.core.tools.builtin.note_save import NoteSaveTool
+from iwan_claude.core.tools.builtin.todo_write import TodoWriteTool
+from iwan_claude.core.tools.builtin.web_search import WebSearchTool
 from iwan_claude.core.tools.builtin.read_file import ReadFileTool
 from iwan_claude.core.tools.builtin.run_python import RunPythonTool
-from iwan_claude.core.tools.builtin.search import FindFilesTool, GrepSearchTool
+from iwan_claude.core.tools.builtin.search import FindFilesTool, GlobTool, GrepSearchTool
 from iwan_claude.core.tools.builtin.skill import (
     SkillCreateTool,
     SkillDeleteTool,
@@ -115,6 +118,7 @@ __all__ = [
     "FileExistsTool",
     "FileStatTool",
     "FindFilesTool",
+    "GlobTool",
     "ListCustomToolsTool",
     "GitCheckoutTool",
     "GitCommitTool",
@@ -141,9 +145,11 @@ __all__ = [
     "ListRolesTool",
     "ShareKnowledgeTool",
     "InsertAtLineTool",
+    "MultiEditTool",
     "ListDirTool",
     "MkdirTool",
     "NoteSaveTool",
+    "TodoWriteTool",
     "ProcessListTool",
     "ListCheckpointsTool",
     "RestoreCheckpointTool",
@@ -161,5 +167,6 @@ __all__ = [
     "TaskListTool",
     "TaskUpdateTool",
     "ViewFileTool",
+    "WebSearchTool",
     "WriteFileTool",
 ]

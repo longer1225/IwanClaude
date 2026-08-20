@@ -76,6 +76,8 @@ class ExecutionContext:
     memory_context: str = ""
     # 崩溃恢复上下文（从 snapshot.json 读取，注入 system prompt 确保任务从断点继续不偏离原计划）
     recovery_context: str = ""
+    # AGENTS.md 项目级指导文件内容（用户自定义 agent 行为规则，注入 system prompt 末尾）
+    agents_md_context: str = ""
 
     # 初始化消息历史，优先使用 session 完整回放内容
     def __post_init__(self) -> None:

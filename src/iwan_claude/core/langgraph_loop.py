@@ -322,8 +322,13 @@ class LangGraphAgentLoop:
         4. 调用 graph.ainvoke() 执行工作流
         5. 将最终状态同步回 ExecutionContext
         """
-        # 构建 system prompt（包含模型名称、RAG 状态和 CLAUDE.md 上下文）
-        system_prompt = build_base_system_prompt(self._llm_model_name, has_rag=self._has_rag, claude_md_context=context.claude_md_context)
+        # 构建 system prompt（包含模型名称、RAG 状态、CLAUDE.md 上下文和 AGENTS.md 指导）
+        system_prompt = build_base_system_prompt(
+            self._llm_model_name,
+            has_rag=self._has_rag,
+            claude_md_context=context.claude_md_context,
+            agents_md_context=context.agents_md_context,
+        )
 
         # 努力等级：如果指定了 max_steps_override，覆盖 context 的 max_steps
         if self._effort_params.max_steps_override > 0:
@@ -496,31 +501,30 @@ class LangGraphAgentLoop:
 
     async def _tools_node(self, state: AgentState, config: Any | None = None) -> dict[str, Any]:
         """
-        tools 节点 - 执行工具调用
-        
+        tools 节点 - 并行执行工具调用
+
         【学习要点】
-        1. 工具执行：遍历所有工具调用，逐个执行
-        2. 结果添加：使用 _add_tool_result_to_messages 将结果添加到消息历史
-        3. 权限检查：通过 permission_manager 进行权限验证
-        
+        1. 并行执行：同一 turn 的独立工具调用并行执行，提升复杂任务速度
+        2. 顺序保持：结果按 tool_calls 原始顺序添加到消息历史
+        3. effort 限制：文件读取限制在并行执行前检查（避免超限）
+        4. 权限隔离：每个工具调用的权限检查由 invoke_tool 内部处理
+
+        【并行安全性】
+        LLM 在同一 turn 调用的工具默认是独立的（如同时读 3 个文件）。
+        如果 LLM 想要顺序依赖（如先读再编辑），会在下一 turn 调用。
+
         参数：
             state: 当前工作流状态
             config: 配置字典（包含 thread_id 和 run_id）
-        
+
         返回值：
             dict: 更新后的状态字典（包含执行后的消息历史）
-        
-        【节点职责】
-        1. 从 state 中提取工具调用列表
-        2. 遍历执行每个工具调用
-        3. 将工具执行结果添加到消息历史
-        4. 返回更新后的状态
         """
         # 从 config 中提取 run_id
         run_id = ""
         if config is not None and isinstance(config, dict):
             run_id = config.get("configurable", {}).get("run_id", "")
-        
+
         # 获取工具调用列表（如果没有则为空列表）
         tool_calls = state.get("_tool_calls") or []
         # 复制消息历史（避免直接修改原状态）
@@ -528,32 +532,52 @@ class LangGraphAgentLoop:
         # 努力等级限制：记录已读取的文件数
         files_read_count = state.get("_files_read", 0)
 
-        # 遍历执行每个工具调用
+        # 第一阶段：串行检查 effort level（决定哪些可以执行，避免并行超限）
+        # 生成 (tool_call, can_execute) 列表
+        pending: list[ToolCallBlock] = []
+        skip_results: list[tuple[str, object]] = []  # (tc_id, error_result)
         for tc in tool_calls:
-            # 努力等级限制：如果达到最大文件读取数，跳过后续读操作
             if self._effort_params.max_files_read > 0 and tc.name in ("read_file", "list_dir", "file_exists", "file_stat"):
                 if files_read_count >= self._effort_params.max_files_read:
-                    new_messages = _add_tool_result_to_messages(
-                        new_messages, tc.id,
+                    # 超限，构造错误结果
+                    skip_results.append((
+                        tc.id,
                         type("R", (), {"content": f"Error: effort level limit reached ({self._effort_params.max_files_read} files max). "
-                                                   "Increase effort level to read more files.",
-                                         "is_error": True})()
-                    )
+                                                  "Increase effort level to read more files.",
+                                        "is_error": True})()
+                    ))
                     continue
                 files_read_count += 1
-            result = await invoke_tool(
-                self._registry,              # 工具注册表
-                tc,                          # 工具调用请求
-                self._bus,                   # 事件总线
-                run_id,                      # 运行 ID
-                permission_manager=self._permission_manager,  # 权限管理器
-                session_id=self._session_id,                  # 会话 ID
+            pending.append(tc)
+
+        # 第二阶段：并行执行所有允许的工具调用
+        # 用 asyncio.gather 并行执行，保持顺序
+        async def _exec_one(tc: ToolCallBlock) -> object:
+            return await invoke_tool(
+                self._registry,
+                tc,
+                self._bus,
+                run_id,
+                permission_manager=self._permission_manager,
+                session_id=self._session_id,
             )
-            # 将工具执行结果添加到消息历史
+
+        if pending:
+            results = await asyncio.gather(*[_exec_one(tc) for tc in pending], return_exceptions=False)
+        else:
+            results = []
+
+        # 第三阶段：按原始顺序将结果添加到消息历史
+        # 先添加并行执行的结果（按 pending 顺序）
+        for tc, result in zip(pending, results, strict=False):
             new_messages = _add_tool_result_to_messages(new_messages, tc.id, result)
 
+        # 再添加被 effort 限制跳过的结果
+        for tc_id, err_result in skip_results:
+            new_messages = _add_tool_result_to_messages(new_messages, tc_id, err_result)
+
         # 返回更新后的状态（仅更新消息历史）
-        return {**state, "messages": new_messages}
+        return {**state, "messages": new_messages, "_files_read": files_read_count}
 
     def _tools_router(self, state: AgentState) -> str:
         """

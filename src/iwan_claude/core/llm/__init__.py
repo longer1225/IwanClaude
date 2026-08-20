@@ -35,6 +35,7 @@ from iwan_claude.core.llm.provider import AnthropicProvider
 
 # 导入类型定义
 from iwan_claude.core.llm.types import LlmResponse, ToolCallBlock, UsageStats
+from iwan_claude.core.llm.vision import filter_vision_blocks, has_image_content
 
 # 模块公共 API 导出列表
 # 控制 from iwan_claude.core.llm import * 时能导入哪些名称
@@ -46,6 +47,8 @@ __all__ = [
     "ToolCallBlock",
     "UsageStats",
     "create_provider_from_config",
+    "filter_vision_blocks",
+    "has_image_content",
 ]
 
 

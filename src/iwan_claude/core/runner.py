@@ -98,6 +98,7 @@ from iwan_claude.core.tools.builtin import (                   # 内置工具
     FileStatTool,
     FindFilesTool,
     GenerateDocsTool,
+    GlobTool,
     GitCheckoutTool,
     GitCommitTool,
     GitDiffTool,
@@ -110,7 +111,9 @@ from iwan_claude.core.tools.builtin import (                   # 内置工具
     ListDirTool,
     ListRolesTool,
     MkdirTool,
+    MultiEditTool,
     NoteSaveTool,
+    TodoWriteTool,
     PipManageTool,
     ProcessListTool,
     ReadFileTool,
@@ -130,6 +133,7 @@ from iwan_claude.core.tools.builtin import (                   # 内置工具
     TaskUpdateTool,
     UpdateReadmeTool,
     ViewFileTool,
+    WebSearchTool,
     WriteFileTool,
     ListCheckpointsTool,
     ListCustomToolsTool,
@@ -609,12 +613,15 @@ class AgentRunner:
             MkdirTool(),              # 创建目录
             FileStatTool(),           # 获取文件状态
             FileExistsTool(),         # 检查文件是否存在
-            FindFilesTool(),          # 查找文件
+            FindFilesTool(),          # 查找文件（名称+内容+include/exclude）
+            GlobTool(),               # 按文件名模式查找（简洁版，类似 Claude Code）
             GrepSearchTool(),         # 文本搜索
+            WebSearchTool(),          # 网络搜索（占位，需配置 WEB_SEARCH_API_KEY）
             RunPythonTool(),          # 执行 Python 代码
             ViewFileTool(),           # 查看文件内容（分页）
             EditByLinesTool(),        # 按行编辑
             EditBySearchTool(),       # 按搜索编辑
+            MultiEditTool(),          # 批量多文件编辑（类似 Claude Code）
             InsertAtLineTool(),       # 在指定行插入
             DeleteLinesTool(),        # 删除指定行
         ]:
@@ -718,6 +725,10 @@ class AgentRunner:
             note_tool = NoteSaveTool(store, session.id, run_id)
             if _ok(note_tool.name):
                 registry.register(note_tool)
+            # 结构化任务列表工具（与 NoteSave 共享 session/run_id 上下文）
+            todo_tool = TodoWriteTool(store, session.id, run_id)
+            if _ok(todo_tool.name):
+                registry.register(todo_tool)
         
         # ========== 第十二类：子 Agent 工具（条件注册） ==========
         # 需要 provider、bus 和 run_id 都存在时才能注册
@@ -974,6 +985,16 @@ class AgentRunner:
         claude_md_config = load_claude_md()
         claude_md_prompt = render_claude_md_prompt(claude_md_config)
 
+        # 加载 AGENTS.md（项目级用户自定义 agent 指导，可选）
+        # 文件不存在时为空字符串，不影响现有功能
+        agents_md_context = ""
+        agents_md_path = Path("AGENTS.md")
+        if agents_md_path.exists():
+            try:
+                agents_md_context = agents_md_path.read_text(encoding="utf-8")
+            except Exception:
+                logging.getLogger(__name__).warning("failed to read AGENTS.md")
+
         # ========== 第三步：创建核心组件 ==========
         
         # 创建任务管理器（存储在运行目录下的 .tasks 目录）
@@ -1007,6 +1028,7 @@ class AgentRunner:
             system_prompt_override=system_prompt_override, # 自定义 system prompt
             memory_context=memory_context,   # 跨会话记忆
             recovery_context=recovery_context, # 崩溃恢复上下文（从快照注入）
+            agents_md_context=agents_md_context, # AGENTS.md 项目级指导
         )
         
         # 记录预填充消息的数量，用于后续保存时跳过已存在的消息

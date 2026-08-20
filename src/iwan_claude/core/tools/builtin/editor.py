@@ -1056,3 +1056,171 @@ class DeleteLinesTool(BaseTool, _EditorWriteToolMixin):
                 "edit_by_lines: replaced", "delete_lines: deleted", 1
             )
         )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# multi_edit: 批量多文件编辑（类似 Claude Code 的 multi_edit）
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class MultiEditItem(BaseModel):
+    """
+    multi_edit 的单个编辑项
+
+    【字段说明】
+    - path: str - 目标文件路径
+    - old: str - 要替换的精确字符串
+    - new: str - 替换后的新字符串
+    - occurrence: int - 0=替换所有匹配（仅在唯一匹配时安全），>=1 选择第 N 个匹配
+    - force_multiple: bool - True 时允许多匹配批量替换
+    """
+    model_config = ConfigDict(extra="ignore")
+    path: str
+    old: str
+    new: str
+    occurrence: int = Field(default=0, ge=0)
+    force_multiple: bool = False
+
+
+class MultiEditParams(BaseModel):
+    """
+    multi_edit 工具参数
+
+    【字段说明】
+    - edits: list[MultiEditItem] - 编辑项列表，按顺序执行
+    - backup: bool - 是否为每个文件创建备份（默认 True）
+    """
+    model_config = ConfigDict(extra="ignore")
+    edits: list[MultiEditItem]
+    backup: bool = True
+
+
+class MultiEditTool(BaseTool, _EditorWriteToolMixin):
+    """
+    multi_edit 工具 - 批量多文件编辑
+
+    【学习要点】
+    1. 批量操作：一次调用编辑多个文件，减少 LLM 多轮调用开销
+    2. 复用现有工具：每个 edit 项复用 EditBySearchTool 的逻辑
+    3. 独立报告：每个 edit 独立成功/失败，失败不影响后续
+    4. 汇总输出：返回成功/失败计数和详情
+
+    【使用场景】
+    - 重命名跨多个文件的函数/变量
+    - 统一修改多个文件的 import 语句
+    - 批量更新配置文件
+
+    【使用示例】
+    ```python
+    tool = MultiEditTool()
+    result = await tool.invoke({
+        "edits": [
+            {"path": "src/a.py", "old": "old_func", "new": "new_func"},
+            {"path": "src/b.py", "old": "old_func", "new": "new_func"},
+            {"path": "src/c.py", "old": "import old", "new": "import new"},
+        ]
+    })
+    ```
+    """
+    params_model = MultiEditParams
+    name = "multi_edit"
+    description = (
+        "Apply multiple edit_by_search operations in one call. Each edit is independent: "
+        "if one fails, the rest still run. Use this when the same change applies to "
+        "several files (e.g., renaming a function across the codebase). Returns a summary "
+        "of successes and failures."
+    )
+    input_schema: dict[str, object] = {
+        "type": "object",
+        "properties": {
+            "edits": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "old": {"type": "string", "description": "Exact substring to locate."},
+                        "new": {"type": "string", "description": "Replacement substring."},
+                        "occurrence": {
+                            "type": "integer",
+                            "default": 0,
+                            "description": "0 = replace all (safe on single match); >=1 = Nth match.",
+                        },
+                        "force_multiple": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": "Allow bulk replacement of multiple matches.",
+                        },
+                    },
+                    "required": ["path", "old", "new"],
+                },
+            },
+            "backup": {"type": "boolean", "default": True},
+        },
+        "required": ["edits"],
+    }
+
+    async def estimate_affected_paths(self, params: dict[str, object]) -> list[str]:
+        p = MultiEditParams.model_validate(params)
+        paths: list[str] = []
+        seen: set[str] = set()
+        for item in p.edits:
+            target = _validate_rel_path(item.path, "write")
+            key = str(target)
+            if key not in seen:
+                seen.add(key)
+                paths.append(key)
+            if p.backup and target.exists():
+                bpath = str(_backup_destination(Path.cwd(), target))
+                if bpath not in seen:
+                    seen.add(bpath)
+                    paths.append(bpath)
+        return paths
+
+    async def invoke(self, params: dict[str, object]) -> ToolResult:
+        """执行批量编辑"""
+        p = MultiEditParams.model_validate(params)
+
+        if not p.edits:
+            return ToolResult(
+                content="multi_edit: no edits provided",
+                is_error=True,
+                error_type="schema_error",
+            )
+
+        # 复用 EditBySearchTool 的逻辑
+        edit_tool = EditBySearchTool()
+        results: list[str] = []
+        success_count = 0
+        fail_count = 0
+
+        for i, item in enumerate(p.edits, start=1):
+            # 构造单个 edit 的参数
+            edit_params: dict[str, object] = {
+                "path": item.path,
+                "old": item.old,
+                "new": item.new,
+                "occurrence": item.occurrence,
+                "force_multiple": item.force_multiple,
+                "backup": p.backup,
+            }
+
+            try:
+                result = await edit_tool.invoke(edit_params)
+                if result.is_error:
+                    fail_count += 1
+                    results.append(f"  [{i}] FAIL  {item.path}: {result.content}")
+                else:
+                    success_count += 1
+                    results.append(f"  [{i}] OK    {item.path}: {result.content.split(';')[0]}")
+            except Exception as exc:
+                fail_count += 1
+                results.append(f"  [{i}] FAIL  {item.path}: {exc}")
+
+        # 汇总报告
+        total = len(p.edits)
+        header = (
+            f"multi_edit: {success_count}/{total} edits succeeded"
+            + (f", {fail_count} failed" if fail_count else "")
+        )
+        return ToolResult(content=header + "\n" + "\n".join(results))

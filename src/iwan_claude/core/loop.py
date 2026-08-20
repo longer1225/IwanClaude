@@ -190,11 +190,16 @@ class AgentLoop:
                     bus=self._bus,                              # 事件总线（用于发布 LLM 调用事件）
                     run_id=context.run_id,                      # 运行 ID
                     step=context.step,                          # 当前步骤
-                    # 构建 system prompt（包含模型名称、RAG 状态和 CLAUDE.md 上下文）
+                    # 构建 system prompt（包含模型名称、RAG 状态、CLAUDE.md 和 AGENTS.md 上下文）
                     system=context.system_prompt(
-                            build_base_system_prompt(self._llm_model_name, has_rag=self._has_rag, claude_md_context=context.claude_md_context)
+                            build_base_system_prompt(
+                                self._llm_model_name,
+                                has_rag=self._has_rag,
+                                claude_md_context=context.claude_md_context,
+                                agents_md_context=context.agents_md_context,
+                            )
                         ),
-                )
+                    )
             except asyncio.CancelledError:
                 # 用户取消操作：标记失败并重新抛出异常
                 context.mark_failed("cancelled")

@@ -922,3 +922,134 @@ def _human(num: int | None) -> str:
             return f"{num:.0f}{unit}"
         num //= int(step)
     return f"{num}TB"
+
+
+# ---------------------------------------------------------------------------
+# 3. glob: 简洁的文件名模式匹配工具（类似 Claude Code 的 glob）
+# ---------------------------------------------------------------------------
+
+
+class GlobParams(BaseModel):
+    """
+    glob 工具参数模型
+
+    【字段说明】
+    - pattern: str - glob 模式（如 "**/*.py"、"src/**/*.ts"）
+    - path: str - 搜索根目录，默认 "."（当前目录）
+    """
+    model_config = ConfigDict(extra="ignore")
+    pattern: str
+    path: str = "."
+
+
+class GlobTool(BaseTool):
+    """
+    glob 工具 - 按文件名模式快速查找文件
+
+    【学习要点】
+    1. 简洁 API：只接收 pattern 和 path，返回匹配的文件列表
+    2. pathlib.Path.glob：原生支持 ** 递归匹配
+    3. 修改时间排序：最新的文件在前，符合"最近改过"的直觉
+    4. 沙箱验证：搜索范围限制在允许的目录内
+
+    【与 find_files 的区别】
+    - find_files：支持 name_pattern + content_pattern + include/exclude + depth
+    - glob：只支持 pattern（更简洁，类似 Unix glob 命令）
+
+    【使用示例】
+    ```python
+    tool = GlobTool()
+    # 查找所有 Python 文件
+    result = await tool.invoke({"pattern": "**/*.py"})
+    # 在 src 目录下查找所有测试文件
+    result = await tool.invoke({"pattern": "**/test_*.py", "path": "src"})
+    ```
+    """
+    params_model = GlobParams
+    name = "glob"
+    description = (
+        "Find files matching a glob pattern. Use this to locate files by name pattern "
+        "(e.g., '**/*.py' finds all Python files). Returns paths sorted by modification "
+        "time (newest first). For content search, use grep_search instead."
+    )
+    input_schema: dict[str, object] = {
+        "type": "object",
+        "properties": {
+            "pattern": {
+                "type": "string",
+                "description": "Glob pattern (e.g., '**/*.py', 'src/**/*.ts'). Supports pathlib ** recursive matching.",
+            },
+            "path": {
+                "type": "string",
+                "default": ".",
+                "description": "Search root directory (relative).",
+            },
+        },
+        "required": ["pattern"],
+    }
+
+    # 默认排除的目录（避免噪音）
+    _EXCLUDE_DIRS = frozenset({
+        ".git", "node_modules", ".venv", "__pycache__",
+        ".mypy_cache", ".pytest_cache", "dist", "build",
+        ".iwan", ".ruff_cache",
+    })
+
+    async def invoke(self, params: dict[str, object]) -> ToolResult:
+        """执行 glob 查找"""
+        # 1. 参数校验（Pydantic）
+        p = GlobParams.model_validate(params)
+
+        if not p.pattern or not p.pattern.strip():
+            return ToolResult(
+                content="glob: pattern is required",
+                is_error=True,
+                error_type="schema_error",
+            )
+
+        # 2. 沙箱验证（防止访问项目外目录）
+        try:
+            root_path = _validate_rel_root(p.path)
+            validate_path(str(root_path / ".gitkeep"), "read")
+        except PermissionError as exc:
+            return ToolResult(
+                content=f"glob: path access denied: {exc}",
+                is_error=True,
+                error_type="permission_denied",
+            )
+
+        # 3. 执行 glob 查找
+        try:
+            root = Path(p.path)
+            # 使用 pathlib.Path.glob 原生支持 ** 递归匹配
+            matches: list[Path] = []
+            for cur in root.glob(p.pattern):
+                # 排除常见缓存目录下的文件
+                if any(part in self._EXCLUDE_DIRS for part in cur.parts):
+                    continue
+                matches.append(cur)
+
+            # 4. 按修改时间排序（最新在前）
+            matches.sort(key=lambda x: x.stat().st_mtime if x.exists() else 0, reverse=True)
+
+            # 5. 限制结果数量
+            max_results = 100
+            total = len(matches)
+            truncated = matches[:max_results]
+
+            # 6. 格式化输出
+            if not truncated:
+                return ToolResult(content=f"glob: no matches for pattern '{p.pattern}' under '{p.path}'")
+
+            lines = [str(cur) for cur in truncated]
+            header = f"glob: {total} match{'es' if total != 1 else ''} for '{p.pattern}' under '{p.path}'"
+            if total > max_results:
+                header += f" (showing first {max_results}, sorted by mtime desc)"
+            return ToolResult(content=header + "\n" + "\n".join(lines))
+
+        except (OSError, PermissionError) as exc:
+            return ToolResult(
+                content=f"glob aborted due to error: {exc}",
+                is_error=True,
+                error_type="runtime_error",
+            )
