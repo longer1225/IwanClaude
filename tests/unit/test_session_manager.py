@@ -23,6 +23,7 @@ class _Runner:
         store: SessionStore | None = None,
         system_prompt_override: str | None = None,
         tool_whitelist: list[str] | None = None,
+        recovery_context: str = "",
     ) -> RunOutcome:
         assert run_id is not None
         assert session is not None
@@ -62,7 +63,8 @@ async def test_send_message_chat_enters_waiting_and_writes_thread(tmp_path: Path
     manager = SessionManager(store, lambda: _Runner(), EventBus())  # type: ignore[arg-type]
     session = await manager.create("chat")
 
-    run_id = await manager.send_message(session.id, "hello")
+    result = await manager.send_message(session.id, "hello")
+    run_id = result.run_id
 
     loaded = store.read_meta(session.id)
     assert loaded.status == "waiting_for_input"

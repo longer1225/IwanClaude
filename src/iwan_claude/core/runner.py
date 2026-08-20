@@ -57,6 +57,7 @@ from iwan_claude.core.permissions.manager import PermissionManager  # 权限管�
 from iwan_claude.core.runs import RUNS_DIR, new_run_id         # 运行相关工具
 from iwan_claude.core.session.model import Session             # 会话模型
 from iwan_claude.core.session.store import SessionStore        # 会话存储
+from iwan_claude.core.snapshot import SnapshotWriter           # 工作快照写入器（崩溃恢复）
 from iwan_claude.core.subagent.registry import BackgroundTaskRegistry  # 后台任务注册表
 from iwan_claude.core.subagent.tool import (                   # 子 Agent 工具
     AgentResultTool,
@@ -904,6 +905,7 @@ class AgentRunner:
         store: SessionStore | None = None,
         system_prompt_override: str | None = None,
         tool_whitelist: list[str] | None = None,
+        recovery_context: str = "",
     ) -> RunOutcome:
         """
         执行一次完整的 agent run 并返回运行结果
@@ -1004,6 +1006,7 @@ class AgentRunner:
             claude_md_context=claude_md_prompt, # CLAUDE.md 上下文
             system_prompt_override=system_prompt_override, # 自定义 system prompt
             memory_context=memory_context,   # 跨会话记忆
+            recovery_context=recovery_context, # 崩溃恢复上下文（从快照注入）
         )
         
         # 记录预填充消息的数量，用于后续保存时跳过已存在的消息
@@ -1015,7 +1018,13 @@ class AgentRunner:
         async with EventWriter(run_path / "events.jsonl") as writer:
             # 订阅事件总线，将所有事件写入文件
             writer.subscribe(bus)
-            
+
+            # 创建工作快照写入器（崩溃恢复用）
+            # 订阅事件总线，每步完成后写入 snapshot.json
+            # handle 方法内部根据事件类型分发到对应处理逻辑
+            snapshot_writer = SnapshotWriter(run_path / "snapshot.json", goal=goal)
+            bus.subscribe(snapshot_writer.handle)
+
             # 发布运行开始事件
             await bus.publish(RunStartedEvent(run_id=run_id, goal=goal, ts=_now()))
 

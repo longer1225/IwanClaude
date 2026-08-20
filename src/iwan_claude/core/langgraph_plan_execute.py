@@ -146,6 +146,7 @@ class LangGraphPlanExecuteLoop:
         self._compactor = compactor
         self._compact_threshold = compact_threshold
         self._session_id = session_id
+        self._run_id = ""  # 每次 run() 时从 context.run_id 设置，用于事件发布
         self._checkpointer = checkpointer
         self._has_rag = has_rag
         self._effort_params = get_effort_params(effort_level)
@@ -238,7 +239,7 @@ class LangGraphPlanExecuteLoop:
         4. 更新状态：plan + current_step=0 + status=executing
         """
         await self._bus.publish(StepStartedEvent(
-            run_id=self._session_id,
+            run_id=self._run_id,
             step=state["step"],
             ts=_now(),
         ))
@@ -279,14 +280,14 @@ class LangGraphPlanExecuteLoop:
                 messages=messages,
                 tool_schemas=[],
                 bus=self._bus,
-                run_id=self._session_id,
+                run_id=self._run_id,
                 step=state["step"],
                 system=state["system_prompt"],
             )
         except Exception as exc:
             log.error("Plan node failed: %s", exc)
             await self._bus.publish(StepFinishedEvent(
-                run_id=self._session_id,
+                run_id=self._run_id,
                 step=state["step"],
                 ts=_now(),
             ))
@@ -300,7 +301,7 @@ class LangGraphPlanExecuteLoop:
             steps = [user_msg]  # 如果解析失败，把整个任务作为单步
 
         await self._bus.publish(StepFinishedEvent(
-            run_id=self._session_id,
+            run_id=self._run_id,
             step=state["step"],
             ts=_now(),
         ))
@@ -357,7 +358,7 @@ class LangGraphPlanExecuteLoop:
         current_step_desc = state["plan"][step_idx]
 
         await self._bus.publish(StepStartedEvent(
-            run_id=self._session_id,
+            run_id=self._run_id,
             step=state["step"],
             ts=_now(),
         ))
@@ -391,7 +392,7 @@ class LangGraphPlanExecuteLoop:
                 messages=messages,
                 tool_schemas=self._registry.tool_schemas(),
                 bus=self._bus,
-                run_id=self._session_id,
+                run_id=self._run_id,
                 step=state["step"],
                 system=state["system_prompt"],
             )
@@ -413,7 +414,7 @@ class LangGraphPlanExecuteLoop:
         step_results.append(result_text)
 
         await self._bus.publish(StepFinishedEvent(
-            run_id=self._session_id,
+            run_id=self._run_id,
             step=state["step"],
             ts=_now(),
         ))
@@ -461,7 +462,7 @@ class LangGraphPlanExecuteLoop:
         3. 判断是否需要重新规划
         """
         await self._bus.publish(StepStartedEvent(
-            run_id=self._session_id,
+            run_id=self._run_id,
             step=state["step"],
             ts=_now(),
         ))
@@ -491,7 +492,7 @@ class LangGraphPlanExecuteLoop:
                 messages=messages,
                 tool_schemas=[],
                 bus=self._bus,
-                run_id=self._session_id,
+                run_id=self._run_id,
                 step=state["step"],
                 system=state["system_prompt"],
             )
@@ -502,7 +503,7 @@ class LangGraphPlanExecuteLoop:
         reflection = response.text or ""
 
         await self._bus.publish(StepFinishedEvent(
-            run_id=self._session_id,
+            run_id=self._run_id,
             step=state["step"],
             ts=_now(),
         ))
@@ -616,6 +617,9 @@ class LangGraphPlanExecuteLoop:
         2. 调用 graph.ainvoke() 执行工作流
         3. 将最终结果写入执行上下文
         """
+        # 设置 run_id：优先用 context.run_id（每次运行唯一），兜底用 session_id
+        self._run_id = context.run_id or self._session_id
+
         # 构建系统提示词（注入 CLAUDE.md 项目上下文，与 ReAct 引擎保持一致）
         system_prompt = build_base_system_prompt(
             model_name=self._llm_model_name,
@@ -645,7 +649,7 @@ class LangGraphPlanExecuteLoop:
         # 执行配置
         run_config: dict[str, Any] = {}
         if self._session_id:
-            run_config["configurable"] = {"thread_id": self._session_id}
+            run_config["configurable"] = {"thread_id": self._session_id, "run_id": self._run_id}
 
         try:
             # 执行工作流

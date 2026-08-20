@@ -161,6 +161,7 @@ class LangGraphDebateLoop:
         self._compactor = compactor
         self._compact_threshold = compact_threshold
         self._session_id = session_id
+        self._run_id = ""  # 每次 run() 时从 context.run_id 设置，用于事件发布
         self._checkpointer = checkpointer
         self._has_rag = has_rag
         self._effort_params = get_effort_params(effort_level)
@@ -236,7 +237,7 @@ class LangGraphDebateLoop:
         5. 更新 worker_answer，不修改 state["messages"]（保持会话历史清洁）
         """
         await self._bus.publish(StepStartedEvent(
-            run_id=self._session_id,
+            run_id=self._run_id,
             step=state["step"],
             ts=_now(),
         ))
@@ -259,14 +260,14 @@ class LangGraphDebateLoop:
                 messages=local_messages,
                 tool_schemas=self._registry.tool_schemas(),
                 bus=self._bus,
-                run_id=self._session_id,
+                run_id=self._run_id,
                 step=state["step"],
                 system=state["worker_system"],
             )
         except Exception as exc:
             log.error("Worker node failed: %s", exc)
             await self._bus.publish(StepFinishedEvent(
-                run_id=self._session_id,
+                run_id=self._run_id,
                 step=state["step"],
                 ts=_now(),
             ))
@@ -281,7 +282,7 @@ class LangGraphDebateLoop:
             result_text += "\n\n" + tool_results
 
         await self._bus.publish(StepFinishedEvent(
-            run_id=self._session_id,
+            run_id=self._run_id,
             step=state["step"],
             ts=_now(),
         ))
@@ -330,7 +331,7 @@ class LangGraphDebateLoop:
         4. 递增 round（router 不能改 state，必须在此递增）
         """
         await self._bus.publish(StepStartedEvent(
-            run_id=self._session_id,
+            run_id=self._run_id,
             step=state["step"],
             ts=_now(),
         ))
@@ -350,14 +351,14 @@ class LangGraphDebateLoop:
                 messages=messages,
                 tool_schemas=[],
                 bus=self._bus,
-                run_id=self._session_id,
+                run_id=self._run_id,
                 step=state["step"],
                 system=state["critic_system"],
             )
         except Exception as exc:
             log.error("Critic node failed: %s", exc)
             await self._bus.publish(StepFinishedEvent(
-                run_id=self._session_id,
+                run_id=self._run_id,
                 step=state["step"],
                 ts=_now(),
             ))
@@ -367,7 +368,7 @@ class LangGraphDebateLoop:
         verdict = self._parse_verdict(feedback)
 
         await self._bus.publish(StepFinishedEvent(
-            run_id=self._session_id,
+            run_id=self._run_id,
             step=state["step"],
             ts=_now(),
         ))
@@ -476,6 +477,9 @@ class LangGraphDebateLoop:
         3. 调用 graph.ainvoke() 执行工作流
         4. 将最终结果写入执行上下文（与 plan_execute 行为一致）
         """
+        # 设置 run_id：优先用 context.run_id（每次运行唯一），兜底用 session_id
+        self._run_id = context.run_id or self._session_id
+
         # 构建 base system prompt（注入 CLAUDE.md 项目上下文，与其它引擎保持一致）
         base_prompt = build_base_system_prompt(
             model_name=self._llm_model_name,
@@ -515,7 +519,7 @@ class LangGraphDebateLoop:
         # 执行配置
         run_config: dict[str, Any] = {}
         if self._session_id:
-            run_config["configurable"] = {"thread_id": self._session_id}
+            run_config["configurable"] = {"thread_id": self._session_id, "run_id": self._run_id}
 
         try:
             # 执行工作流

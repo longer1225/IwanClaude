@@ -194,16 +194,27 @@ class SessionSendMessageCommand(BaseModel):
     - type: Literal["session.send_message"] - 命令类型
     - session_id: str - 会话 ID
     - content: str - 消息内容
+    - skill_name: str - 手动指定技能名称（TUI 确认后回传，空=不指定）
+    - skip_auto_skill: bool - 跳过自动技能匹配（用户拒绝后回传 True）
 
     【设计目的】
     向指定会话发送消息，触发 Agent 运行。
 
+    【skill_name 与 skip_auto_skill 的配合】
+    - skill_name 非空 → 使用指定技能（用户已确认）
+    - skip_auto_skill=True → 跳过自动匹配（用户拒绝），正常处理
+    - 两者都为默认值 → 触发自动匹配预检查，若命中则返回 skill_match 待确认
+    - content 以 "/" 开头 → 手动触发，与 skill_name 无关
+
     【响应】
-    SessionSendMessageResult - 包含运行 ID
+    SessionSendMessageResult - 包含运行 ID 或技能匹配信息
     """
     type: Literal["session.send_message"] = "session.send_message"
     session_id: str
     content: str
+    # 技能确认流程：用户确认后回传 skill_name，拒绝后回传 skip_auto_skill=True
+    skill_name: str = ""
+    skip_auto_skill: bool = False
 
 
 class SessionSendMessageResult(BaseModel):
@@ -211,12 +222,16 @@ class SessionSendMessageResult(BaseModel):
     发送消息响应 - 服务器返回的发送消息响应
 
     【字段说明】
-    - run_id: str - 运行 ID
+    - run_id: str - 运行 ID（空字符串表示未启动 run，如技能待确认）
+    - skill_match: dict | None - 自动匹配到的技能信息（name/score/description），
+      非空时 TUI 应弹出确认控件，用户确认后重新发送
 
-    【设计目的】
-    返回运行 ID，用于后续查询运行状态和事件。
+    【两种响应场景】
+    1. 正常执行：run_id 非空，skill_match 为 None
+    2. 技能待确认：run_id 为空，skill_match 包含匹配信息
     """
-    run_id: str
+    run_id: str = ""
+    skill_match: dict[str, Any] | None = None
 
 
 class SessionGetHistoryCommand(BaseModel):

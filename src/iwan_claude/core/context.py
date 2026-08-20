@@ -74,6 +74,8 @@ class ExecutionContext:
     system_prompt_override: str | None = None
     # 跨会话记忆上下文（由 MemoryManager.recall() 检索得到，注入 system prompt）
     memory_context: str = ""
+    # 崩溃恢复上下文（从 snapshot.json 读取，注入 system prompt 确保任务从断点继续不偏离原计划）
+    recovery_context: str = ""
 
     # 初始化消息历史，优先使用 session 完整回放内容
     def __post_init__(self) -> None:
@@ -133,6 +135,11 @@ class ExecutionContext:
         # 追加跨会话记忆（由 MemoryManager.recall() 检索得到）
         if self.memory_context.strip():
             parts.append("\n\n## Memory\n" + self.memory_context.strip())
+
+        # 追加崩溃恢复上下文（从 snapshot.json 读取，包含任务目标、进度、文件变更）
+        # 确保 Agent 从断点继续执行，不偏离原计划
+        if self.recovery_context.strip():
+            parts.append("\n\n## Recovery Context\n" + self.recovery_context.strip())
 
         # 合并所有部分
         return "".join(parts)

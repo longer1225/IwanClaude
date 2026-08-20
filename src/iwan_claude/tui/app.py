@@ -69,6 +69,7 @@ from iwan_claude.tui.widgets import (  # 所有自定义 UI 组件
     LLMStreamBlock,
     PermissionBlock,
     PermissionSelect,
+    SkillConfirm,
     SlashCompleteWidget,
     ToolCallBlock,
 )
@@ -905,6 +906,7 @@ class IwanTuiApp(App[None]):
             ("compact", "压缩上下文窗口"),
             ("checkpoint list", "列出所有检查点"),
             ("checkpoint restore <n>", "恢复到指定检查点"),
+            ("recover", "恢复崩溃的会话"),
             ("history", "查看会话历史"),
             ("close", "关闭当前会话"),
             ("skill_list", "列出所有可用技能"),
@@ -1270,6 +1272,7 @@ class IwanTuiApp(App[None]):
         - /name <title>: 重命名会话
         - /history: 查看会话历史
         - /close: 关闭当前会话
+        - /recover [n]: 恢复崩溃的会话
 
         普通消息处理：
         1. 清空输入框，设置 "agent is working..." 状态
@@ -1387,6 +1390,15 @@ class IwanTuiApp(App[None]):
             event.text_area.text = ""  # 清空输入框
             if self._client is not None and self._session_id is not None and not self._busy:
                 self.run_worker(self._do_close_session(), name="close", exclusive=False)
+            return
+
+        # /recover 恢复崩溃的会话
+        if content.startswith("/recover"):
+            event.text_area.text = ""  # 清空输入框
+            if self._client is not None and not self._busy:
+                parts = content.split(None, 1)
+                arg = parts[1].strip() if len(parts) > 1 else ""
+                self.run_worker(self._do_recover(arg), name="recover", exclusive=False)
             return
 
         # ========== 普通消息处理 ==========
@@ -1856,6 +1868,7 @@ class IwanTuiApp(App[None]):
         self._append(Static("  [cyan]/checkpoint restore <n>[/cyan]  恢复到指定检查点", classes="log-line"))
         self._append(Static("  [cyan]/history[/cyan]         查看会话历史", classes="log-line"))
         self._append(Static("  [cyan]/close[/cyan]           关闭当前会话", classes="log-line"))
+        self._append(Static("  [cyan]/recover[/cyan]         恢复崩溃的会话", classes="log-line"))
         self._append(Static("  [cyan]/skill_list[/cyan]      列出所有可用技能", classes="log-line"))
         self._append(Static("", classes="log-line"))
         # Skill 说明部分
@@ -1936,7 +1949,87 @@ class IwanTuiApp(App[None]):
         except (IpcError, RuntimeError, OSError) as e:
             self._append(Static(f"[red]close session error: {e}[/red]", classes="log-line"))
 
-    async def _do_send_message(self, content: str) -> None:
+    async def _do_recover(self, arg: str) -> None:
+        """
+        恢复崩溃的会话
+
+        通过 /recover 命令触发。检测 status="interrupted" 的会话，
+        让用户选择恢复哪一个。恢复时切换到该会话并自动发送恢复消息，
+        Core 端会读取快照注入恢复上下文。
+
+        参数：
+            arg: str - 命令参数（空=列出中断会话，数字=恢复第 N 个）
+        """
+        if self._client is None:
+            return
+        try:
+            # 获取所有会话列表
+            result = await self._client.send_command("session.list", {})
+            sessions = result.get("sessions", [])
+            # 过滤出中断的会话
+            interrupted = [s for s in sessions if s.get("status") == "interrupted"]
+            if not interrupted:
+                self._append(Static("[dim]没有需要恢复的崩溃会话[/dim]", classes="log-line"))
+                return
+            # 没有参数：列出中断会话
+            if not arg:
+                self._append(Static(
+                    "[bold yellow]⚠ 检测到崩溃的会话：[/bold yellow]",
+                    classes="log-line",
+                ))
+                for i, s in enumerate(interrupted, 1):
+                    title = s.get("title", "(untitled)")
+                    updated = s.get("updated_at", "")[:19]
+                    self._append(Static(
+                        f"  [cyan]{i}[/cyan]. {title}  [dim]{updated}[/dim]",
+                        classes="log-line",
+                    ))
+                self._append(Static(
+                    "[dim]输入 /recover <编号> 恢复指定会话[/dim]",
+                    classes="log-line",
+                ))
+                return
+            # 有参数：恢复指定编号的会话
+            try:
+                idx = int(arg) - 1
+            except ValueError:
+                self._append(Static("[yellow]请输入有效的编号[/yellow]", classes="log-line"))
+                return
+            if idx < 0 or idx >= len(interrupted):
+                self._append(Static(f"[yellow]编号超出范围（1-{len(interrupted)}）[/yellow]", classes="log-line"))
+                return
+            target = interrupted[idx]
+            target_sid = target["id"]
+            target_title = target.get("title", "(untitled)")
+            # 将中断的会话添加到 TUI 标签页
+            self._add_session(target_sid, target_title)
+            self._session_id = target_sid
+            self._append(Static(
+                f"[bold green]✓[/bold green] 正在恢复会话：{target_title}",
+                classes="log-line",
+            ))
+            # 设置忙碌状态
+            self._busy = True
+            prompt = self.query_one("#prompt", ChatTextArea)
+            prompt.disabled = True
+            prompt.border_title = "agent is working..."
+            self._update_header("running")
+            # 发送恢复消息（Core 端检测到 interrupted 状态会注入快照上下文）
+            await self._client.send_command(
+                "session.send_message",
+                {"session_id": target_sid, "content": "请从上次中断的地方继续执行之前的任务"},
+            )
+        except (IpcError, RuntimeError, OSError) as e:
+            self._append(Static(f"[red]recover error: {e}[/red]", classes="log-line"))
+            self._busy = False
+            prompt = self._prompt()
+            if prompt is not None:
+                prompt.disabled = False
+                prompt.read_only = False
+                prompt.border_title = "type a message — enter to send, ⌘/⇧/⌥+enter for newline"
+            self._update_header("ready")
+
+    async def _do_send_message(self, content: str, *, skip_auto_skill: bool = False, skill_name: str = "") -> None:
         """
         在 worker 中发送消息到 core 服务
 
@@ -1945,20 +2038,74 @@ class IwanTuiApp(App[None]):
 
         参数：
             content: str - 消息内容
+            skip_auto_skill: bool - 跳过自动技能匹配（用户拒绝后回传）
+            skill_name: str - 手动指定技能（用户确认后回传）
 
         异常处理：
             - 发送失败时重置应用状态（_busy=False、输入框启用、状态更新为 ready）
             - 确保即使发送失败，用户仍可以继续使用 TUI
+
+        技能确认流程：
+            1. 发送消息 → Core 检测到自动匹配技能
+            2. Core 返回 skill_match（不启动 run）
+            3. TUI 显示 SkillConfirm 控件
+            4. 用户确认 → 重新发送 skill_name=...
+            5. 用户拒绝 → 重新发送 skip_auto_skill=True
         """
         # 连接检查
         if self._client is None:
             return
         try:
             # 发送消息到 core 服务
-            await self._client.send_command(
+            result = await self._client.send_command(
                 "session.send_message",
-                {"session_id": self._session_id, "content": content},
+                {
+                    "session_id": self._session_id,
+                    "content": content,
+                    "skip_auto_skill": skip_auto_skill,
+                    "skill_name": skill_name,
+                },
             )
+
+            # 检查是否返回了技能匹配信息（待确认）
+            skill_match = result.get("skill_match")
+            if skill_match:
+                # Core 检测到自动匹配的技能，但未启动 run
+                # 显示 SkillConfirm 控件让用户确认
+                # 此时 _busy 仍为 True（已设置），但输入框需暂时启用
+                # 让用户可以与确认控件交互
+                self._busy = False
+                prompt = self._prompt()
+                if prompt is not None:
+                    prompt.disabled = False
+                    prompt.read_only = False
+                    prompt.border_title = "skill confirm..."
+                self._update_header("ready")
+
+                # 添加 SkillConfirm 控件到日志流
+                confirm = SkillConfirm(
+                    skill_name=skill_match.get("name", ""),
+                    score=float(skill_match.get("score", 0.0)),
+                    description=skill_match.get("description", ""),
+                    original_content=content,
+                    session_id=self._session_id or "",
+                )
+                self._append(confirm)
+                confirm.focus()
+                return
+
+            # 检查是否正常启动了 run
+            run_id = result.get("run_id", "")
+            if not run_id:
+                # 未启动 run 也未返回 skill_match（异常情况）
+                self._busy = False
+                prompt = self._prompt()
+                if prompt is not None:
+                    prompt.disabled = False
+                    prompt.read_only = False
+                    prompt.border_title = "type a message — enter to send, ⌘/⇧/⌥+enter for newline"
+                self._update_header("ready")
+
         except (IpcError, RuntimeError, OSError) as e:
             # 发送失败时重置 UI 状态
             self._busy = False
@@ -2022,6 +2169,63 @@ class IwanTuiApp(App[None]):
                     p.focus()
         except Exception:
             log.exception("on_permission_select_decided failed tool_use_id=%s", tool_use_id)
+
+    async def on_skill_confirm_decided(self, msg: SkillConfirm.Decided) -> None:
+        """
+        处理技能确认决策
+
+        用户在 SkillConfirm 控件中选择"使用技能"或"正常对话"后，
+        移除控件并重新发送消息到 Core（带上确认结果）。
+
+        参数：
+            msg: SkillConfirm.Decided - 决策消息
+                - skill_name: str - 匹配到的技能名称
+                - decision: str - use_skill / skip
+                - original_content: str - 用户原始输入
+                - session_id: str - 会话 ID
+        """
+        skill_name = msg.skill_name
+        decision = msg.decision
+        content = msg.original_content
+        sid = msg.session_id
+        log.info("skill confirm decided skill=%s decision=%s", skill_name, decision)
+        try:
+            # 移除确认控件
+            msg.widget.remove()
+            # 重新启用输入框（发送期间会再次禁用）
+            p = self._prompt()
+            if p is not None:
+                p.border_title = "agent is working..."
+            # 设置 busy 状态并重新发送消息
+            self._busy = True
+            if p is not None:
+                p.disabled = True
+                p.read_only = True
+            self._update_header("running")
+            # 确保 session_id 一致
+            self._session_id = sid or self._session_id
+            if decision == "use_skill":
+                # 用户确认使用技能 → 回传 skill_name
+                self.run_worker(
+                    self._do_send_message(content, skill_name=skill_name),
+                    name="skill-confirm-yes", exclusive=False,
+                )
+            else:
+                # 用户拒绝 → 回传 skip_auto_skill=True
+                self.run_worker(
+                    self._do_send_message(content, skip_auto_skill=True),
+                    name="skill-confirm-no", exclusive=False,
+                )
+        except Exception:
+            log.exception("on_skill_confirm_decided failed skill=%s", skill_name)
+            # 异常时重置 UI
+            self._busy = False
+            p = self._prompt()
+            if p is not None:
+                p.disabled = False
+                p.read_only = False
+                p.border_title = "type a message — enter to send, ⌘/⇧/⌥+enter for newline"
+            self._update_header("ready")
 
     def _append(self, widget: Widget) -> None:
         """
@@ -2391,6 +2595,21 @@ class IwanTuiApp(App[None]):
                     prompt.border_title = "type a message — enter to send, ⌘/⇧/⌥+enter for newline"
                     prompt.focus()
                 self._update_header("ready")
+
+                # ===== 崩溃恢复检测 =====
+                # 检查是否有上次崩溃时中断的会话，提示用户恢复
+                try:
+                    list_result = await client.send_command("session.list", {})
+                    all_sessions = list_result.get("sessions", [])
+                    interrupted = [s for s in all_sessions if s.get("status") == "interrupted"]
+                    if interrupted:
+                        self._append(Static(
+                            f"[bold yellow]⚠ 检测到 {len(interrupted)} 个崩溃的会话[/bold yellow]"
+                            f"  [dim]输入 /recover 查看[/dim]",
+                            classes="log-line",
+                        ))
+                except (IpcError, RuntimeError, OSError):
+                    pass  # 检测失败不影响正常使用
 
                 # 等待事件循环结束（阻塞在此直到连接断开）
                 await loop_task

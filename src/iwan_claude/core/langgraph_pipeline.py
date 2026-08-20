@@ -178,6 +178,7 @@ class LangGraphPipelineLoop:
         self._compactor = compactor
         self._compact_threshold = compact_threshold
         self._session_id = session_id
+        self._run_id = ""  # 每次 run() 时从 context.run_id 设置，用于事件发布
         self._checkpointer = checkpointer
         self._has_rag = has_rag
         self._effort_params = get_effort_params(effort_level)
@@ -262,7 +263,7 @@ class LangGraphPipelineLoop:
         3. 提取计划文本
         """
         await self._bus.publish(StepStartedEvent(
-            run_id=self._session_id,
+            run_id=self._run_id,
             step=state["step"],
             ts=_now(),
         ))
@@ -282,14 +283,14 @@ class LangGraphPipelineLoop:
                 messages=messages,
                 tool_schemas=[],  # planner 不调用工具
                 bus=self._bus,
-                run_id=self._session_id,
+                run_id=self._run_id,
                 step=state["step"],
                 system=state["planner_system"],
             )
         except Exception as exc:
             log.error("Planner node failed: %s", exc)
             await self._bus.publish(StepFinishedEvent(
-                run_id=self._session_id,
+                run_id=self._run_id,
                 step=state["step"],
                 ts=_now(),
             ))
@@ -298,7 +299,7 @@ class LangGraphPipelineLoop:
         plan_text = response.text or ""
 
         await self._bus.publish(StepFinishedEvent(
-            run_id=self._session_id,
+            run_id=self._run_id,
             step=state["step"],
             ts=_now(),
         ))
@@ -324,7 +325,7 @@ class LangGraphPipelineLoop:
         4. 更新 executor_result，不修改 state["messages"]
         """
         await self._bus.publish(StepStartedEvent(
-            run_id=self._session_id,
+            run_id=self._run_id,
             step=state["step"],
             ts=_now(),
         ))
@@ -349,14 +350,14 @@ class LangGraphPipelineLoop:
                 messages=local_messages,
                 tool_schemas=self._registry.tool_schemas(),
                 bus=self._bus,
-                run_id=self._session_id,
+                run_id=self._run_id,
                 step=state["step"],
                 system=state["executor_system"],
             )
         except Exception as exc:
             log.error("Executor node failed: %s", exc)
             await self._bus.publish(StepFinishedEvent(
-                run_id=self._session_id,
+                run_id=self._run_id,
                 step=state["step"],
                 ts=_now(),
             ))
@@ -371,7 +372,7 @@ class LangGraphPipelineLoop:
             result_text += "\n\n" + tool_results
 
         await self._bus.publish(StepFinishedEvent(
-            run_id=self._session_id,
+            run_id=self._run_id,
             step=state["step"],
             ts=_now(),
         ))
@@ -420,7 +421,7 @@ class LangGraphPipelineLoop:
         4. 递增 round
         """
         await self._bus.publish(StepStartedEvent(
-            run_id=self._session_id,
+            run_id=self._run_id,
             step=state["step"],
             ts=_now(),
         ))
@@ -441,14 +442,14 @@ class LangGraphPipelineLoop:
                 messages=messages,
                 tool_schemas=[],
                 bus=self._bus,
-                run_id=self._session_id,
+                run_id=self._run_id,
                 step=state["step"],
                 system=state["reviewer_system"],
             )
         except Exception as exc:
             log.error("Reviewer node failed: %s", exc)
             await self._bus.publish(StepFinishedEvent(
-                run_id=self._session_id,
+                run_id=self._run_id,
                 step=state["step"],
                 ts=_now(),
             ))
@@ -458,7 +459,7 @@ class LangGraphPipelineLoop:
         verdict = self._parse_verdict(feedback)
 
         await self._bus.publish(StepFinishedEvent(
-            run_id=self._session_id,
+            run_id=self._run_id,
             step=state["step"],
             ts=_now(),
         ))
@@ -566,6 +567,9 @@ class LangGraphPipelineLoop:
         3. 调用 graph.ainvoke() 执行工作流
         4. 将最终结果写入执行上下文
         """
+        # 设置 run_id：优先用 context.run_id（每次运行唯一），兜底用 session_id
+        self._run_id = context.run_id or self._session_id
+
         # 构建 base system prompt（注入 CLAUDE.md 项目上下文）
         base_prompt = build_base_system_prompt(
             model_name=self._llm_model_name,
@@ -612,7 +616,7 @@ class LangGraphPipelineLoop:
         # 执行配置
         run_config: dict[str, Any] = {}
         if self._session_id:
-            run_config["configurable"] = {"thread_id": self._session_id}
+            run_config["configurable"] = {"thread_id": self._session_id, "run_id": self._run_id}
 
         try:
             # 执行工作流

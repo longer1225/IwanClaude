@@ -30,11 +30,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-# 会话状态类型：字面量类型，只允许三个值
-# - active: 会话正在进行中
-# - waiting_for_input: 会话等待用户输入
+# 会话状态类型：字面量类型
+# - active: 会话已创建，尚未开始运行
+# - running: 会话正在执行 Agent run（崩溃后此状态保留，重启时用于检测中断）
+# - waiting_for_input: 会话等待用户输入（run 正常结束）
+# - interrupted: 会话上次运行时崩溃，等待用户确认恢复
 # - closed: 会话已关闭
-SessionStatus = Literal["active", "waiting_for_input", "closed"]
+SessionStatus = Literal["active", "running", "waiting_for_input", "interrupted", "closed"]
 
 # 会话模式类型：字面量类型，只允许两个值
 # - one_shot: 一次性对话模式

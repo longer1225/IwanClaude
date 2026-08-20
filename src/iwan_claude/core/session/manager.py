@@ -35,6 +35,7 @@ import logging
 import re
 import uuid
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -51,6 +52,7 @@ from iwan_claude.core.bus.events import (
 from iwan_claude.core.events.bus import EventBus
 from iwan_claude.core.runs import new_run_id
 from iwan_claude.core.session.model import Session, SessionMode
+from iwan_claude.core.snapshot import format_recovery_context, read_snapshot
 from iwan_claude.core.session.store import SessionStore
 from iwan_claude.core.skills.loader import SkillLoader
 
@@ -65,6 +67,8 @@ SESSION_NOT_FOUND = -32010
 SESSION_CLOSED = -32011
 SESSION_BUSY = -32012
 
+log = logging.getLogger(__name__)
+
 
 def _now() -> str:
     """
@@ -77,6 +81,20 @@ def _now() -> str:
     统一时间格式，便于存储和比较
     """
     return datetime.now(UTC).isoformat()
+
+
+@dataclass
+class SendMessageResult:
+    """
+    send_message 的返回值 - 支持技能确认流程
+
+    【两种场景】
+    1. 正常执行：run_id 非空，skill_match 为 None
+    2. 技能待确认：run_id 为空，skill_match 包含匹配信息
+       TUI 弹出确认控件，用户确认后重新调用 send_message(skill_name=...)
+    """
+    run_id: str = ""
+    skill_match: dict[str, Any] | None = None
 
 
 class SessionManager:
@@ -228,7 +246,15 @@ class SessionManager:
         await self._bus.publish(SessionCreatedEvent(session_id=sid, mode=mode, ts=ts))
         return session
 
-    async def send_message(self, sid: str, content: str, *, run_id: str | None = None) -> str:
+    async def send_message(
+        self,
+        sid: str,
+        content: str,
+        *,
+        run_id: str | None = None,
+        skill_name: str = "",
+        skip_auto_skill: bool = False,
+    ) -> SendMessageResult:
         """
         处理用户消息，追加到消息历史并启动一次 Agent 运行
 
@@ -236,9 +262,11 @@ class SessionManager:
         - sid: str - 会话 ID
         - content: str - 用户消息内容
         - run_id: str | None - 运行 ID（可选，自动生成）
+        - skill_name: str - 手动指定技能（TUI 确认后回传）
+        - skip_auto_skill: bool - 跳过自动匹配（用户拒绝后回传）
 
         【返回值】
-        - str: 运行 ID
+        - SendMessageResult: run_id 非空=正常执行；skill_match 非空=待用户确认
 
         【执行流程】
         1. 获取会话对象（不存在则抛出错误）
@@ -299,6 +327,19 @@ class SessionManager:
             if session.status == "waiting_for_input":
                 await self._bus.publish(SessionResumedEvent(session_id=sid, ts=_now()))
 
+            # ==================== 技能自动匹配预检查 ====================
+            # 在修改任何状态（追加消息、生成 run_id）之前检查
+            # 若命中自动匹配，返回 match 信息给 TUI 确认，不启动 run
+            # 用户确认后回传 skill_name，拒绝后回传 skip_auto_skill=True
+            if not skill_name and not skip_auto_skill and not content.startswith("/"):
+                matched_skill, score = self._skill_loader.match_skill(content)
+                if matched_skill is not None:
+                    return SendMessageResult(skill_match={
+                        "name": matched_skill.name,
+                        "score": score,
+                        "description": matched_skill.description,
+                    })
+
             # 7. 将用户消息追加到消息历史
             self._store.append_message(sid, "user", content)
             # 8. 发布消息接收事件
@@ -357,52 +398,61 @@ class SessionManager:
                     expanded_content = content + "\n\n[File References]\n" + "\n\n".join(file_contents)
             
             # ==================== Skill 解析 ====================
-            # 检测 "/" 前缀，展开为系统提示覆盖和工具白名单
+            # 三种触发方式：
+            # 1. skill_name 参数（TUI 确认后回传）→ 使用指定技能
+            # 2. "/" 前缀 → 手动触发
+            # 3. 无 skill → 正常处理（auto-match 已在预检查阶段完成）
             goal = expanded_content
             system_prompt_override: str | None = None
             tool_whitelist: list[str] | None = None
-            skill_name: str | None = None
-            arguments: str = ""
-            
-            # 手动触发：消息以 "/" 开头
-            if expanded_content.startswith("/"):
+
+            # 方式 1：TUI 确认后回传的 skill_name
+            if skill_name:
+                resolved = self._skill_loader.resolve(skill_name)
+                if resolved is not None:
+                    goal = self._skill_loader.render_prompt(resolved, content)
+                    system_prompt_override = resolved.system_prompt_template
+                    tool_whitelist = resolved.allowed_tools or None
+                    await self._bus.publish(
+                        SkillInvokedEvent(
+                            skill_name=skill_name,
+                            arguments=content,
+                            run_id=run_id,
+                            ts=_now(),
+                            auto_triggered=True,
+                        )
+                    )
+
+            # 方式 2：手动触发（消息以 "/" 开头）
+            elif expanded_content.startswith("/"):
                 parts = expanded_content[1:].split(None, 1)
-                skill_name = parts[0]
+                manual_name = parts[0]
                 arguments = parts[1] if len(parts) > 1 else ""
-                skill = self._skill_loader.resolve(skill_name)
+                skill = self._skill_loader.resolve(manual_name)
                 if skill is not None:
                     goal = self._skill_loader.render_prompt(skill, arguments)
                     system_prompt_override = skill.system_prompt_template
                     tool_whitelist = skill.allowed_tools or None
                     await self._bus.publish(
                         SkillInvokedEvent(
-                            skill_name=skill_name,
+                            skill_name=manual_name,
                             arguments=arguments,
                             run_id=run_id,
                             ts=_now(),
-                        )
-                    )
-            # 自动触发：根据消息内容匹配 Skill
-            else:
-                matched_skill, score = self._skill_loader.match_skill(content)
-                if matched_skill is not None:
-                    skill_name = matched_skill.name
-                    arguments = content
-                    goal = self._skill_loader.render_prompt(matched_skill, content)
-                    system_prompt_override = matched_skill.system_prompt_template
-                    tool_whitelist = matched_skill.allowed_tools or None
-                    await self._bus.publish(
-                        SkillInvokedEvent(
-                            skill_name=skill_name,
-                            arguments=arguments,
-                            run_id=run_id,
-                            ts=_now(),
-                            auto_triggered=True,
-                            match_score=score,
                         )
                     )
 
             # ==================== 执行 Agent 运行 ====================
+            # 崩溃恢复：如果会话上次中断，读取快照并生成恢复上下文
+            recovery_context = ""
+            if session.status == "interrupted":
+                recovery_context = self._build_recovery_context(session.id)
+                log.info("recovering interrupted session=%s recovery_len=%d", sid, len(recovery_context))
+
+            # 标记会话为运行中（崩溃后此状态保留，重启时用于检测中断）
+            session.status = "running"
+            self._store.write_meta(session)
+
             # 创建 AgentRunner 实例
             runner = self._runner_factory()
             # 执行运行并捕获结果
@@ -413,6 +463,7 @@ class SessionManager:
                 store=self._store,
                 system_prompt_override=system_prompt_override,
                 tool_whitelist=tool_whitelist,
+                recovery_context=recovery_context,
             )
 
             # 存储对话到跨会话记忆（供后续会话语义检索）
@@ -452,7 +503,93 @@ class SessionManager:
             # 写入会话元数据
             self._store.write_meta(session)
             # 返回运行 ID
-            return run_id
+            return SendMessageResult(run_id=run_id)
+
+    # ==================================================================
+    # 崩溃恢复支持
+    # ==================================================================
+
+    def _build_recovery_context(self, sid: str) -> str:
+        """
+        读取会话最后一次运行的快照，格式化为恢复上下文
+
+        【参数说明】
+        - sid: str - 会话 ID
+
+        【返回值】
+        - str: 格式化的恢复上下文文本（注入 system prompt 的 ## Recovery Context 部分）
+               如果没有快照则返回空字符串
+
+        【执行流程】
+        1. 找到会话的 runs 目录
+        2. 按 run_id 倒序查找最新的 snapshot.json
+        3. 读取快照内容
+        4. 调用 format_recovery_context 格式化为自然语言提示
+        """
+        runs_dir = self._store.runs_dir(sid)
+        if not runs_dir.exists():
+            return ""
+
+        # 按 run_id 倒序查找最新的有快照的运行目录
+        for run_entry in sorted(runs_dir.iterdir(), reverse=True):
+            if not run_entry.is_dir():
+                continue
+            snapshot_path = run_entry / "snapshot.json"
+            snapshot = read_snapshot(snapshot_path)
+            if snapshot is not None:
+                return format_recovery_context(snapshot)
+
+        # 没有找到快照
+        return ""
+
+    async def recover_interrupted_sessions(self) -> int:
+        """
+        恢复中断的会话 - 将所有 status="running" 的会话标记为 "interrupted"
+
+        【设计目的】
+        Core 启动时调用。如果上次崩溃时有会话正在运行，
+        其 status 会保留为 "running"，需要标记为 "interrupted"，
+        以便 TUI 检测并提示用户恢复。
+
+        【返回值】
+        - int: 被标记为 interrupted 的会话数量
+
+        【执行流程】
+        1. 从存储层读取所有会话
+        2. 查找 status="running" 的会话
+        3. 将其 status 改为 "interrupted"
+        4. 写入 meta.json 持久化
+        5. 加载到内存字典
+        """
+        count = 0
+        stored_sessions = self._store.list_sessions()
+        for session in stored_sessions:
+            if session.status == "running":
+                session.status = "interrupted"
+                session.updated_at = _now()
+                self._store.write_meta(session)
+                # 加载到内存，避免后续重复读取
+                self._sessions[session.id] = session
+                if session.id not in self._locks:
+                    self._locks[session.id] = asyncio.Lock()
+                count += 1
+                log.info("marked interrupted session=%s title=%s", session.id, session.title)
+        if count > 0:
+            log.info("recovered %d interrupted session(s)", count)
+        return count
+
+    def list_interrupted_sessions(self) -> list[Session]:
+        """
+        列出所有中断的会话（status="interrupted"）
+
+        【返回值】
+        - list[Session]: 中断的会话列表，按更新时间倒序
+
+        【设计目的】
+        TUI 连接时调用，检测是否有需要恢复的会话
+        """
+        all_sessions = self.list_sessions()
+        return [s for s in all_sessions if s.status == "interrupted"]
 
     async def close(self, sid: str) -> None:
         """

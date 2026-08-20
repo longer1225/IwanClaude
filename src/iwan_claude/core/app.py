@@ -365,23 +365,31 @@ class CoreApp:
     async def _session_send_handler(self, params: dict[str, Any]) -> SessionSendMessageResult:
         """
         处理 session.send_message RPC 请求 - 发送消息到会话
-        
+
         参数：
-            params: 请求参数，包含 session_id 和 content 字段
-        
+            params: 请求参数，包含 session_id、content、skill_name、skip_auto_skill
+
         返回：
-            SessionSendMessageResult: 包含 run_id
+            SessionSendMessageResult: run_id 或 skill_match（待确认）
         """
         assert self._sessions is not None
-        
+
         # 验证请求参数
         cmd = SessionSendMessageCommand.model_validate(params)
-        
+
         # 发送消息并等待任务完成
-        run_id = await self._sessions.send_message(cmd.session_id, cmd.content)
-        
-        # 返回 run_id
-        return SessionSendMessageResult(run_id=run_id)
+        result = await self._sessions.send_message(
+            cmd.session_id,
+            cmd.content,
+            skill_name=cmd.skill_name,
+            skip_auto_skill=cmd.skip_auto_skill,
+        )
+
+        # 返回结果（run_id 或 skill_match）
+        return SessionSendMessageResult(
+            run_id=result.run_id,
+            skill_match=result.skill_match,
+        )
 
     # 返回 session 的完整 Anthropic messages 历史
     async def _session_history_handler(self, params: dict[str, Any]) -> SessionGetHistoryResult:
@@ -1010,6 +1018,13 @@ class CoreApp:
             provider=compact_provider,
             memory_manager=self._memory,
         )
+
+        # ===== 崩溃恢复：标记上次崩溃时正在运行的会话为 interrupted =====
+        # Core 启动时检测 status="running" 的会话（崩溃后状态保留），
+        # 将其标记为 "interrupted"，等待 TUI 端用户确认恢复
+        recovered = await self._sessions.recover_interrupted_sessions()
+        if recovered > 0:
+            logger.info("crash recovery: %d interrupted session(s) detected", recovered)
 
         # ===== 创建 Socket 服务器 =====
         # SocketServer 是基于 TCP Socket 的 RPC 服务端
