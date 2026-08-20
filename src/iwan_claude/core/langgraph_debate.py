@@ -11,10 +11,16 @@ LangGraphDebateLoop 模块 - Worker-Critic 辩论执行引擎
 2. critic：独立评判 worker 的回答是否满足需求（不调用工具）
 3. end：整理最终结果，追加 assistant 消息到会话历史
 
+【动态退出策略】
+- critic 满意（SATISFIED）→ 立即退出（不等轮数）
+- critic 判定 STUCK（worker 无法继续改进）→ 强制退出（避免无效循环）
+- critic 需改进（NEEDS_IMPROVEMENT）→ 下一轮 worker 改进
+- 达到最大轮数（默认 5）→ 强制退出
+
 【路由逻辑】
 - worker → critic：worker 回答成功后交给 critic 评判
 - critic → worker：critic 认为需要改进且未达最大轮数，worker 重新回答
-- critic → end：critic 满意 / 达最大轮数 / 出错
+- critic → end：critic 满意 / STUCK / 达最大轮数 / 出错
 
 【适用场景】
 - 质量敏感任务：需要独立审查确保答案质量（如代码审查、文档撰写、复杂推理）
@@ -23,8 +29,9 @@ LangGraphDebateLoop 模块 - Worker-Critic 辩论执行引擎
 【面试亮点】
 "实现了 4 种 Agent 引擎（Legacy / ReAct / Plan&Execute / Debate），通过配置切换。
 Debate 模式采用 worker-critic 多智能体辩论，worker 回答问题后由独立的 critic agent 评判，
-不满意则 worker 改进，最多 3 轮。这种模式对标学术界 Multi-Agent Debate，
-在质量敏感任务上比单 Agent 的 ReAct 模式回答质量更高。"
+不满意则 worker 改进，最多 5 轮。critic 满意时立即退出（动态退出），还能判定 STUCK 强制结束
+避免无效循环。这种模式对标学术界 Multi-Agent Debate，在质量敏感任务上比单 Agent 的 ReAct
+模式回答质量更高。"
 """
 from __future__ import annotations
 
@@ -55,7 +62,8 @@ def _now() -> str:
 
 
 # 最大辩论轮数（worker→critic 为一轮），防止无限循环
-_DEFAULT_MAX_ROUNDS = 3
+# 提高到 5：给 worker 更多改进机会，critic 满意时仍会立即退出（动态退出）
+_DEFAULT_MAX_ROUNDS = 5
 
 
 # worker 角色指令：在 base system prompt 基础上追加，明确 worker 职责
@@ -67,6 +75,7 @@ _WORKER_ROLE = (
 )
 
 # critic 角色指令：纯评判，不调用工具，不注入记忆（避免偏见）
+# 支持三种判定：SATISFIED（满意立即退出）/ NEEDS_IMPROVEMENT（worker 可改进）/ STUCK（worker 无法改进，强制退出）
 _CRITIC_ROLE = (
     "You are an independent critic agent evaluating a worker's answer. "
     "Your job is to judge whether the worker's answer fully and correctly satisfies "
@@ -74,6 +83,10 @@ _CRITIC_ROLE = (
     "Respond in exactly one of these formats:\n"
     "- SATISFIED: <one-line summary of why the answer is good>\n"
     "- NEEDS_IMPROVEMENT: <specific issues that must be fixed>\n"
+    "- STUCK: <reason why the worker cannot make further progress on this task>\n"
+    "Use STUCK only when the worker has tried multiple times and the answer is not "
+    "converging toward a correct solution (e.g., the worker is hallucinating, stuck "
+    "in a loop, or the task is beyond the worker's capability). "
     "Do not call any tools. Do not write the answer yourself—only evaluate."
 )
 
@@ -88,9 +101,9 @@ class DebateState(TypedDict):
     - user_request: 原始用户目标（context.goal）
     - worker_answer: worker 最新回答
     - critic_feedback: critic 原始反馈文本
-    - critic_verdict: 解析后的判定（satisfied / needs_improvement）
+    - critic_verdict: 解析后的判定（satisfied / needs_improvement / stuck）
     - round: 已完成的 worker→critic 轮数（在 critic_node 递增）
-    - max_rounds: 最大轮数（默认 3）
+    - max_rounds: 最大轮数（默认 5）
     - status: 运行状态
     - result: 最终结果
     - fail_reason: 失败原因
@@ -102,7 +115,7 @@ class DebateState(TypedDict):
     user_request: str
     worker_answer: str | None
     critic_feedback: str | None
-    critic_verdict: Literal["satisfied", "needs_improvement"] | None
+    critic_verdict: Literal["satisfied", "needs_improvement", "stuck"] | None
     round: int
     max_rounds: int
     status: Literal["debating", "done", "failed"]
@@ -336,12 +349,16 @@ class LangGraphDebateLoop:
             ts=_now(),
         ))
 
-        # 构建评判 prompt
+        # 构建评判 prompt（含 round 信息，让 critic 能基于进展判断 STUCK）
+        round_num = state.get("round", 0) + 1
         eval_prompt = (
             f"## Original User Request\n{state['user_request']}\n\n"
-            f"## Worker's Answer\n{state.get('worker_answer') or '(empty)'}\n\n"
+            f"## Worker's Answer (round {round_num}/{state.get('max_rounds', _DEFAULT_MAX_ROUNDS)})\n"
+            f"{state.get('worker_answer') or '(empty)'}\n\n"
             "Evaluate if the answer fully satisfies the request. "
-            "Respond with either 'SATISFIED: <summary>' or 'NEEDS_IMPROVEMENT: <issues>'."
+            "Respond with either 'SATISFIED: <summary>' or 'NEEDS_IMPROVEMENT: <issues>'. "
+            "If the worker is clearly stuck (no progress across rounds, hallucinating, or looping), "
+            "respond with 'STUCK: <reason>'."
         )
 
         messages = [{"role": "user", "content": eval_prompt}]
@@ -380,15 +397,19 @@ class LangGraphDebateLoop:
             "step": state["step"] + 1,
         }
 
-    def _parse_verdict(self, feedback: str) -> Literal["satisfied", "needs_improvement"]:
+    def _parse_verdict(self, feedback: str) -> Literal["satisfied", "needs_improvement", "stuck"]:
         """
         解析 critic 的反馈文本，提取判定结果
 
         【解析规则】
-        - 大小写不敏感匹配 SATISFIED / NEEDS_IMPROVEMENT
+        - 大小写不敏感匹配 SATISFIED / NEEDS_IMPROVEMENT / STUCK
+        - STUCK 优先匹配（避免被 NEEDS_IMPROVEMENT 截断）
         - 未知输出默认 satisfied（安全结束，同 plan_execute 的 _reflect_router 策略）
         """
         upper = (feedback or "").upper()
+        # STUCK 优先：避免 "STUCK" 被当作 "needs_improvement" 的兜底
+        if "STUCK" in upper:
+            return "stuck"
         if "NEEDS_IMPROVEMENT" in upper:
             return "needs_improvement"
         # 包含 SATISFIED 或未知输出，都视为满意（安全结束）
@@ -411,18 +432,21 @@ class LangGraphDebateLoop:
 
     def _critic_router(self, state: DebateState) -> str:
         """
-        critic 路由：判断是否需要再次辩论
+        critic 路由：判断是否需要再次辩论（动态退出）
 
+        【动态退出策略】
         - critic 失败 → error
-        - critic 满意 → done
-        - critic 认为需改进且未达最大轮数 → worker（重新回答）
+        - critic 满意（SATISFIED）→ done（立即退出，不等轮数）
+        - critic 判定 STUCK（worker 无法继续改进）→ done（强制退出）
+        - critic 认为需改进（NEEDS_IMPROVEMENT）且未达最大轮数 → worker（重新回答）
         - 达到最大轮数或未知判定 → done（强制/安全结束）
         """
         if state.get("status") == "failed":
             return "error"
 
         verdict = state.get("critic_verdict")
-        if verdict == "satisfied":
+        # 动态退出：critic 满意或判定 worker 无法改进时立即结束
+        if verdict == "satisfied" or verdict == "stuck":
             return "done"
 
         # 只有明确 needs_improvement 才考虑重辩

@@ -105,6 +105,7 @@ class AgentState(TypedDict):
     _stop_reason: str | None              # LLM 停止原因（内部）
     _tool_calls: list[ToolCallBlock] | None  # 工具调用列表（内部）
     _usage: Any | None                    # LLM 使用信息（内部）
+    _reflect_count: int                   # 反思次数（防止无限反思）
 
 
 class LangGraphAgentLoop:
@@ -212,14 +213,17 @@ class LangGraphAgentLoop:
                       ↓         ↓
                       → compact → chat → ...
                       ↓
+                      → reflect → (done → end / continue → chat)
+                      ↓
                       → end → END
-        
+
         【节点说明】
         - chat：调用 LLM 获取响应
         - tools：执行工具调用
         - compact：压缩会话历史
+        - reflect：反思节点 - 评估任务是否真正完成，防止草率结束
         - end：结束工作流
-        
+
         返回值：
             StateGraph: 编译后的工作流对象，可通过 ainvoke() 执行
         """
@@ -227,21 +231,24 @@ class LangGraphAgentLoop:
         workflow = StateGraph(AgentState)
 
         # ========== 添加节点 ==========
-        
+
         # chat 节点：调用 LLM 获取响应
         workflow.add_node("chat", self._chat_node)
-        
+
         # tools 节点：执行工具调用
         workflow.add_node("tools", self._tools_node)
-        
+
         # compact 节点：压缩会话历史
         workflow.add_node("compact", self._compact_node)
-        
+
+        # reflect 节点：反思 - LLM 结束对话后评估是否真正完成任务
+        workflow.add_node("reflect", self._reflect_node)
+
         # end 节点：结束工作流
         workflow.add_node("end", self._end_node)
 
         # ========== 添加边 ==========
-        
+
         # 从 START 开始，直接进入 chat 节点
         workflow.add_edge(START, "chat")
 
@@ -253,7 +260,7 @@ class LangGraphAgentLoop:
                 "tool_use": "tools",              # LLM 返回工具调用
                 "max_tokens_tool_use": "tools",    # token 限制但有工具调用
                 "compact": "compact",              # 需要压缩
-                "end_turn": "end",                # 对话结束
+                "end_turn": "reflect",             # 对话结束 → 先反思再决定
                 "error": "end",                   # 出错
             },
         )
@@ -276,6 +283,16 @@ class LangGraphAgentLoop:
             {
                 "chat": "chat",                   # 压缩后继续对话
                 "end": "end",                     # 压缩后结束
+            },
+        )
+
+        # reflect 节点的条件路由：评估后决定继续还是结束
+        workflow.add_conditional_edges(
+            "reflect",
+            self._reflect_router,
+            {
+                "end": "end",                     # 任务完成 → 结束
+                "chat": "chat",                   # 任务未完成 → 继续对话
             },
         )
 
@@ -642,6 +659,104 @@ class LangGraphAgentLoop:
         # 默认：继续对话
         return "chat"
 
+    # 最大反思次数（防止 LLM 反复认为"未完成"导致无限循环）
+    _MAX_REFLECT = 2
+
+    async def _reflect_node(self, state: AgentState, config: Any | None = None) -> dict[str, Any]:
+        """
+        反思节点 - LLM 结束对话后评估任务是否真正完成
+
+        【设计目的】
+        ReAct 引擎在 LLM 返回 end_turn（不调用工具）时就结束，
+        但有时 LLM 过早结束（任务只完成了一半）。
+        反思节点在结束前做一次评估：任务是否真正完成？
+
+        【执行流程】
+        1. 已反思次数 >= 上限 → 直接通过（返回 "done" 让路由走 end）
+        2. 构建反思 prompt：用户目标 + 当前回答
+        3. 调用 LLM 评估（不使用工具）
+        4. 解析评估结果（DONE / CONTINUE）
+        5. 如果需要继续，追加 user 消息提示 Agent 继续
+        """
+        reflect_count = state.get("_reflect_count", 0)
+
+        # 防止无限反思
+        if reflect_count >= self._MAX_REFLECT:
+            return {"_reflect_count": reflect_count + 1}
+
+        # 从 config 中提取 run_id
+        run_id = ""
+        if config is not None and isinstance(config, dict):
+            run_id = config.get("configurable", {}).get("run_id", "")
+
+        # 提取最后一条 assistant 消息作为评估对象
+        last_assistant = ""
+        for msg in reversed(state["messages"]):
+            if msg.get("role") == "assistant":
+                content = msg.get("content", "")
+                if isinstance(content, str):
+                    last_assistant = content
+                elif isinstance(content, list):
+                    last_assistant = " ".join(
+                        b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"
+                    )
+                break
+
+        # 从消息历史中提取用户原始任务
+        user_goal = _extract_user_goal(state["messages"])
+
+        # 构建反思 prompt
+        reflect_prompt = (
+            "你是一个任务审查者。请评估以下回答是否完整地解决了用户的任务。\n\n"
+            f"## 用户原始任务\n{user_goal}\n\n"
+            f"## Agent 的回答（最后一条）\n{last_assistant[:2000]}\n\n"
+            "请判断：\n"
+            "- 如果回答完整解决了任务，回复 DONE\n"
+            "- 如果任务还需要更多步骤（如还需要调用工具、修改代码等），回复 CONTINUE\n"
+            "只回复 DONE 或 CONTINUE。"
+        )
+
+        messages = [{"role": "user", "content": reflect_prompt}]
+
+        try:
+            response = await self._provider.chat(
+                messages=messages,
+                tool_schemas=[],
+                bus=self._bus,
+                run_id=run_id,
+                step=state["step"],
+                system="You are a task completion evaluator. Reply with only DONE or CONTINUE.",
+            )
+            verdict = (response.text or "").strip().upper()
+        except Exception as exc:
+            log.warning("reflect node failed: %s", exc)
+            verdict = "DONE"
+
+        # 解析判断
+        if "CONTINUE" in verdict and reflect_count < self._MAX_REFLECT:
+            # 任务未完成，追加提示让 Agent 继续（创建新列表避免修改原状态）
+            new_messages = list(state["messages"]) + [{
+                "role": "user",
+                "content": "你的任务还没有完成。请继续执行，直到任务目标完全实现。",
+            }]
+            return {"_reflect_count": reflect_count + 1, "messages": new_messages}
+
+        # 任务完成或达到反思上限
+        return {"_reflect_count": reflect_count + 1}
+
+    def _reflect_router(self, state: AgentState) -> str:
+        """
+        反思路由 - 根据反思结果决定继续还是结束
+
+        - 反思后有新增的 user 消息（CONTINUE）→ 回到 chat 继续
+        - 否则 → 结束
+        """
+        # 如果最后一条消息是 user（反思节点追加的"继续"提示）→ 回到 chat
+        if state["messages"] and state["messages"][-1].get("role") == "user":
+            return "chat"
+        # 否则结束
+        return "end"
+
     async def _end_node(self, state: AgentState, config: Any | None = None) -> dict[str, Any]:
         """
         end 节点 - 结束工作流
@@ -836,4 +951,36 @@ def _extract_last_assistant_text(messages: list[dict[str, Any]]) -> str:
             return str(content).strip()
     
     # 如果没有找到 assistant 消息
+    return ""
+
+
+def _extract_user_goal(messages: list[dict[str, Any]]) -> str:
+    """
+    从消息历史中提取用户原始任务（第一条非系统 user 消息）
+
+    参数：
+        messages: 消息历史
+
+    返回值：
+        str: 用户原始任务文本（截断到 500 字符）
+    """
+    for msg in messages:
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            text = content
+        elif isinstance(content, list):
+            # 跳过只含 tool_result 的消息（工具回执不是用户原始任务）
+            if all(isinstance(b, dict) and b.get("type") == "tool_result" for b in content):
+                continue
+            text = " ".join(
+                b.get("text", "") for b in content
+                if isinstance(b, dict) and b.get("type") == "text"
+            )
+        else:
+            continue
+        text = text.strip()
+        if text:
+            return text[:500]
     return ""

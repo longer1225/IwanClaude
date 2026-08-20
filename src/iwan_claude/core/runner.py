@@ -1093,8 +1093,15 @@ class AgentRunner:
                 has_rag = self._config.rag.enabled and registry.get("search_knowledge") is not None
                 
                 # ========== 第五步：选择执行引擎 ==========
-                
-                if self._config.agent.engine == "langgraph":
+
+                # 自动引擎选择：engine="auto" 时用轻量 LLM 调用分类任务类型
+                engine_name = self._config.agent.engine
+                if engine_name == "auto":
+                    from iwan_claude.core.engine_selector import select_engine
+                    engine_name = await select_engine(goal, provider)
+                    log.info("auto engine selection: goal=%r → engine=%s", goal[:80], engine_name)
+
+                if engine_name == "langgraph":
                     # 使用 LangGraph ReAct 引擎（chat→tools 循环，支持 checkpoint）
                     from iwan_claude.core.langgraph_loop import LangGraphAgentLoop
 
@@ -1109,7 +1116,7 @@ class AgentRunner:
                         has_rag=has_rag,
                         effort_level=self._permission_manager.get_effort_level() if self._permission_manager else "medium",
                     )
-                elif self._config.agent.engine == "plan_execute":
+                elif engine_name == "plan_execute":
                     # 使用 Plan & Execute 引擎（先规划再执行再反思，适合复杂多步任务）
                     from iwan_claude.core.langgraph_plan_execute import LangGraphPlanExecuteLoop
 
@@ -1124,7 +1131,7 @@ class AgentRunner:
                         has_rag=has_rag,
                         effort_level=self._permission_manager.get_effort_level() if self._permission_manager else "medium",
                     )
-                elif self._config.agent.engine == "debate":
+                elif engine_name == "debate":
                     # 使用 Debate 引擎（worker-critic 多智能体辩论，适合质量敏感任务）
                     from iwan_claude.core.langgraph_debate import LangGraphDebateLoop
 
@@ -1139,7 +1146,7 @@ class AgentRunner:
                         has_rag=has_rag,
                         effort_level=self._permission_manager.get_effort_level() if self._permission_manager else "medium",
                     )
-                elif self._config.agent.engine == "pipeline":
+                elif engine_name == "pipeline":
                     # 使用 Pipeline 引擎（planner→executor→reviewer 三角色流水线协作）
                     from iwan_claude.core.langgraph_pipeline import LangGraphPipelineLoop
 

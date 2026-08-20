@@ -67,6 +67,7 @@ def _make_initial_state(
     reviewer_verdict: str | None = None,
     round: int = 0,
     max_rounds: int = 2,
+    replanned: bool = False,
     status: str = "planning",
     fail_reason: str | None = None,
 ) -> PipelineState:
@@ -83,6 +84,7 @@ def _make_initial_state(
         "reviewer_verdict": reviewer_verdict,
         "round": round,
         "max_rounds": max_rounds,
+        "replanned": replanned,
         "status": status,
         "result": None,
         "fail_reason": fail_reason,
@@ -167,12 +169,25 @@ class TestRouters:
         loop = LangGraphPipelineLoop(_make_mock_provider(), _make_mock_registry(), _make_mock_bus())
         assert loop._reviewer_router(state) == "done"
 
-    def test_reviewer_router_needs_rework(self) -> None:
-        """reviewer 需返工且未达上限 → executor"""
+    def test_reviewer_router_needs_rework_first_time_to_planner(self) -> None:
+        """reviewer 需返工且首次（未重新规划过）→ planner（角色复用：反馈回传给 planner）"""
         state = _make_initial_state(
             reviewer_verdict="needs_rework",
             round=0,
             max_rounds=2,
+            replanned=False,  # 首次返工
+            status="reviewing",
+        )
+        loop = LangGraphPipelineLoop(_make_mock_provider(), _make_mock_registry(), _make_mock_bus())
+        assert loop._reviewer_router(state) == "planner"
+
+    def test_reviewer_router_needs_rework_after_replan_to_executor(self) -> None:
+        """reviewer 需返工但已重新规划过 → executor（避免无限重规划）"""
+        state = _make_initial_state(
+            reviewer_verdict="needs_rework",
+            round=1,
+            max_rounds=2,
+            replanned=True,  # 已重新规划过
             status="reviewing",
         )
         loop = LangGraphPipelineLoop(_make_mock_provider(), _make_mock_registry(), _make_mock_bus())
@@ -228,13 +243,16 @@ class TestPipelineFlow:
 
     @pytest.mark.asyncio
     async def test_flow_with_rework(self) -> None:
-        """返工流程：planner → executor → reviewer(NEEDS_REWORK) → executor → reviewer(APPROVED) → end"""
+        """返工流程（角色复用）：planner → executor → reviewer(NEEDS_REWORK)
+        → planner(基于反馈重新规划) → executor → reviewer(APPROVED) → end
+        """
         provider = _make_mock_provider(side_effect=[
-            LlmResponse(text="Plan: do X", stop_reason="end_turn", usage=None, tool_calls=None),           # planner
-            LlmResponse(text="Did X wrong", stop_reason="end_turn", usage=None, tool_calls=None),          # executor (1st)
+            LlmResponse(text="Plan: do X", stop_reason="end_turn", usage=None, tool_calls=None),                # planner (1st)
+            LlmResponse(text="Did X wrong", stop_reason="end_turn", usage=None, tool_calls=None),               # executor (1st)
             LlmResponse(text="NEEDS_REWORK: X is wrong", stop_reason="end_turn", usage=None, tool_calls=None),  # reviewer (1st)
-            LlmResponse(text="Did X correctly now", stop_reason="end_turn", usage=None, tool_calls=None),  # executor (2nd)
-            LlmResponse(text="APPROVED: X is correct", stop_reason="end_turn", usage=None, tool_calls=None),    # reviewer (2nd)
+            LlmResponse(text="Revised plan: do X correctly", stop_reason="end_turn", usage=None, tool_calls=None),  # planner (replan)
+            LlmResponse(text="Did X correctly now", stop_reason="end_turn", usage=None, tool_calls=None),     # executor (2nd)
+            LlmResponse(text="APPROVED: X is correct", stop_reason="end_turn", usage=None, tool_calls=None),   # reviewer (2nd)
         ])
         loop = LangGraphPipelineLoop(provider, _make_mock_registry(), _make_mock_bus())
         context = ExecutionContext(run_id="test", goal="do X", max_steps=10)
@@ -245,13 +263,16 @@ class TestPipelineFlow:
 
     @pytest.mark.asyncio
     async def test_flow_max_rounds_forced_done(self) -> None:
-        """达到最大轮数强制结束：planner → executor → reviewer(NEEDS_REWORK) → executor → reviewer(NEEDS_REWORK) → end"""
+        """达到最大轮数强制结束（含 planner 重规划）：
+        planner → executor → reviewer(NEEDS_REWORK) → planner(replan) → executor → reviewer(NEEDS_REWORK) → end
+        """
         provider = _make_mock_provider(side_effect=[
-            LlmResponse(text="Plan: do Y", stop_reason="end_turn", usage=None, tool_calls=None),
-            LlmResponse(text="Attempt 1", stop_reason="end_turn", usage=None, tool_calls=None),
-            LlmResponse(text="NEEDS_REWORK: not good", stop_reason="end_turn", usage=None, tool_calls=None),
-            LlmResponse(text="Attempt 2", stop_reason="end_turn", usage=None, tool_calls=None),
-            LlmResponse(text="NEEDS_REWORK: still not good", stop_reason="end_turn", usage=None, tool_calls=None),
+            LlmResponse(text="Plan: do Y", stop_reason="end_turn", usage=None, tool_calls=None),                # planner (1st)
+            LlmResponse(text="Attempt 1", stop_reason="end_turn", usage=None, tool_calls=None),                # executor (1st)
+            LlmResponse(text="NEEDS_REWORK: not good", stop_reason="end_turn", usage=None, tool_calls=None),   # reviewer (1st)
+            LlmResponse(text="Revised plan", stop_reason="end_turn", usage=None, tool_calls=None),             # planner (replan)
+            LlmResponse(text="Attempt 2", stop_reason="end_turn", usage=None, tool_calls=None),                # executor (2nd)
+            LlmResponse(text="NEEDS_REWORK: still not good", stop_reason="end_turn", usage=None, tool_calls=None),  # reviewer (2nd)
         ])
         loop = LangGraphPipelineLoop(provider, _make_mock_registry(), _make_mock_bus())
         context = ExecutionContext(run_id="test", goal="do Y", max_steps=10)

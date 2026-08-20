@@ -59,7 +59,7 @@ def _make_initial_state(
     user_msg: str = "test task",
     *,
     round: int = 0,
-    max_rounds: int = 3,
+    max_rounds: int = 5,
     worker_answer: str | None = None,
     critic_feedback: str | None = None,
     critic_verdict: str | None = None,
@@ -135,6 +135,16 @@ class TestParseVerdict:
         loop = _make_loop()
         assert loop._parse_verdict(None) == "satisfied"  # type: ignore[arg-type]
 
+    def test_parse_stuck(self) -> None:
+        """测试解析 STUCK（worker 无法改进，强制退出）"""
+        loop = _make_loop()
+        assert loop._parse_verdict("STUCK: Worker is hallucinating") == "stuck"
+
+    def test_parse_stuck_case_insensitive(self) -> None:
+        """测试大小写不敏感的 STUCK"""
+        loop = _make_loop()
+        assert loop._parse_verdict("stuck: no progress") == "stuck"
+
 
 # ======================================================================
 # 路由测试
@@ -171,7 +181,13 @@ class TestRouters:
     def test_critic_router_max_rounds(self) -> None:
         """测试 critic 路由：需改进但达上限 → done（强制结束）"""
         loop = _make_loop()
-        state = _make_initial_state(critic_verdict="needs_improvement", round=3, max_rounds=3)
+        state = _make_initial_state(critic_verdict="needs_improvement", round=5, max_rounds=5)
+        assert loop._critic_router(state) == "done"
+
+    def test_critic_router_stuck(self) -> None:
+        """测试 critic 路由：STUCK（worker 无法继续改进）→ done（强制退出）"""
+        loop = _make_loop()
+        state = _make_initial_state(critic_verdict="stuck", round=1, max_rounds=5)
         assert loop._critic_router(state) == "done"
 
     def test_critic_router_error(self) -> None:
@@ -281,7 +297,7 @@ class TestDebateFlow:
         assert provider.chat.call_count == 4
 
     def test_max_rounds_forced_completion(self) -> None:
-        """测试达到最大轮数强制结束（3 轮都 needs_improvement）"""
+        """测试达到最大轮数强制结束（5 轮都 needs_improvement）"""
         worker_response = LlmResponse(
             text="Still trying...",
             stop_reason="end_turn",
@@ -296,8 +312,10 @@ class TestDebateFlow:
         )
 
         provider = MagicMock(spec=LLMProvider)
-        # 3 轮：worker, critic × 3
+        # 5 轮：worker, critic × 5
         provider.chat = AsyncMock(side_effect=[
+            worker_response, critic_response,
+            worker_response, critic_response,
             worker_response, critic_response,
             worker_response, critic_response,
             worker_response, critic_response,
@@ -313,11 +331,46 @@ class TestDebateFlow:
 
         asyncio.run(loop.run(context))
 
-        # 达到 max_rounds 后强制结束，但仍视为成功（取最后一次 worker_answer）
+        # 达到 max_rounds=5 后强制结束，但仍视为成功（取最后一次 worker_answer）
         assert context.status == "success"
         assert "Still trying" in context.result
-        # 6 次 LLM（3次 worker + 3次 critic）
-        assert provider.chat.call_count == 6
+        # 10 次 LLM（5次 worker + 5次 critic）
+        assert provider.chat.call_count == 10
+
+    def test_stuck_termination(self) -> None:
+        """测试 critic 判定 STUCK 时立即退出（动态退出，避免无效循环）"""
+        worker_response = LlmResponse(
+            text="I don't know how to solve this.",
+            stop_reason="end_turn",
+            usage=None,
+            tool_calls=None,
+        )
+        # critic 判定 worker 卡住了
+        critic_response = LlmResponse(
+            text="STUCK: Worker is hallucinating and cannot make progress.",
+            stop_reason="end_turn",
+            usage=None,
+            tool_calls=None,
+        )
+
+        provider = MagicMock(spec=LLMProvider)
+        provider.chat = AsyncMock(side_effect=[worker_response, critic_response])
+
+        loop = _make_loop(provider=provider)
+
+        context = ExecutionContext(
+            run_id="test_run",
+            goal="Solve P vs NP",
+            max_steps=20,
+        )
+
+        asyncio.run(loop.run(context))
+
+        # STUCK 时立即退出，取 worker 的最后一次回答作为结果
+        assert context.status == "success"
+        assert "I don't know" in context.result
+        # 只调用了 2 次 LLM（1次 worker + 1次 critic）
+        assert provider.chat.call_count == 2
 
     def test_worker_failure(self) -> None:
         """测试 worker 失败"""

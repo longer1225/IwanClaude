@@ -8,15 +8,16 @@ LangGraphPipelineLoop 模块 - 多 Agent 流水线协作引擎
 - Pipeline（本模块）：三个独立角色 Agent 流水线协作——Planner 规划 → Executor 执行 → Reviewer 审查
 
 【工作流节点】
-1. planner：分析任务，制定执行计划（不调用工具，纯规划）
+1. planner：分析任务，制定执行计划（不调用工具，纯规划）；若收到 reviewer 反馈则优化后续计划
 2. executor：按计划调用工具执行（不规划，只执行）
 3. reviewer：审查执行结果，判定是否达标（不调用工具，纯审查）
 4. end：整理最终结果，追加 assistant 消息到会话历史
 
-【路由逻辑】
+【路由逻辑 - 角色复用】
 - planner → executor：planner 生成计划后交给 executor 执行
 - executor → reviewer：executor 执行完成后交给 reviewer 审查
-- reviewer → executor：reviewer 认为需要返工且未达最大轮数，executor 带反馈重新执行
+- reviewer → planner（首次返工）：reviewer 反馈回传给 planner，planner 优化后续计划
+- reviewer → executor（后续返工）：executor 带反馈重新执行（避免无限重规划）
 - reviewer → end：reviewer 满意 / 达最大轮数 / 出错
 
 【适用场景】
@@ -27,8 +28,9 @@ LangGraphPipelineLoop 模块 - 多 Agent 流水线协作引擎
 【面试亮点】
 "实现了 5 种 Agent 引擎（Legacy / ReAct / Plan&Execute / Debate / Pipeline），通过配置切换。
 Pipeline 模式采用三角色流水线协作——Planner 制定计划、Executor 调用工具执行、Reviewer
-独立审查结果，不满意则 Executor 带反馈返工，最多 2 轮。这种模式对标 CrewAI / AutoGen 的
-多 Agent 协作，通过角色分离和职责隔离提升了复杂任务的处理质量。"
+独立审查结果。首次返工时 reviewer 反馈回传给 planner 优化后续计划（角色复用），
+后续返工直接给 executor 执行（避免无限重规划）。这种模式对标 CrewAI / AutoGen 的多 Agent
+协作，通过角色分离和职责隔离提升了复杂任务的处理质量。"
 """
 from __future__ import annotations
 
@@ -106,6 +108,7 @@ class PipelineState(TypedDict):
     - reviewer_verdict: 解析后的判定（approved / needs_rework）
     - round: 已完成的 executor→reviewer 轮数（在 reviewer_node 递增）
     - max_rounds: 最大返工轮数（默认 2）
+    - replanned: 是否已经重新规划过（避免无限重规划）
     - status: 运行状态
     - result: 最终结果
     - fail_reason: 失败原因
@@ -122,6 +125,7 @@ class PipelineState(TypedDict):
     reviewer_verdict: Literal["approved", "needs_rework"] | None
     round: int
     max_rounds: int
+    replanned: bool
     status: Literal["planning", "executing", "reviewing", "done", "failed"]
     result: str | None
     fail_reason: str | None
@@ -193,10 +197,11 @@ class LangGraphPipelineLoop:
         """
         构建多 Agent 流水线工作流图
 
-        【图结构】
+        【图结构 - 角色复用】
         START → planner → planner_router → executor → executor_router → reviewer → reviewer_router → end → END
-                           ↓                              ↓                          ↓
-                      (error→end)                  (error→end)          (needs_rework & round<max → executor)
+                           ↓                              ↓                          ↓                ↑
+                      (error→end)                  (error→end)        (needs_rework & 首次 → planner)
+                                                                         (needs_rework & 后续 → executor)
                                                                          (approved / max_rounds / error → end)
         """
         workflow = StateGraph(PipelineState)
@@ -230,11 +235,15 @@ class LangGraphPipelineLoop:
             },
         )
 
-        # reviewer 的条件路由：满意 → done，需返工且未达上限 → executor，否则 → done
+        # reviewer 的条件路由（角色复用）：
+        # - 满意 → done
+        # - 需返工且未达上限：首次走 planner（重新规划），后续走 executor（带反馈执行）
+        # - 达最大轮数 / 出错 → done / error
         workflow.add_conditional_edges(
             "reviewer",
             self._reviewer_router,
             {
+                "planner": "planner",
                 "executor": "executor",
                 "done": "end",
                 "error": "end",
@@ -257,10 +266,10 @@ class LangGraphPipelineLoop:
         """
         planner 节点：分析任务，制定执行计划
 
-        【执行流程】
-        1. 构建规划 prompt（含 user_request）
-        2. 调用 LLM（不调用工具，纯规划）
-        3. 提取计划文本
+        【角色复用】
+        - 首次规划：基于 user_request 制定计划
+        - 收到 reviewer 反馈后：基于反馈优化原计划（reviewer 反馈回传给 planner）
+          让 planner 知道执行中遇到的问题，调整后续步骤
         """
         await self._bus.publish(StepStartedEvent(
             run_id=self._run_id,
@@ -269,12 +278,31 @@ class LangGraphPipelineLoop:
         ))
 
         # 构建规划 prompt
-        plan_prompt = (
-            f"## User Request\n{state['user_request']}\n\n"
-            "Analyze this request and create a clear, actionable execution plan. "
-            "Break down the task into concrete numbered steps. "
-            "The executor agent will follow your plan to complete the task."
-        )
+        reviewer_feedback = state.get("reviewer_feedback")
+        previous_plan = state.get("plan")
+        previous_result = state.get("executor_result")
+
+        if reviewer_feedback and previous_plan:
+            # 角色复用：reviewer 反馈回传给 planner，让 planner 优化后续计划
+            plan_prompt = (
+                f"## User Request\n{state['user_request']}\n\n"
+                f"## Previous Plan\n{previous_plan}\n\n"
+                f"## Executor's Previous Result\n{previous_result or '(empty)'}\n\n"
+                f"## Reviewer Feedback\n{reviewer_feedback}\n\n"
+                "The reviewer has identified issues with the previous execution. "
+                "Please revise the plan to address these issues. You may keep steps "
+                "that worked, modify steps that failed, or add new steps. "
+                "Output the revised plan as a numbered list of steps."
+            )
+            log.info("Planner revising plan based on reviewer feedback (round %d)", state.get("round", 0))
+        else:
+            # 首次规划
+            plan_prompt = (
+                f"## User Request\n{state['user_request']}\n\n"
+                "Analyze this request and create a clear, actionable execution plan. "
+                "Break down the task into concrete numbered steps. "
+                "The executor agent will follow your plan to complete the task."
+            )
 
         messages = [{"role": "user", "content": plan_prompt}]
 
@@ -308,6 +336,7 @@ class LangGraphPipelineLoop:
             "plan": plan_text,
             "status": "executing",
             "step": state["step"] + 1,
+            "replanned": bool(reviewer_feedback),  # 标记已重新规划过
         }
 
     # ==================================================================
@@ -503,11 +532,14 @@ class LangGraphPipelineLoop:
 
     def _reviewer_router(self, state: PipelineState) -> str:
         """
-        reviewer 路由：判断是否需要返工
+        reviewer 路由：判断是否需要返工（角色复用策略）
 
+        【路由策略 - 角色复用】
         - reviewer 失败 → error
-        - reviewer 通过 → done
-        - reviewer 认为需返工且未达最大轮数 → executor（带反馈重新执行）
+        - reviewer 通过（APPROVED）→ done
+        - reviewer 认为需返工且未达最大轮数：
+          - 首次返工（未重新规划过）→ planner（让 reviewer 反馈回传给 planner 优化计划）
+          - 后续返工（已重新规划过）→ executor（直接带反馈执行，避免无限重规划）
         - 达到最大轮数或未知判定 → done（强制/安全结束）
         """
         if state.get("status") == "failed":
@@ -520,6 +552,12 @@ class LangGraphPipelineLoop:
         # 只有明确 needs_rework 才考虑返工
         if verdict == "needs_rework":
             if state.get("round", 0) < state.get("max_rounds", _DEFAULT_MAX_ROUNDS):
+                # 角色复用：首次返工回传给 planner 优化计划，后续直接给 executor
+                if not state.get("replanned", False):
+                    log.info("Reviewer feedback sent to planner for plan revision (round %d)",
+                             state.get("round", 0))
+                    return "planner"
+                # 后续返工直接给 executor，避免无限重规划
                 return "executor"
             # 达到最大轮数，强制结束
             log.warning("Pipeline reached max_rounds=%d, forcing completion", state.get("max_rounds"))
@@ -607,6 +645,7 @@ class LangGraphPipelineLoop:
             "reviewer_verdict": None,
             "round": 0,
             "max_rounds": _DEFAULT_MAX_ROUNDS,
+            "replanned": False,  # 是否已经重新规划过（避免无限重规划）
             "status": "planning",
             "result": None,
             "fail_reason": None,
