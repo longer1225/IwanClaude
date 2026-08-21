@@ -39,6 +39,9 @@ from iwan_claude.cli.commands.run import cmd_run             # 任务执行命�
 from iwan_claude.cli.commands.trace import cmd_trace         # 日志追踪命令
 from iwan_claude.cli.commands.version import cmd_version     # 版本显示命令
 
+# 导入懒启动 daemon 守护模块
+from iwan_claude.cli.daemon_guard import ensure_daemon       # 懒启动 daemon
+
 # 导入核心模块
 from iwan_claude.core.config import get_config               # 配置加载函数
 from iwan_claude.core.logging_setup import setup_logging     # 日志初始化函数
@@ -102,8 +105,16 @@ def main() -> None:
     if args.command == "ping":
         cmd_ping(config)
     elif args.command == "chat":
+        # 懒启动 daemon：没跑就起一个，5 秒超时
+        if not ensure_daemon(config):
+            print("error: daemon not ready, try `iwan core start` manually", file=sys.stderr)
+            sys.exit(1)
         cmd_chat(config)
     elif args.command == "run":
+        # 懒启动 daemon：没跑就起一个，5 秒超时
+        if not ensure_daemon(config):
+            print("error: daemon not ready, try `iwan core start` manually", file=sys.stderr)
+            sys.exit(1)
         cmd_run(args.goal, config)
     elif args.command == "core":
         # core 命令需要进一步判断子子命令

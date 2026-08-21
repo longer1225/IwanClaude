@@ -6,6 +6,7 @@ TUI 入口模块
 核心功能：
 - 初始化文件日志系统（不输出到 stderr，避免干扰 Textual 渲染）
 - 解析命令行参数（支持 --replay 参数回放历史运行）
+- 懒启动 daemon：没跑就自动起一个，让用户感觉"敲一下就能用"
 - 读取配置并启动 TUI 应用
 
 设计要点：
@@ -23,8 +24,10 @@ import argparse
 import logging
 import logging.handlers
 import os
+import sys
 from pathlib import Path
 
+from iwan_claude.cli.daemon_guard import ensure_daemon
 from iwan_claude.core.config import get_config
 from iwan_claude.tui.app import IwanTuiApp
 
@@ -108,6 +111,16 @@ def main() -> None:
 
     config = get_config()
     _setup_logging(config.logging.level)
+
+    # 懒启动 daemon：没跑就自动起一个，5 秒超时
+    # 失败时 print + exit（还没进 textual 模式，stderr 能正常显示）
+    if not ensure_daemon(config):
+        print(
+            "error: daemon not ready, try `iwan core start` manually",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     app = IwanTuiApp(config.host, config.port, replay_run_id=args.replay)
     app.run()
 
