@@ -1,6 +1,14 @@
 ---
 name: review
 description: 对指定路径做代码审查，输出严重/建议/可选三级分类
+invocation: both
+icon: 🔍
+keywords:
+  - 代码审查
+  - code review
+  - 审查代码
+  - review code
+  - 检查代码
 allowed_tools:
   - read_file
   - list_dir

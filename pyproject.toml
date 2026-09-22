@@ -16,6 +16,8 @@ dependencies = [
     "anthropic>=0.25",     # Anthropic LLM SDK（流式 + prompt caching）
     "textual>=0.75",       # 终端 UI 框架（iwan-tui）
     "httpx[socks]>=0.28.1",
+    "langgraph>=1.2.12",
+    "langgraph-checkpoint-sqlite>=3.1.1",
 ]
 
 # 安装后可在 PATH 中执行的入口：`iwan` / `iwan-core` / `iwan-tui`
@@ -23,6 +25,8 @@ dependencies = [
 iwan = "iwan_claude.cli.main:main"
 iwan-core = "iwan_claude.core.app:run"
 iwan-tui = "iwan_claude.tui.__main__:main"
+# 面向用户的唯一入口：一条命令懒拉起 daemon + 打开 TUI（两个进程，一次敲击）
+iwanclaude = "iwan_claude.tui.__main__:main"
 
 # ---- Hatch：打 wheel 时从 src 布局收录包 ----
 [tool.hatch.build.targets.wheel]

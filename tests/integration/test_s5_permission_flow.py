@@ -45,7 +45,11 @@ class _SingleBashProvider:
 
 
 class _TwoBashProvider:
-    """Step 1+2: two separate bash calls. Step 3: end_turn."""
+    """Step 1+2: two separate bash calls with the SAME command. Step 3: end_turn.
+
+    指纹缓存语义下 always_allow 只覆盖"同工具+同参数"，故两次调用参数保持一致，
+    才能验证 session 内 always_allow 缓存命中路径。
+    """
 
     def __init__(self) -> None:
         self._step = 0
@@ -62,10 +66,10 @@ class _TwoBashProvider:
     ) -> LlmResponse:
         self._step += 1
         if self._step == 1:
-            tc = ToolCallBlock(id="tc1", name="bash", input={"command": "echo first"})
+            tc = ToolCallBlock(id="tc1", name="bash", input={"command": "echo hello"})
             return LlmResponse(stop_reason="tool_use", tool_calls=[tc])
         if self._step == 2:
-            tc = ToolCallBlock(id="tc2", name="bash", input={"command": "echo second"})
+            tc = ToolCallBlock(id="tc2", name="bash", input={"command": "echo hello"})
             return LlmResponse(stop_reason="tool_use", tool_calls=[tc])
         return LlmResponse(stop_reason="end_turn", text="done")
 

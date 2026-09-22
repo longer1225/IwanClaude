@@ -1,5 +1,38 @@
+"""
+OpenAI Compatible Provider - OpenAI Chat Completions API 兼容的 LLM Provider 实现
+
+【学习要点】
+1. 消息格式转换：将 Anthropic 格式的消息转换为 OpenAI 格式
+2. SSE 解析：手动解析 Server-Sent Events，逐 token 收集数据
+3. 工具调用处理：增量组装 tool_calls（OpenAI 流式响应中 tool_calls 是增量返回的）
+4. 多厂商支持：通过 base_url 参数支持通义、智谱、Ollama 等
+
+【核心特性】
+- 原生支持 OpenAI Chat Completions API
+- 通过 base_url 支持：通义千问（兼容模式）、智谱清言、月之暗面、Ollama OpenAI 等
+- 消息格式自动转换（Anthropic → OpenAI）
+- 工具 schema 自动转换（Anthropic → OpenAI）
+- SSE 流式解析，逐 token 发布事件
+- 增量工具调用组装
+- 自动重试机制（最多 3 次，指数退避）
+
+【消息格式差异】
+Anthropic 格式：
+  {"role": "assistant", "content": [{"type": "text", "text": "..."}, {"type": "tool_use", "id": "...", "name": "...", "input": {...}}]}
+  {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "...", "content": "..."}]}
+
+OpenAI 格式：
+  {"role": "assistant", "content": "...", "tool_calls": [{"id": "...", "type": "function", "function": {"name": "...", "arguments": "..."}}]}
+  {"role": "tool", "tool_call_id": "...", "content": "..."}
+"""
 from __future__ import annotations
 
+# asyncio：异步 I/O 框架
+# json：JSON 解析
+# logging：日志记录
+# os：操作系统接口（读取环境变量）
+# datetime：日期时间处理
+# typing：类型提示
 import asyncio
 import json
 import logging
@@ -7,27 +40,46 @@ import os
 from datetime import UTC, datetime
 from typing import Any
 
+# httpx：HTTP 客户端（用于发起 SSE 请求）
 import httpx
 
+# 导入事件类型
 from iwan_claude.core.bus.events import LlmModelSelectedEvent, LlmTokenEvent, LlmUsageEvent
+
+# 导入配置类
 from iwan_claude.core.config import LlmConfig
+
+# 导入核心组件
 from iwan_claude.core.events.bus import EventBus
 from iwan_claude.core.llm.types import LlmResponse, ToolCallBlock, UsageStats
 from iwan_claude.core.system_prompt import FALLBACK_SYSTEM_PROMPT
 
+# 最大重试次数
 _MAX_STREAM_RETRIES = 3
+
+# 重试退避时间（秒）：1s, 2s, 4s
 _RETRY_BACKOFF_S = (1.0, 2.0, 4.0)
+
+# 最大输出 token 数
 _MAX_OUTPUT_TOKENS = 8192
 
+# 获取当前模块的日志记录器
 log = logging.getLogger(__name__)
 
 
-# 返回当前 UTC 时间的 ISO 8601 字符串
 def _now() -> str:
+    """
+    返回当前 UTC 时间的 ISO 8601 格式字符串
+    
+    返回值：
+        str: 格式如 "2024-01-01T12:00:00+00:00" 的时间字符串
+    """
     return datetime.now(UTC).isoformat()
 
 
-# Provider 层兜底 system prompt（极端情况下才会用到：主循环忘传 system 时；优先使用 loop / runner 里的完整版）
+# Provider 层兜底 system prompt
+# 极端情况下才会用到：主循环忘传 system 时
+# 优先使用 loop / runner 里的完整版
 _DEFAULT_SYSTEM_PROMPT = FALLBACK_SYSTEM_PROMPT
 
 
@@ -35,12 +87,36 @@ _DEFAULT_SYSTEM_PROMPT = FALLBACK_SYSTEM_PROMPT
 # 消息格式转换：Anthropic ↔ OpenAI Chat Completions
 # ---------------------------------------------------------------------------
 
-# 把 Anthropic 风格的 messages（tool_use / tool_result 是 content block）
-# 转换成 OpenAI 风格（tool_calls 挂在 assistant 消息上，tool_result 是 role=tool 的独立消息）
 def _convert_messages_to_openai(
     messages: list[dict[str, object]],
     system: str | None,
 ) -> list[dict[str, object]]:
+    """
+    将 Anthropic 风格的消息转换为 OpenAI 风格的消息
+    
+    【学习要点】
+    1. 格式差异：Anthropic 使用 content blocks，OpenAI 使用 role=tool 消息
+    2. System Prompt：OpenAI 把 system prompt 放进 messages 的第一条
+    3. Tool Use：Anthropic 的 tool_use 是 content block，OpenAI 的 tool_calls 挂在 assistant 消息上
+    4. Tool Result：Anthropic 的 tool_result 是 content block，OpenAI 的 tool_result 是独立的 role=tool 消息
+    
+    参数：
+        messages: Anthropic 格式的消息列表
+        system: 系统提示词
+    
+    返回值：
+        list[dict]: OpenAI 格式的消息列表
+    
+    【转换规则】
+    1. system prompt → 第一条 role=system 消息
+    2. assistant 消息：
+       - text block → content 字符串
+       - tool_use block → tool_calls 列表
+       - thinking block → 跳过（OpenAI 不支持）
+    3. user 消息：
+       - text block → 保留为 user 消息
+       - tool_result block → 转换为独立的 role=tool 消息
+    """
     out: list[dict[str, object]] = []
 
     # OpenAI 把 system prompt 放进 messages 的第一条 role=system 消息
@@ -48,6 +124,7 @@ def _convert_messages_to_openai(
     if sys_text:
         out.append({"role": "system", "content": sys_text})
 
+    # 遍历每条消息
     for msg in messages:
         role = msg["role"]
         content = msg.get("content")
@@ -67,16 +144,20 @@ def _convert_messages_to_openai(
                 for blk in content:
                     btype = blk.get("type")
                     if btype == "text":
+                        # 文本块，收集到 text_parts
                         text_parts.append(blk.get("text", ""))
                     elif btype == "thinking":
-                        # OpenAI 没有 extended thinking 块，跳过（或者放进 reasoning_content？这里先跳过）
+                        # OpenAI 没有 extended thinking 块，跳过
+                        # 或者可以放进 reasoning_content，但这里先跳过
                         continue
                     elif btype == "tool_use":
+                        # 工具调用块，转换为 OpenAI 格式
                         tid = blk.get("id", f"tc_{idx}")
                         idx += 1
                         name = str(blk.get("name", ""))
                         raw_input = blk.get("input", {})
                         try:
+                            # 将 input 转换为 JSON 字符串
                             args_str = json.dumps(raw_input, ensure_ascii=False)
                         except Exception:
                             args_str = "{}"
@@ -85,6 +166,7 @@ def _convert_messages_to_openai(
                             "type": "function",
                             "function": {"name": name, "arguments": args_str},
                         })
+                # 构建 assistant 消息
                 assm: dict[str, object] = {"role": "assistant"}
                 if text_parts:
                     assm["content"] = "".join(text_parts)
@@ -100,8 +182,10 @@ def _convert_messages_to_openai(
                 for blk in content:
                     btype = blk.get("type")
                     if btype == "text":
+                        # 文本块，收集到 text_parts
                         text_parts.append(blk.get("text", ""))
                     elif btype == "tool_result":
+                        # 工具结果块，转换为独立的 role=tool 消息
                         tc_id = blk.get("tool_use_id", "")
                         tc_content = blk.get("content", "")
                         # tool_result 的 content 可能是 list（Anthropic 支持多块），这里拍平成字符串
@@ -120,7 +204,7 @@ def _convert_messages_to_openai(
                 if text_parts:
                     out.append({"role": "user", "content": "".join(text_parts)})
             else:
-                # system 或其他：简化处理
+                # system 或其他：简化处理，只保留文本部分
                 flat = []
                 for blk in content:
                     if isinstance(blk, dict) and blk.get("type") == "text":
@@ -134,10 +218,26 @@ def _convert_messages_to_openai(
     return out
 
 
-# 把 Anthropic 风格的 tool schema 转成 OpenAI 风格
 def _convert_tools_to_openai(
     tool_schemas: list[dict[str, object]],
 ) -> list[dict[str, object]]:
+    """
+    将 Anthropic 风格的工具 schema 转换为 OpenAI 风格
+    
+    【学习要点】
+    1. 格式差异：Anthropic 使用 name/description/input_schema，OpenAI 使用 type/function/parameters
+    2. 参数映射：input_schema → parameters
+    
+    参数：
+        tool_schemas: Anthropic 格式的工具 schema 列表
+    
+    返回值：
+        list[dict]: OpenAI 格式的工具列表
+    
+    【转换规则】
+    Anthropic: {"name": "...", "description": "...", "input_schema": {...}}
+    OpenAI: {"type": "function", "function": {"name": "...", "description": "...", "parameters": {...}}}
+    """
     result: list[dict[str, object]] = []
     for ts in tool_schemas:
         name = ts.get("name", "")

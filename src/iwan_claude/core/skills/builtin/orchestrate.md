@@ -1,6 +1,14 @@
 ---
 name: orchestrate
 description: 用 planner→executor→reviewer 三阶段 Multi-agent 工作流完成复杂任务
+invocation: both
+icon: 🎯
+keywords:
+  - 任务规划
+  - 复杂任务
+  - 多agent
+  - orchestrate
+  - 工作流
 allowed_tools:
   - spawn_agent
   - agent_result

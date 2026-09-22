@@ -3,8 +3,14 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from iwan_claude.core.bus.commands import PingCommand, PongResult
-from iwan_claude.core.bus.events import CoreStartedEvent
+from iwan_claude.core.bus.commands import (
+    PingCommand,
+    PongResult,
+    SessionCreateResult,
+    SessionSetAutoModeCommand,
+    SessionSetAutoModeResult,
+)
+from iwan_claude.core.bus.events import CoreStartedEvent, SessionAutoModeChangedEvent
 
 
 # 功能：验证 PingCommand 序列化后再反序列化，client 和 type 字段完整保留
@@ -46,3 +52,41 @@ def test_core_started_event_roundtrip() -> None:
     evt2 = CoreStartedEvent.model_validate_json(evt.model_dump_json())
     assert evt2.listen_addr == "127.0.0.1:7437"
     assert evt2.type == "core.started"
+
+
+# 功能：验证 SessionSetAutoModeCommand 序列化往返并校验 mode 必填
+# 设计：mode 是设置自动模式的核心字段，必须随命令下发
+def test_session_set_auto_mode_command_roundtrip() -> None:
+    cmd = SessionSetAutoModeCommand(session_id="s1", mode="read_only")
+    cmd2 = SessionSetAutoModeCommand.model_validate_json(cmd.model_dump_json())
+    assert cmd2.session_id == "s1"
+    assert cmd2.mode == "read_only"
+    assert cmd2.type == "session.set_auto_mode"
+
+
+# 功能：验证 SessionSetAutoModeResult 返回当前模式
+# 设计：daemon 设置成功后返回实际生效的 mode，供 TUI 同步状态
+def test_session_set_auto_mode_result_roundtrip() -> None:
+    res = SessionSetAutoModeResult(mode="on")
+    res2 = SessionSetAutoModeResult.model_validate_json(res.model_dump_json())
+    assert res2.mode == "on"
+
+
+# 功能：验证 SessionCreateResult 默认 auto_mode 为 off，可携带指定值
+# 设计：TUI 创建会话后根据该字段同步 daemon 侧的自动模式状态
+def test_session_create_result_includes_auto_mode() -> None:
+    res_default = SessionCreateResult(session_id="s1", status="active")
+    assert res_default.auto_mode == "off"
+
+    res_on = SessionCreateResult(session_id="s2", status="active", auto_mode="on")
+    assert res_on.auto_mode == "on"
+
+
+# 功能：验证 SessionAutoModeChangedEvent 序列化往返
+# 设计：daemon 通过该事件向所有订阅客户端广播模式变更，TUI 据此刷新状态栏
+def test_session_auto_mode_changed_event_roundtrip() -> None:
+    evt = SessionAutoModeChangedEvent(session_id="s1", mode="read_only", ts="2026-07-22T00:00:00Z")
+    evt2 = SessionAutoModeChangedEvent.model_validate_json(evt.model_dump_json())
+    assert evt2.session_id == "s1"
+    assert evt2.mode == "read_only"
+    assert evt2.type == "session.auto_mode_changed"

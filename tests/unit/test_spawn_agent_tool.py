@@ -83,8 +83,8 @@ async def test_background_returns_run_id(tmp_path: Path) -> None:
     assert registry.get(run_id) is not None
 
 
-# 功能：后台任务未完成时 agent_result 应返回 "still running"
-# 设计：用 Event 阻塞 provider.chat，在未等待任务完成时查询 agent_result
+# 功能：后台任务未完成时 agent_result 应返回带 "still running" 前缀的状态串，且携带 elapsed 与 description
+# 设计：用 Event 阻塞 provider.chat 后查询；断前缀而非全等——前缀是对外契约，尾巴是本轮增强信息
 @pytest.mark.asyncio
 async def test_agent_result_pending(tmp_path: Path) -> None:
     event = asyncio.Event()
@@ -111,7 +111,9 @@ async def test_agent_result_pending(tmp_path: Path) -> None:
 
     result_tool = AgentResultTool(registry)
     result = await result_tool.invoke({"run_id": run_id})
-    assert result.content == "still running"
+    assert result.content.startswith("still running")
+    assert "elapsed" in result.content
+    assert "slow task" in result.content
     assert not result.is_error
 
     event.set()

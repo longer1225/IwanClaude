@@ -1,12 +1,33 @@
 from __future__ import annotations
 
+from typing import Any
+
+import pytest
+
 from iwan_claude.core.permissions.policy import (
     PermissionDecision,
     ToolPolicy,
     evaluate,
     matches_outside_cwd,
+    param_fingerprint,
     param_preview,
+    sandbox_forces_ask,
 )
+
+
+@pytest.fixture(autouse=True)
+def reset_sandbox() -> Any:
+    # 功能：每个测试重置沙箱全局与 contextvar，保证策略评估从"无沙箱"基线出发
+    # 设计：_check_sandbox_path/Tier 2.5 读取 get_sandbox()，contextvar 会被其他
+    #       文件的同步 set_sandbox_root 调用泄漏到本文件，需显式清除
+    import iwan_claude.core.sandbox as sb_module
+    sb_module._sandbox_manager = None
+    token = sb_module._active_sandbox.set(None)
+    sb_module._sandbox_by_session.clear()
+    yield
+    sb_module._active_sandbox.reset(token)
+    sb_module._sandbox_manager = None
+    sb_module._sandbox_by_session.clear()
 
 # ── Tier 1: deny_patterns ────────────────────────────────────────────────────
 
@@ -172,3 +193,80 @@ def test_param_preview_truncates_long_value() -> None:
     preview = param_preview("bash", {"command": long_cmd})
     assert len(preview) <= 75  # key='<60 chars>…' overhead ~11 chars
     assert "…" in preview
+
+
+# ── param_fingerprint（审批缓存指纹） ─────────────────────────────────────────
+
+
+# 功能：验证 bash 指纹对"仅空白格式不同"的命令稳定、对内容不同的命令敏感
+# 设计：指纹是 always_allow 缓存键——空白归一化不稳会让同一条命令反复 ASK（骚扰），
+#       内容变化不改指纹则退化回一刀切放行（危险），两个方向必须同时锁死
+def test_param_fingerprint_bash_whitespace_normalized() -> None:
+    fp_a = param_fingerprint("bash", {"command": "echo    hi"})
+    fp_b = param_fingerprint("bash", {"command": " echo hi \n"})
+    assert fp_a == fp_b
+    assert fp_a != param_fingerprint("bash", {"command": "rm -rf /"})
+
+
+# 功能：验证路径类工具指纹做路径归一化（分隔符统一 + 大小写折叠），跨写法同路径同指纹
+# 设计：Windows 下 src\a.txt 与 src/A.TXT 指向同一文件；若归一化不彻底，
+#       用户"总是允许"会被换写法绕过，产生无意义重复审批
+def test_param_fingerprint_path_normalized() -> None:
+    fp_win = param_fingerprint("write_file", {"path": "src\\a.txt"})
+    fp_fwd = param_fingerprint("write_file", {"path": "src/a.txt"})
+    fp_case = param_fingerprint("write_file", {"path": "SRC/A.TXT"})
+    assert fp_win == fp_fwd == fp_case
+    assert fp_win != param_fingerprint("write_file", {"path": "src/b.txt"})
+
+
+# 功能：验证 git_diff 指纹同时编码仓库 path 与目标 file，任一变化都改变指纹
+# 设计：git_diff 有两个安全相关参数；只取其一会让"批准 diff a.txt"扩散到"diff b.txt"
+def test_param_fingerprint_git_diff_combines_path_and_file() -> None:
+    base = param_fingerprint("git_diff", {"path": ".", "file": "a.txt"})
+    other_file = param_fingerprint("git_diff", {"path": ".", "file": "b.txt"})
+    other_path = param_fingerprint("git_diff", {"path": "sub", "file": "a.txt"})
+    assert base != other_file
+    assert base != other_path
+    # 同参数不同 dict 顺序 → 指纹一致（顺序稳定性）
+    assert base == param_fingerprint("git_diff", {"file": "a.txt", "path": "."})
+
+
+# ── sandbox_forces_ask（Tier 2.5 沙箱强制 ASK） ───────────────────────────────
+
+
+# 功能：验证沙箱启用时文件/git 工具路径越出沙箱根 → sandbox_forces_ask 返回 True（不可缓存绕过）
+# 设计：init_sandbox 绑定临时根，分别测"外部绝对路径 True / 沙箱内 False / 未登记工具 False"，
+#       覆盖 _check_sandbox_path 的三条分支；git 工具也必须在映射表中（此前无路径检查）
+def test_sandbox_forces_ask_path_outside(tmp_path: Any) -> None:
+    from iwan_claude.core.config import SandboxConfig
+    from iwan_claude.core.sandbox import init_sandbox
+
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    init_sandbox(SandboxConfig(enabled=True, root=str(proj)))
+    assert sandbox_forces_ask("write_file", {"path": str(tmp_path / "out.txt")}) is True
+    assert sandbox_forces_ask("git_commit", {"path": str(tmp_path / "other")}) is True
+    assert sandbox_forces_ask("write_file", {"path": str(proj / "in.txt")}) is False
+    assert sandbox_forces_ask("read_file", {"path": str(proj / "in.txt")}) is False
+    # 无路径参数的工具不在检查范围
+    assert sandbox_forces_ask("search", {"query": "x"}) is False
+
+
+# 功能：验证 run_python 动态写（f-string 路径 / exec / 语法错误）触发强制 ASK，常量安全代码不触发
+# 设计：这是 Tier 2.5 的 fail-closed 语义——AST 解析不出写路径就无法保证沙箱边界；
+#       纯 print 与常量相对路径写不强制 ASK（常量路径由工具层 validate_path 硬校验）
+def test_sandbox_forces_ask_run_python_dynamic(tmp_path: Any) -> None:
+    from iwan_claude.core.config import SandboxConfig
+    from iwan_claude.core.sandbox import init_sandbox
+
+    init_sandbox(SandboxConfig(enabled=True, root=str(tmp_path)))
+    # f-string 拼出的写路径：AST 拿不到常量 → 动态
+    assert sandbox_forces_ask("run_python", {"code": "open(f'{d}/x.txt', 'w')"}) is True
+    # exec 可以写任意文件 → 动态
+    assert sandbox_forces_ask("run_python", {"code": "exec('import os; os.remove(p)')"}) is True
+    # 语法错误无法分析 → fail-closed
+    assert sandbox_forces_ask("run_python", {"code": "def ("}) is True
+    # 纯计算无写操作 → 不强制
+    assert sandbox_forces_ask("run_python", {"code": "print(1+1)"}) is False
+    # 常量相对路径写：可静态校验 → 不由本层强制 ASK
+    assert sandbox_forces_ask("run_python", {"code": "open('out.txt', 'w')"}) is False

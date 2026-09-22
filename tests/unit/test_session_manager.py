@@ -23,6 +23,7 @@ class _Runner:
         store: SessionStore | None = None,
         system_prompt_override: str | None = None,
         tool_whitelist: list[str] | None = None,
+        recovery_context: str = "",
     ) -> RunOutcome:
         assert run_id is not None
         assert session is not None
@@ -33,6 +34,42 @@ class _Runner:
             run_id,
         )
         return RunOutcome(status="success", result="done", reason=None)
+
+
+class _RestoreRunner(_Runner):
+    # 模拟 AgentRunner 的 checkpoint 读取/关闭接口，restore 返回固定旧状态
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def restore_checkpoint(self, thread_id: str, checkpoint_id: str) -> dict:
+        return {
+            "messages": [{"role": "user", "content": "restored"}],
+            "step": 1,
+            "status": "success",
+            "_tool_calls": [],
+            "_stop_reason": "",
+        }
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+# 功能：restore_checkpoint 重写 thread 消息但绝不按 step 截断 run_ids（step 是图步数非 run 序号）
+# 设计：预置 2 条 run_ids、restore 返回 step=1——旧代码 run_ids[:1] 会误删 "r2"，
+#      断言完整保留即回归锁；同时验证 restore 的临时 runner 被 close（不关共享资源在另一文件锁）
+async def test_restore_checkpoint_keeps_run_ids(tmp_path: Path) -> None:
+    store = SessionStore(tmp_path)
+    fake = _RestoreRunner()
+    manager = SessionManager(store, lambda: fake, EventBus())  # type: ignore[arg-type]
+    session = await manager.create("chat")
+    session.run_ids = ["r1", "r2"]
+
+    out = await manager.restore_checkpoint(session.id, "cp1")
+
+    assert out is not None and out["step"] == 1
+    assert session.run_ids == ["r1", "r2"]
+    assert store.read_messages(session.id) == [{"role": "user", "content": "restored"}]
+    assert fake.closed is True
 
 
 # 功能：验证 create 会创建 active session、写入 meta 并发布 session.created 事件
@@ -62,7 +99,8 @@ async def test_send_message_chat_enters_waiting_and_writes_thread(tmp_path: Path
     manager = SessionManager(store, lambda: _Runner(), EventBus())  # type: ignore[arg-type]
     session = await manager.create("chat")
 
-    run_id = await manager.send_message(session.id, "hello")
+    result = await manager.send_message(session.id, "hello")
+    run_id = result.run_id
 
     loaded = store.read_meta(session.id)
     assert loaded.status == "waiting_for_input"
