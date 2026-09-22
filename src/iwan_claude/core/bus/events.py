@@ -13,11 +13,12 @@
 - 工具调用事件：ToolCallStartedEvent, ToolCallFinishedEvent, ToolCallFailedEvent
 - LLM 事件：LlmTokenEvent, LlmUsageEvent, LlmModelSelectedEvent
 - 日志事件：LogLineEvent
-- 会话事件：SessionCreatedEvent, SessionMessageReceivedEvent, SessionWaitingForInputEvent, SessionResumedEvent, SessionClosedEvent
+- 会话事件：SessionCreatedEvent, SessionMessageReceivedEvent, SessionWaitingForInputEvent, SessionResumedEvent, SessionClosedEvent, SessionPermissionModeChangedEvent
 - 上下文事件：ContextCompactedEvent
 - 权限事件：PermissionRequestedEvent, PermissionGrantedEvent, PermissionDeniedEvent
 - 子 Agent 事件：SubagentStartedEvent, SubagentFinishedEvent
 - Skill 事件：SkillInvokedEvent
+- hook 事件：HookEvaluatedEvent
 
 【判别联合】
 使用 Pydantic 的 Discriminator("type") 实现多态类型，
@@ -412,6 +413,29 @@ class SessionAutoModeChangedEvent(BaseModel):
     ts: str
 
 
+class SessionPermissionModeChangedEvent(BaseModel):
+    """
+    会话权限模式变更事件 - 五态权限模式切换时广播
+
+    【字段说明】
+    - type: Literal["session.permission_mode_changed"] - 事件类型
+    - session_id: str - 目标会话
+    - mode: str - 新模式（default/acceptEdits/plan/auto/bypassPermissions）
+    - previous_mode: str - 切换前的模式
+    - ts: str - 时间戳（ISO 8601）
+
+    【设计目的】
+    模式是 per-session 的且可从任一端切换（TUI 快捷键、RPC、另一台设备），
+    所有订阅端都要刷新状态栏——previous_mode 一并带上是为了让 UI 能显示
+    "从哪来"，而不是只能记住本地旧值（本地缓存可能早已过期）。
+    """
+    type: Literal["session.permission_mode_changed"] = "session.permission_mode_changed"
+    session_id: str
+    mode: str
+    previous_mode: str
+    ts: str
+
+
 class SessionEffortLevelChangedEvent(BaseModel):
     """
     会话努力等级变更事件 - 努力等级切换时发送
@@ -461,7 +485,7 @@ class SessionEngineChangedEvent(BaseModel):
     【字段说明】
     - type: Literal["session.engine_changed"] - 事件类型
     - session_id: str - 会话 ID
-    - engine: str - 新的引擎名称（legacy / langgraph / plan_execute / debate / pipeline）
+    - engine: str - 新的引擎名称（legacy / langgraph / plan_execute / debate / pipeline / auto）
     - ts: str - 时间戳（ISO 8601）
 
     【设计目的】
@@ -591,6 +615,54 @@ class PermissionDeniedEvent(BaseModel):
     ts: str
 
 
+class TrustRequestedEvent(BaseModel):
+    """
+    信任请求事件 - 会话创建时该目录的信任决定未决（ask）时发送
+
+    【字段说明】
+    - type: Literal["trust.requested"] - 事件类型
+    - session_id: str - 会话 ID
+    - cwd: str - 会话工作目录（绝对路径）
+    - has_instruction_files: bool - 目录下是否存在 CLAUDE.md/AGENTS.md/.claude/settings.json
+      这类会被 iwan 自动读进系统提示的文件（陌生目录+注入文件=风险更大，客户端据此加强提示）
+    - ts: str - 时间戳（ISO 8601）
+
+    【设计目的】
+    与 permission.requested 不同，本事件不阻塞任何执行：会话照建、
+    写操作照走逐次审批（ask 现状语义）。客户端可弹信任对话框，
+    答复经 trust.respond 命令落 TrustStore，影响的是"以后的会话"。
+    """
+    type: Literal["trust.requested"] = "trust.requested"
+    session_id: str
+    cwd: str
+    has_instruction_files: bool = False
+    ts: str
+
+
+class TrustChangedEvent(BaseModel):
+    """
+    信任变更事件 - 某目录的信任决定被设定或撤销时发送
+
+    【字段说明】
+    - type: Literal["trust.changed"] - 事件类型
+    - session_id: str - 触发变更的会话 ID
+    - cwd: str - 被变更的目录（归一化绝对路径）
+    - decision: str - "allow" | "deny" | "ask"（ask=撤销持久决定回到未决态）
+    - persistent: bool - 是否写入了 trust.toml（会话级临时决定为 False）
+    - ts: str - 时间戳（ISO 8601）
+
+    【设计目的】
+    多客户端一致性：TUI 里信任了目录，CLI/别的 TUI 面板要能刷新列表；
+    同时是审计事件，信任变更本身就是高价值日志。
+    """
+    type: Literal["trust.changed"] = "trust.changed"
+    session_id: str
+    cwd: str
+    decision: str
+    persistent: bool = True
+    ts: str
+
+
 class SubagentStartedEvent(BaseModel):
     """
     子 Agent 开始事件 - 子 Agent 开始运行时发送
@@ -661,6 +733,38 @@ class SkillInvokedEvent(BaseModel):
     match_score: float = 0.0
 
 
+class HookEvaluatedEvent(BaseModel):
+    """
+    hook 裁定事件 - PreToolUse/PostToolUse hook 实际执行后发送
+
+    【字段说明】
+    - type: Literal["hook.evaluated"] - 事件类型
+    - run_id: str - 运行 ID（无运行上下文时为空串）
+    - session_id: str - 会话 ID
+    - tool_name: str - 被评估的工具名
+    - hook_event: str - 生命周期点（"PreToolUse" | "PostToolUse"）
+    - command: str - hook 的 argv 拼接（审计可读回）
+    - decision: str - 裁定（"allow" | "deny" | "ask" | "none"）
+    - reason: str - 裁定理由（JSON reason / stderr 摘要，截断后）
+    - elapsed_ms: int - hook 子进程耗时
+    - ts: str - 时间戳（ISO 8601）
+
+    【设计目的】
+    让 TUI 事件流可见"哪条 hook 在哪个生命周期点对哪个工具说了什么"——
+    hook 是外部进程，没有这条事件它就是黑盒；观测性优先在 TUI 落地。
+    """
+    type: Literal["hook.evaluated"] = "hook.evaluated"
+    run_id: str
+    session_id: str
+    tool_name: str
+    hook_event: str
+    command: str
+    decision: str
+    reason: str = ""
+    elapsed_ms: int = 0
+    ts: str
+
+
 # 根据 type 字段决定事件类型的判别联合
 # 使用 Pydantic 的 Discriminator 实现多态类型，根据 type 字段自动推断事件类型
 Event = Annotated[
@@ -682,15 +786,20 @@ Event = Annotated[
     | SessionResumedEvent
     | SessionClosedEvent
     | SessionAutoModeChangedEvent
+    | SessionPermissionModeChangedEvent
     | SessionEffortLevelChangedEvent
     | SessionModelChangedEvent
+    | SessionEngineChangedEvent
     | SessionRenamedEvent
     | ContextCompactedEvent
     | PermissionRequestedEvent
     | PermissionGrantedEvent
     | PermissionDeniedEvent
+    | TrustRequestedEvent
+    | TrustChangedEvent
     | SubagentStartedEvent
     | SubagentFinishedEvent
-    | SkillInvokedEvent,
+    | SkillInvokedEvent
+    | HookEvaluatedEvent,
     Discriminator("type"),
 ]

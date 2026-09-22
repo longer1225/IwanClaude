@@ -38,6 +38,7 @@ from iwan_claude.core.effort import get_effort_params           # 努力等级�
 from iwan_claude.core.events.bus import EventBus                # 事件总线
 from iwan_claude.core.llm.base import LLMProvider               # LLM 提供者接口
 from iwan_claude.core.permissions.manager import PermissionManager  # 权限管理器
+from iwan_claude.core.run_registry import pop_steers, steer_as_message  # 运行中修正队列
 from iwan_claude.core.system_prompt import build_base_system_prompt  # 构建基础 system prompt
 from iwan_claude.core.tools.invocation import invoke_tool       # 工具调用函数
 from iwan_claude.core.tools.registry import ToolRegistry        # 工具注册表
@@ -181,6 +182,12 @@ class AgentLoop:
             await self._bus.publish(
                 StepStartedEvent(run_id=context.run_id, step=context.step, ts=_now())
             )
+
+            # 消费运行中修正（run.steer）：在下一次模型调用前注入对话历史
+            # 【设计】回合边界消费，不打断上一步已完成的工具执行；注入的
+            # user 消息随后续轨迹一起写入会话历史，重放时可见用户何时改向
+            for steer in pop_steers(context.run_id):
+                context.messages.append(steer_as_message(steer))
 
             # ========== [Plan] 阶段：调用 LLM ==========
             try:

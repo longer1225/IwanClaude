@@ -188,7 +188,8 @@ class LLMClient:
             # 提取生成的文本（第一个 choice 的 message content）
             choices = data.get("choices", [])
             if choices:
-                return choices[0].get("message", {}).get("content", "").strip()
+                # httpx 的 .json() 返回 Any，str() 收口保证声明的 str 返回类型
+                return str(choices[0].get("message", {}).get("content", "")).strip()
             return ""
         except Exception:
             # RAG 不应因 LLM 失败而崩溃，返回空字符串降级处理

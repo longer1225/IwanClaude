@@ -43,10 +43,10 @@ from iwan_claude.core.context import ExecutionContext
 from iwan_claude.core.effort import get_effort_params
 from iwan_claude.core.events.bus import EventBus
 from iwan_claude.core.llm.base import LLMProvider
-from iwan_claude.core.llm.types import LlmResponse, ToolCallBlock
 from iwan_claude.core.permissions.manager import PermissionManager
 from iwan_claude.core.system_prompt import build_base_system_prompt
-from iwan_claude.core.tools.invocation import invoke_tool
+from iwan_claude.core.message_blocks import _extract_user_goal
+from iwan_claude.core.tool_turn import maybe_compact, run_tool_turn
 from iwan_claude.core.tools.registry import ToolRegistry
 
 log = logging.getLogger(__name__)
@@ -89,6 +89,7 @@ class PlanExecuteState(TypedDict):
     fail_reason: str | None
     step: int
     replan_count: int
+    _ctx_pct: float  # 上一回合 LLM 报告的上下文占用率（驱动跨步骤压缩）
 
 
 # 最大重新规划次数（防止无限循环）
@@ -244,8 +245,8 @@ class LangGraphPlanExecuteLoop:
             ts=_now(),
         ))
 
-        # 构建 planning prompt
-        user_msg = state["messages"][-1]["content"] if state["messages"] else ""
+        # 构建 planning prompt（提取首条真实用户消息，避免把工具轨迹 block 列表当文本用）
+        user_msg = _extract_user_goal(state["messages"])
 
         # 如果是重新规划，附上之前的执行结果
         replan_count = state.get("replan_count", 0)
@@ -375,6 +376,16 @@ class LangGraphPlanExecuteLoop:
             for i, r in enumerate(state["step_results"]):
                 prev_results += f"Step {i+1}: {r[:300]}\n"
 
+        # 压缩检查：用上一回合的上下文占用率决定是否压缩历史（compactor 此前从未被调用）
+        history = state["messages"]
+        if self._compactor and self._compact_threshold > 0:
+            history, compacted = await maybe_compact(
+                self._compactor, self._provider, history,
+                state.get("_ctx_pct", 0.0), self._compact_threshold, self._run_id,
+            )
+            if compacted:
+                log.info("plan_execute compacted history before step %d", step_idx + 1)
+
         execute_prompt = (
             f"## Execution Plan\n{plan_context}\n\n"
             f"{prev_results}\n"
@@ -385,33 +396,40 @@ class LangGraphPlanExecuteLoop:
 
         messages = [{"role": "user", "content": execute_prompt}]
         # 也传入历史消息（让 LLM 有上下文）
-        messages.extend(state["messages"][:-1])  # 排除最后一条（已经在 prompt 中了）
+        messages.extend(history[:-1])  # 排除最后一条（已经在 prompt 中了）
 
-        try:
-            response = await self._provider.chat(
-                messages=messages,
-                tool_schemas=self._registry.tool_schemas(),
-                bus=self._bus,
+        # 运行"模型→工具→结果→模型"内循环，权限检查与工具执行统一走 invoke_tool
+        turn = await run_tool_turn(
+            self._provider,
+            self._registry,
+            self._bus,
+            system=state["system_prompt"],
+            messages=messages,
+            run_id=self._run_id,
+            step=state["step"],
+            permission_manager=self._permission_manager,
+            session_id=self._session_id,
+        )
+
+        if turn.error and not turn.text:
+            await self._bus.publish(StepFinishedEvent(
                 run_id=self._run_id,
                 step=state["step"],
-                system=state["system_prompt"],
-            )
-        except Exception as exc:
-            log.error("Execute step %d failed: %s", step_idx, exc)
+                ts=_now(),
+            ))
             return {
                 "status": "failed",
-                "fail_reason": f"Step {step_idx + 1} failed: {exc}",
+                "fail_reason": f"Step {step_idx + 1} failed: {turn.error}",
             }
 
-        # 如果有工具调用，执行工具
-        result_text = response.text or ""
-        if response.tool_calls:
-            tool_results = await self._execute_tools(response.tool_calls, state)
-            result_text += "\n\n" + tool_results
+        result_text = turn.text
 
         # 记录结果
         step_results = list(state["step_results"])
         step_results.append(result_text)
+
+        # 工具轨迹写回会话历史：后续步骤与反思能看到真实执行过程
+        new_messages = list(history) + turn.trajectory
 
         await self._bus.publish(StepFinishedEvent(
             run_id=self._run_id,
@@ -423,30 +441,9 @@ class LangGraphPlanExecuteLoop:
             "current_step": step_idx + 1,
             "step_results": step_results,
             "step": state["step"] + 1,
+            "messages": new_messages,
+            "_ctx_pct": turn.ctx_pct,
         }
-
-    async def _execute_tools(self, tool_calls: list[ToolCallBlock], state: PlanExecuteState) -> str:
-        """执行工具调用，返回格式化的结果文本"""
-        results: list[str] = []
-        for tc in tool_calls:
-            try:
-                # 权限检查
-                if self._permission_manager:
-                    allowed, reason = await self._permission_manager.check_and_wait(
-                        tool_use_id=tc.id,
-                        tool_name=tc.name,
-                        params=tc.input,
-                        session_id=self._session_id,
-                    )
-                    if not allowed:
-                        results.append(f"Tool {tc.name} denied: {reason}")
-                        continue
-
-                result = await invoke_tool(self._registry, tc.name, tc.input)
-                results.append(f"Tool {tc.name}: {result.content[:500]}")
-            except Exception as exc:
-                results.append(f"Tool {tc.name} error: {exc}")
-        return "\n".join(results)
 
     # ==================================================================
     # 节点：反思
@@ -467,7 +464,7 @@ class LangGraphPlanExecuteLoop:
             ts=_now(),
         ))
 
-        user_msg = state["messages"][-1]["content"] if state["messages"] else ""
+        user_msg = _extract_user_goal(state["messages"])
 
         results_summary = ""
         for i, result in enumerate(state["step_results"]):
@@ -599,8 +596,15 @@ class LangGraphPlanExecuteLoop:
         # 【关键】将最终结果作为 assistant 消息追加到消息历史。
         # runner.run_and_capture 通过 context.messages[prefill_len:] 把新增消息写入 session store，
         # 若不追加 assistant 消息，会话历史里就只有 user 消息，客户端拿不到回复。
-        # （与 ReAct 引擎各节点直接往 state["messages"] 追加 assistant 消息的行为对齐）
-        new_messages = list(state["messages"]) + [{"role": "assistant", "content": result}]
+        # 若轨迹末尾已经是同文本 assistant 消息（单步任务常见），跳过避免重复。
+        new_messages = list(state["messages"])
+        if not (
+            new_messages
+            and new_messages[-1].get("role") == "assistant"
+            and isinstance(new_messages[-1].get("content"), str)
+            and new_messages[-1]["content"] == result
+        ):
+            new_messages.append({"role": "assistant", "content": result})
 
         return {"status": status, "result": result, "messages": new_messages}
 
@@ -645,6 +649,7 @@ class LangGraphPlanExecuteLoop:
             "fail_reason": None,
             "step": 0,
             "replan_count": 0,
+            "_ctx_pct": 0.0,
         }
 
         # 执行配置

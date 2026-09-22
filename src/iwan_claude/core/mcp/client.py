@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -131,8 +132,12 @@ class McpClient:
     """
     # 流限制：64MB，防止大响应触发 LimitOverrunError
     _STREAM_LIMIT = 64 * 1024 * 1024
+    # tools/list 分页防御上限：坏 server 无限回 nextCursor 时防止死循环
+    _MAX_LIST_PAGES = 100
+    # 本客户端实现/认可的 MCP 协议版本（握手时比对，不在列表只告警不拒绝）
+    _SUPPORTED_PROTOCOL_VERSIONS = frozenset({"2024-11-05", "2025-03-26", "2025-06-18"})
 
-    def __init__(self) -> None:
+    def __init__(self, read_timeout_sec: float = 30.0) -> None:
         """
         初始化 MCP 客户端
 
@@ -140,8 +145,7 @@ class McpClient:
         - _id: int - JSON-RPC 请求 ID（自增），用于匹配请求和响应
         - _proc: asyncio.subprocess.Process | None - stdio 子进程对象（仅 stdio 模式）
         - _reader: asyncio.StreamReader | None - 读取流（统一接口，兼容 stdio 和 TCP）
-        - _writer_proc: asyncio.StreamWriter | None - stdio 写入流
-        - _tcp_writer: asyncio.StreamWriter | None - TCP 写入流
+        - _tcp_writer: asyncio.StreamWriter | None - TCP 写入流（stdio 直接用 _proc.stdin）
         - _transport: str - 传输类型："stdio" 或 "tcp"
         - _lock: asyncio.Lock - 并发写入锁（防止多个协程同时写入时 JSON 行交错）
         - _stderr_task: asyncio.Task | None - 后台读取 stderr 的任务（防止缓冲区满）
@@ -158,12 +162,23 @@ class McpClient:
         self._proc: asyncio.subprocess.Process | None = None
         # 读取流（统一接口，兼容 stdio 和 TCP）
         self._reader: asyncio.StreamReader | None = None
+        # TCP 写入流（仅 TCP 模式；在 __init__ 声明，避免动态挂属性）
+        self._tcp_writer: asyncio.StreamWriter | None = None
         # 传输类型："stdio" 或 "tcp"
         self._transport = ""
         # 并发写入锁（防止多个协程同时写入时 JSON 行交错）
         self._lock = asyncio.Lock()
         # 后台读取 stderr 的任务（防止缓冲区满导致子进程阻塞）
         self._stderr_task: asyncio.Task[None] | None = None
+        # 单次读响应的超时秒数（由配置注入；长耗时工具需调大）
+        self._read_timeout = read_timeout_sec
+        # 连接是否已不可恢复（EOF / 超限后置位，后续调用快速失败而非再等超时）
+        self._offline = False
+        # 是否已 close()（幂等 + 关闭后拒绝新请求）
+        self._closed = False
+        # 握手时服务器自报的协议版本与 serverInfo（诊断用）
+        self._server_protocol_version = ""
+        self._server_info: dict[str, Any] = {}
 
     async def connect_stdio(
         self,
@@ -206,9 +221,9 @@ class McpClient:
         )
         ```
         """
-        # 导入 os 模块（放在函数内部避免循环导入）
-        import os
         # 合并环境变量：当前环境 + 传入的环境变量
+        # 【注意】第三方 stdio server 会继承本进程全部环境变量（含 API key），
+        # 这与 Claude Code 的官方信任模型一致：装 server = 信任 server
         merged_env = {**os.environ, **(env or {})}
         # 创建子进程，标准输入输出重定向到管道
         self._proc = await asyncio.create_subprocess_exec(
@@ -221,16 +236,21 @@ class McpClient:
         )
         # 设置读取流（子进程的标准输出）
         self._reader = self._proc.stdout
-        # 设置写入流（子进程的标准输入）
-        self._writer_proc = self._proc.stdin
         # 设置传输类型为 stdio
         self._transport = "stdio"
         # 创建后台任务持续读取 stderr（防止缓冲区满导致子进程阻塞）
         self._stderr_task = asyncio.create_task(self._drain_stderr())
-        # 完成 MCP 握手（发送 initialize 请求）
-        await self._initialize()
+        # 完成 MCP 握手；握手失败时子进程已经拉起，必须就地回收再上抛，
+        # 否则调用方拿不到 client 引用，子进程成为孤儿（泄漏点要在资源诞生处兜底）
+        try:
+            await self._initialize()
+        except BaseException:
+            await self.close()
+            raise
 
-    async def connect_tcp(self, host: str, port: int) -> None:
+    async def connect_tcp(
+        self, host: str, port: int, connect_timeout_sec: float = 10.0
+    ) -> None:
         """
         通过 TCP 连接到 MCP Server 并完成握手
 
@@ -260,16 +280,29 @@ class McpClient:
         ```
         """
         # 建立 TCP 连接，获取读取流和写入流
-        self._reader, tcp_writer = await asyncio.open_connection(
-            host, port, 
-            limit=self._STREAM_LIMIT  # 流限制（防止大响应）
-        )
+        # 连接阶段单独限时：不设限的话坏 host 会挂满操作系统级 TCP 超时（可达 20s+）
+        try:
+            self._reader, tcp_writer = await asyncio.wait_for(
+                asyncio.open_connection(
+                    host, port,
+                    limit=self._STREAM_LIMIT,  # 流限制（防止大响应）
+                ),
+                timeout=connect_timeout_sec,
+            )
+        except TimeoutError as exc:
+            raise McpServerUnavailableError(
+                f"TCP connect to {host}:{port} timed out after {connect_timeout_sec}s"
+            ) from exc
         # 设置 TCP 写入流
         self._tcp_writer = tcp_writer
         # 设置传输类型为 tcp
         self._transport = "tcp"
-        # 完成 MCP 握手（发送 initialize 请求）
-        await self._initialize()
+        # 完成 MCP 握手；失败时把刚建立的连接关掉再上抛（不留半开连接）
+        try:
+            await self._initialize()
+        except BaseException:
+            await self.close()
+            raise
 
     async def _initialize(self) -> None:
         """
@@ -297,12 +330,23 @@ class McpClient:
         - 必须先完成握手才能调用工具
         - notifications/initialized 是通知（notification），不需要响应
         """
-        # 发送 initialize 请求（带 id，期望响应）
-        await self._call("initialize", {
+        # 发送 initialize 请求（带 id，期望响应），并保留服务器应答用于诊断
+        result = await self._call("initialize", {
             "protocolVersion": "2024-11-05",  # MCP 协议版本（固定值）
             "capabilities": {},               # 客户端能力（空表示默认）
             "clientInfo": {"name": "iwan-claude", "version": "0.1"},  # 客户端信息
         })
+        # 记录服务器自报版本；不在支持列表只告警不拒绝——
+        # 握手宽松、传输严格：把以前能连上的非标 server 升级成硬失败是倒退
+        version = str(result.get("protocolVersion", ""))
+        self._server_protocol_version = version
+        info = result.get("serverInfo")
+        self._server_info = dict(info) if isinstance(info, dict) else {}
+        if version not in self._SUPPORTED_PROTOCOL_VERSIONS:
+            log.warning(
+                "mcp: server reports protocolVersion %r, not in supported %s",
+                version, sorted(self._SUPPORTED_PROTOCOL_VERSIONS),
+            )
         # 发送 notifications/initialized 通知（不带 id，不需要响应）
         await self._notify("notifications/initialized", {})
 
@@ -343,17 +387,30 @@ class McpClient:
         - 必须先完成 initialize 握手才能调用
         - 如果服务器没有提供任何工具，返回空列表
         """
-        # 调用 tools/list 方法
-        response = await self._call("tools/list", {})
-        tools = []
-        # 遍历工具列表
-        for t in response.get("tools", []):
-            # 将工具定义转换为 McpToolDef 对象
-            tools.append(McpToolDef(
-                name=t.get("name", ""),           # 工具名称
-                description=t.get("description", ""),  # 工具描述
-                input_schema=t.get("inputSchema", {}),  # 输入参数 Schema
-            ))
+        tools: list[McpToolDef] = []
+        cursor: str | None = None
+        # 协议用 nextCursor 分页：只取第一页会把大工具量 server 静默截断
+        for _page in range(self._MAX_LIST_PAGES):
+            params: dict[str, Any] = {"cursor": cursor} if cursor else {}
+            # 调用 tools/list 方法（首页不带 cursor）
+            response = await self._call("tools/list", params)
+            # 遍历本页工具列表
+            for t in response.get("tools", []):
+                name = t.get("name", "")
+                if not name:
+                    # 无名工具无法注册也无法调用，跳过并留痕
+                    log.warning("mcp: tools/list entry without name, skipped")
+                    continue
+                # 将工具定义转换为 McpToolDef 对象
+                tools.append(McpToolDef(
+                    name=name,                      # 工具名称
+                    description=t.get("description", ""),   # 工具描述
+                    input_schema=t.get("inputSchema", {}),  # 输入参数 Schema
+                ))
+            cursor = response.get("nextCursor")
+            if not cursor:
+                return tools
+        log.warning("mcp: tools/list exceeded %d pages, truncating", self._MAX_LIST_PAGES)
         return tools
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> str:
@@ -392,22 +449,50 @@ class McpClient:
         4. 将内容拼接为字符串返回
 
         【设计要点】
-        - 只提取 text 类型的内容，忽略其他类型（如 image、file）
+        - text 与 resource 内嵌文本会被提取；image/audio 等其他块以占位文本呈现
+        - result.isError=true（工具内部失败）转为 McpToolError 抛出，不当成功结果返回
         - 使用 \n 连接多个内容块
 
         【注意事项】
         - 参数必须符合工具的 input_schema
-        - 如果工具返回 error，会抛出 McpToolError
+        - 工具执行失败（JSON-RPC error 或 isError）都会抛出 McpToolError
         """
         # 调用 tools/call 方法
         response = await self._call("tools/call", {"name": name, "arguments": arguments})
+        parts = self._extract_content(response.get("content", []))
+        # MCP 语义里工具内部失败不是 JSON-RPC error，而是 result.isError=true；
+        # 不识别它会把报错文本当成功结果喂给模型，模型据此得出错误结论
+        # 将多个内容块拼接为字符串（isError 分支也要用到，先算一次）
+        joined = "\n".join(parts)
+        if response.get("isError"):
+            raise McpToolError(
+                f"MCP tool '{name}' reported failure: {joined or '(no error text)'}"
+            )
+        return joined
+
+    # 提取 tools/call 响应的 content 块：text 原样保留，其他类型给出占位说明而非静默丢弃
+    @staticmethod
+    def _extract_content(items: Any) -> list[str]:
         parts: list[str] = []
-        # MCP 响应内容可能包含多个块，只提取 text 类型的内容
-        for item in response.get("content", []):
-            if item.get("type") == "text":
-                parts.append(str(item["text"]))
-        # 将多个 text 块拼接为字符串
-        return "\n".join(parts)
+        if not isinstance(items, list):
+            return parts
+        for item in items:
+            if not isinstance(item, dict):
+                # 畸形块不让它炸 KeyError，转成可见的占位文本
+                parts.append(f"[malformed content block: {item!r}]")
+                continue
+            ctype = item.get("type")
+            if ctype == "text":
+                parts.append(str(item.get("text", "")))
+            elif ctype in ("resource", "resource_link"):
+                resource = item.get("resource")
+                text = resource.get("text") if isinstance(resource, dict) else None
+                parts.append(
+                    str(text) if text is not None else f"[{ctype} content omitted]"
+                )
+            else:
+                parts.append(f"[{ctype or 'unknown'} content not supported]")
+        return parts
 
     async def _drain_stderr(self) -> None:
         """
@@ -477,12 +562,18 @@ class McpClient:
         【设计要点】
         - 使用 terminate() 先优雅终止，再使用 kill() 强制终止
         - 设置 5 秒超时，防止无限等待
-        - 使用 getattr 获取 _tcp_writer，避免属性不存在的错误
+        - TCP 写入流是 __init__ 声明的常规属性，直接访问
 
         【注意事项】
-        - 必须在不再使用客户端时调用 close()
-        - 调用 close() 后，客户端不能再使用
+        - close() 幂等，可重复调用
+        - 调用 close() 后，客户端不能再使用（后续请求抛 Unavailable）
         """
+        # 幂等保护：重复 close 直接返回，避免二次 terminate/kill 竞态
+        if self._closed:
+            return
+        self._closed = True
+        # 主动关闭也算断线：熔断置位，任何在途/后续的 _call 快速失败
+        self._offline = True
         # 1. 取消 stderr 读取任务
         if self._stderr_task is not None:
             self._stderr_task.cancel()
@@ -505,17 +596,26 @@ class McpClient:
                     self._proc.kill()
                 except Exception:
                     pass
-        
-        # 3. 如果是 TCP 模式，关闭连接
-        elif self._transport == "tcp":
-            # 使用 getattr 获取 _tcp_writer（避免属性不存在的错误）
-            writer = getattr(self, "_tcp_writer", None)
-            if writer is not None:
-                writer.close()
+                # kill 之后仍要收尸：不 await wait() 的话子进程变僵尸，
+                # 占用 PID 直到事件循环退出（Windows 上表现为目录句柄不释放）
                 try:
-                    await writer.wait_closed()
+                    await asyncio.wait_for(self._proc.wait(), timeout=5.0)
                 except Exception:
                     pass
+
+        # 3. 如果是 TCP 模式，关闭连接
+        elif self._transport == "tcp" and self._tcp_writer is not None:
+            self._tcp_writer.close()
+            try:
+                await self._tcp_writer.wait_closed()
+            except Exception:
+                pass
+            self._tcp_writer = None
+
+    # 连接是否已进入不可恢复状态（EOF / 超限 / 已关闭），供上层诊断
+    @property
+    def offline(self) -> bool:
+        return self._offline
 
     async def _call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         """
@@ -563,6 +663,11 @@ class McpClient:
         【注意事项】
         - 必须在锁内读取响应，防止多个请求的响应交错
         """
+        # 断线熔断：连接已 EOF/超限/关闭时立即失败，不再空等一个永远不会来的响应
+        if self._offline:
+            raise McpServerUnavailableError(
+                "MCP server offline (connection lost); restart daemon to reconnect"
+            )
         # 自增请求 ID
         self._id += 1
         req_id = self._id
@@ -591,7 +696,14 @@ class McpClient:
                     # 服务器通知（server-initiated notification），忽略
                     log.debug("mcp: received server notification: %s", msg.get("method"))
                     continue
-                
+
+                # 带 id 又带 method 的是 server→client 请求（ping/roots/list 等）。
+                # 不回包会让守规矩的 server 卡在等响应，必须应答；
+                # 我们只实现 tools 能力，除 ping 外一律回 method-not-found
+                if msg.get("method") is not None:
+                    await self._answer_server_request(msg_id, str(msg["method"]))
+                    continue
+
                 # 匹配响应的 ID（转为字符串比较，兼容不同类型的 ID）
                 if str(msg_id) == req_id_str:
                     # 如果响应包含 error 字段，抛出异常
@@ -603,6 +715,20 @@ class McpClient:
                     # 返回结果
                     result: dict[str, Any] = msg.get("result", {})
                     return result
+
+    # 回复 server→client 请求：ping 回空 result，其余回 method-not-found(-32601)
+    async def _answer_server_request(self, msg_id: Any, method: str) -> None:
+        if method == "ping":
+            reply = {"jsonrpc": "2.0", "id": msg_id, "result": {}}
+        else:
+            log.debug("mcp: server request %r not supported, answering method-not-found", method)
+            reply = {
+                "jsonrpc": "2.0",
+                "id": msg_id,
+                "error": {"code": -32601, "message": f"client does not implement {method}"},
+            }
+        # _write_line 自身不取锁，锁内调用安全（同协程顺序执行，无递归加锁）
+        await self._write_line(json.dumps(reply))
 
     async def _notify(self, method: str, params: dict[str, Any]) -> None:
         """
@@ -652,11 +778,11 @@ class McpClient:
         - tcp: 写入 TCP 连接的 writer
 
         【设计要点】
-        - 使用 getattr 获取 _tcp_writer，避免属性不存在的错误
+        - 写入流按传输类型直接取属性（均在 __init__ 声明）
         - 调用 drain() 确保数据已写入底层缓冲区
 
         【异常处理】
-        - McpServerUnavailableError: 写入流不可用
+        - McpServerUnavailableError: 未连接或写入流不可用
         """
         # 将字符串编码为字节（添加换行符）
         data = (line + "\n").encode()
@@ -667,17 +793,26 @@ class McpClient:
             w = self._proc.stdin if self._proc else None
             if w is None:
                 raise McpServerUnavailableError("stdio writer unavailable")
-            w.write(data)
-            # 刷新缓冲区（确保数据已写入）
-            await w.drain()
         elif self._transport == "tcp":
-            # TCP 模式：写入 TCP 连接的 writer
-            w = getattr(self, "_tcp_writer", None)
+            # TCP 模式：写入 TCP 连接的 writer（__init__ 已声明，直接访问）
+            w = self._tcp_writer
             if w is None:
                 raise McpServerUnavailableError("tcp writer unavailable")
+        else:
+            # 未连接过就调用：立即报清晰错误，而不是写不出去还傻等响应超时
+            raise McpServerUnavailableError("MCP client not connected")
+        # 【设计】对已死管道 write/drain 会抛 BrokenPipeError 等 OSError——
+        # 这也是连接断开的证据，统一折算成 Unavailable 并置熔断，
+        # 否则裸 OSError 会以 runtime_error 面目出现，误导模型"重试可能成功"
+        try:
             w.write(data)
-            # 刷新缓冲区（确保数据已发送）
+            # 刷新缓冲区（确保数据已写入/发送）
             await w.drain()
+        except OSError as exc:
+            self._offline = True
+            raise McpServerUnavailableError(
+                f"MCP server write failed (connection dead): {exc}"
+            ) from exc
 
     async def _read_line(self) -> str:
         """
@@ -689,7 +824,7 @@ class McpClient:
         【执行流程】
         1. 检查读取流是否可用
         2. 循环读取行：
-           - 设置 30 秒超时
+           - 设置读超时（默认 30 秒，可由配置调整）
            - 处理 LimitOverrunError（响应过大）
            - 如果读到空字节（EOF），抛出 McpServerUnavailableError
            - 解码并去除首尾空白
@@ -700,7 +835,7 @@ class McpClient:
         - McpServerUnavailableError: 读取流不可用、超时、连接断开、响应过大
 
         【设计要点】
-        - 设置 30 秒超时，防止无限等待
+        - 读超时由构造参数注入，EOF 与超流会置位熔断标记（超时不会）
         - 使用 asyncio.LimitOverrunError 处理过大响应
         - 跳过空行，仅 EOF（b""）才视为连接断开
         - 使用 decode(errors="replace") 处理编码错误
@@ -716,19 +851,27 @@ class McpClient:
         # 循环读取行（跳过空行）
         while True:
             try:
-                # 读取一行（30 秒超时）
-                data = await asyncio.wait_for(self._reader.readline(), timeout=30.0)
+                # 读取一行（超时时间由配置 read_timeout_sec 决定）
+                data = await asyncio.wait_for(
+                    self._reader.readline(), timeout=self._read_timeout
+                )
             except TimeoutError:
-                # 读取超时
-                raise McpServerUnavailableError("MCP server read timeout")
+                # 超时≠断线：请求可能仍在 server 侧执行完成，文案要提示结果未知
+                raise McpServerUnavailableError(
+                    f"MCP server read timeout after {self._read_timeout}s "
+                    "(result unknown; the tool may have completed on the server "
+                    "side, including its side effects)"
+                )
             except asyncio.LimitOverrunError as exc:
-                # 响应过大（超过流限制）
+                # 超限后流的分帧已不可信，等同于断线，置熔断
+                self._offline = True
                 raise McpServerUnavailableError(
                     f"MCP response too large (>{self._STREAM_LIMIT // 1024 // 1024}MB): {exc}"
                 ) from exc
-            
-            # 如果读到空字节（EOF），视为连接断开
+
+            # 如果读到空字节（EOF），视为连接断开并置熔断
             if data == b"":
+                self._offline = True
                 raise McpServerUnavailableError("MCP server closed connection")
             
             # 解码并去除首尾空白

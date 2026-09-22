@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -141,6 +142,7 @@ class BackgroundTaskRegistry:
         *,
         description: str = "",
         batch_id: str | None = None,
+        run_dir: str | None = None,
     ) -> None:
         """
         注册后台任务
@@ -153,21 +155,30 @@ class BackgroundTaskRegistry:
             context: ExecutionContext 对象，包含任务执行上下文
             description: 任务描述，用于展示和调试
             batch_id: 批次 ID，用于分组管理
+            run_dir: 任务的 events.jsonl 所在目录（prune 时随任务一起清理磁盘）
 
         实现步骤：
-        1. 将任务和上下文存储到 _tasks 字典
-        2. 创建任务元数据，记录创建时间、描述和批次 ID
+        1. 撞 run_id 时先取消旧任务——覆盖注册会让旧 Task 失联成
+           "没人能取消的后台 LLM 循环"，宁可显式拒绝式覆盖
+        2. 将任务和上下文存储到 _tasks 字典
+        3. 创建任务元数据，记录创建时间、描述和批次 ID
 
         使用示例：
             >>> task = asyncio.create_task(run_subagent())
             >>> registry.register("run-abc123", task, context, description="test")
         """
+        old = self._tasks.get(run_id)
+        if old is not None:
+            old_task, _ = old
+            if not old_task.done():
+                old_task.cancel(msg="replaced by re-register")
         self._tasks[run_id] = (task, context)
         self._task_meta[run_id] = {
             "created_at": _utcnow(),
             "description": description,
             "batch_id": batch_id,
             "started_at": _utcnow(),
+            "run_dir": run_dir,
         }
 
     def get(
@@ -246,11 +257,10 @@ class BackgroundTaskRegistry:
             return False
         task.cancel(msg=reason)
         self._task_meta[run_id]["cancelled_at"] = _utcnow()
-        try:
-            ctx.status = "cancelled"
-            ctx.reason = reason
-        except Exception:
-            pass
+        # ExecutionContext 是普通可写 dataclass，直接赋值；
+        # 旧的 try/except-pass 会把"状态没更新成功"这类真 bug 吞成静默
+        ctx.status = "cancelled"
+        ctx.reason = reason
         return True
 
     def cancel_batch(self, batch_id: str, *, reason: str = "batch cancelled") -> int:
@@ -435,6 +445,18 @@ class BackgroundTaskRegistry:
             results=results,
         )
 
+    def task_ids_in_batch(self, batch_id: str) -> list[str]:
+        """
+        列出挂名该批次且仍在本注册表中的 run_id
+
+        给批量工具的超时收尸路径用，替代外部直接翻 _tasks/_task_meta 私袋。
+        """
+        return [
+            rid
+            for rid, meta in self._task_meta.items()
+            if meta.get("batch_id") == batch_id and rid in self._tasks
+        ]
+
     def all_batch_ids(self) -> list[str]:
         """
         获取所有批次 ID
@@ -456,7 +478,8 @@ class BackgroundTaskRegistry:
         """
         清理过期任务
 
-        根据 TTL 清理已完成或已取消的任务，防止内存泄漏。
+        根据 TTL 清理已完成或已取消的任务，防止内存泄漏；
+        同时清理其 run_dir 磁盘目录与随之变空的批次记录。
 
         参数：
             ttl_override_sec: 自定义 TTL（秒），如果为 None 则使用默认值
@@ -466,15 +489,18 @@ class BackgroundTaskRegistry:
 
         实现步骤：
         1. 计算过期时间阈值（当前时间 - TTL）
-        2. 遍历所有任务
-        3. 跳过仍在运行的任务
-        4. 检查任务完成时间是否超过阈值
-        5. 如果超过阈值，删除任务和元数据
+        2. 遍历所有任务，跳过仍在运行的
+        3. 检查任务完成时间是否超过阈值；超过则删除任务、元数据与 run 目录
+        4. 批次收缩：run_ids 全被清掉的批次整体删除
 
         TTL 优先级：
         - cancelled_at（取消时间）优先
         - finished_at（完成时间）次之
         - created_at（创建时间）最后
+
+        【设计】旧实现只删 _tasks/_task_meta，_batches/_batch_meta 永远增长——
+        "防内存泄漏"机制在自己的另外两个字典上原地挖洞；且任务被清后
+        batch_status 会冒出一排 "unknown" 僵尸行。
 
         使用示例：
             >>> removed = registry.prune()
@@ -487,14 +513,28 @@ class BackgroundTaskRegistry:
         removed = 0
         for rid in list(self._tasks.keys()):
             task, _ctx = self._tasks[rid]
-            if not task.done() and not task.cancelled():
+            if not task.done():
                 continue
             meta = self._task_meta.get(rid, {})
             done_at = meta.get("cancelled_at") or meta.get("finished_at") or meta.get("created_at")
             if done_at is not None and done_at <= cutoff:
                 del self._tasks[rid]
                 self._task_meta.pop(rid, None)
+                run_dir = meta.get("run_dir")
+                if run_dir:
+                    # 后台 run 目录是注册表自己创建的东西，随任务同生命周期删除；
+                    # 前台 run 的目录属于会话调试产物，不归这里管
+                    shutil.rmtree(run_dir, ignore_errors=True)
                 removed += 1
+
+        # 批次收缩：任务列表清空的批次整体删除
+        for batch_id in list(self._batches.keys()):
+            alive = [rid for rid in self._batches[batch_id] if rid in self._tasks]
+            if alive:
+                self._batches[batch_id] = alive
+            else:
+                del self._batches[batch_id]
+                self._batch_meta.pop(batch_id, None)
         return removed
 
     # ── per-task finish hooks (called by SpawnAgentTool) ──────────────────
@@ -516,3 +556,27 @@ class BackgroundTaskRegistry:
             >>> registry.mark_finished("run-abc123")
         """
         self._task_meta.setdefault(run_id, {})["finished_at"] = _utcnow()
+
+    def meta(self, run_id: str) -> dict[str, Any] | None:
+        """
+        查询任务元数据副本
+
+        给 agent_result 等展示层取 created_at/description 用，
+        返回拷贝防止外部直接改内部状态。
+        """
+        meta = self._task_meta.get(run_id)
+        return dict(meta) if meta is not None else None
+
+    async def shutdown(self, *, reason: str = "registry shutdown") -> int:
+        """
+        关停：取消全部任务并等待收尸
+
+        daemon 退出路径调用。只 cancel 不等待的话，事件循环关闭时
+        未回收的任务会以 "Task was destroyed but it is pending" 收场，
+        子 Agent 的 EventWriter 也来不及关文件句柄。
+        """
+        cancelled = self.cancel_all(reason=reason)
+        pending = [task for task, _ctx in list(self._tasks.values()) if not task.done()]
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        return cancelled

@@ -22,7 +22,10 @@ class _SessionState:
     - session_id: str - 会话唯一标识符，用于区分不同会话
     - title: str - 会话标题，显示在标签页上
     - widgets: list[Widget] - 该会话的日志 widget 列表，切换会话时用于恢复显示
-    - auto_mode: str - 自动模式（off / read_only / on），控制 Agent 自主操作程度
+    - auto_mode: str - 自动模式（off / read_only / on），legacy 三态显示值
+    - permission_mode: str - 权限模式（default/acceptEdits/plan/auto/bypassPermissions），
+      新客户端以此为准，五态对齐 Claude Code，状态栏与模式切换以此为准
+    - trust: str - Layer 0 信任档（allow/deny/ask），daemon 在 session.create 回传
     - effort_level: str - 努力等级（minimal / low / medium / high / max），影响 token 消耗
     - model_preset: str - 模型预设（fast / balanced / powerful），决定使用的模型
     - busy: bool - 是否正在运行（执行中），用于防止重复提交
@@ -32,6 +35,7 @@ class _SessionState:
     - pending_permission_blocks: dict - 待处理的权限审批块映射，键为 block_id
     - subagent_run_ids: dict - 子 Agent 运行 ID 映射，跟踪子进程执行
     - subagent_start_times: dict - 子 Agent 开始时间映射，用于计算耗时
+    - active_run_id: str - 当前会话正在运行的 run ID，Esc 取消 / 运行中 steer 的定位依据
 
     【设计目的】
     每个会话有独立的 UI 状态，切换会话时保存当前状态并恢复目标会话状态。
@@ -55,8 +59,11 @@ class _SessionState:
     title: str = ""
     widgets: list[Widget] = field(default_factory=list)
     auto_mode: str = "off"
+    permission_mode: str = "default"
     effort_level: str = "medium"
     model_preset: str = "balanced"
+    # Layer 0 信任档（"allow"/"deny"/"ask"；daemon 在 session.create 回传生效值）
+    trust: str = "ask"
     busy: bool = False
     last_context_pct: float = 0.0
     current_llm: Any = None  # LLMStreamBlock | None
@@ -64,3 +71,5 @@ class _SessionState:
     pending_permission_blocks: dict[str, Any] = field(default_factory=dict)
     subagent_run_ids: dict[str, str] = field(default_factory=dict)
     subagent_start_times: dict[str, float] = field(default_factory=dict)
+    # 当前会话的活跃 run_id："" 表示无运行中任务；由 App._active_run_id 属性读写
+    active_run_id: str = ""

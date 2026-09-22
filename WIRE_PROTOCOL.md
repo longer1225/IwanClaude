@@ -21,6 +21,7 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
 
 ```json
 {
+  "description": "心跳检测命令 - 客户端向服务器发送心跳检测\n\n【字段说明】\n- type: Literal[\"core.ping\"] - 命令类型\n- client: str - 客户端标识\n\n【设计目的】\n检测服务器是否在线，获取服务器版本和运行时间。\n\n【响应】\nPongResult - 包含服务器版本、运行时间和接收时间",
   "properties": {
     "type": {
       "const": "core.ping",
@@ -64,6 +65,7 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
 
 ```json
 {
+  "description": "心跳检测响应 - 服务器返回的心跳响应\n\n【字段说明】\n- server_version: str - 服务器版本\n- uptime_ms: int - 服务器运行时间（毫秒）\n- received_at: str - 请求接收时间（ISO 8601）\n\n【设计目的】\n返回服务器状态信息，用于客户端健康检查。",
   "properties": {
     "server_version": {
       "title": "Server Version",
@@ -111,6 +113,7 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
 
 ```json
 {
+  "description": "Agent 运行命令 - 客户端请求运行 Agent\n\n【字段说明】\n- type: Literal[\"agent.run\"] - 命令类型\n- goal: str - 运行目标\n\n【设计目的】\n请求服务器运行 Agent，执行指定目标。\n\n【响应】\nAgentRunResult - 包含运行 ID",
   "properties": {
     "type": {
       "const": "agent.run",
@@ -139,7 +142,7 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
   "id": "u-2",
   "method": "agent.run",
   "params": {
-    "goal": "\u603b\u7ed3 README.md \u7684\u4e3b\u8981\u7ae0\u8282"
+    "goal": "总结 README.md 的主要章节"
   }
 }
 ```
@@ -152,6 +155,7 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
 
 ```json
 {
+  "description": "Agent 运行响应 - 服务器返回的运行响应\n\n【字段说明】\n- run_id: str - 运行 ID\n\n【设计目的】\n返回运行 ID，用于后续查询运行状态和事件。",
   "properties": {
     "run_id": {
       "title": "Run Id",
@@ -189,6 +193,7 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
 
 ```json
 {
+  "description": "事件订阅命令 - 客户端订阅服务器事件\n\n【字段说明】\n- type: Literal[\"event.subscribe\"] - 命令类型\n- topics: list[str] - 订阅主题列表（fnmatch 模式，如 [\"step.*\", \"tool.*\"]）\n- scope: str - 订阅范围（\"global\" | \"run:<run_id>\"，默认 \"global\"）\n- replay_from_run: str | None - 回放起始运行 ID（设置则先从 events.jsonl 回放历史再接实时流）\n\n【设计目的】\n订阅服务器事件，实现实时事件推送和历史事件回放。\n\n【响应】\nEventSubscribeResult - 包含订阅 ID 和回放事件数",
   "properties": {
     "type": {
       "const": "event.subscribe",
@@ -258,6 +263,7 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
 
 ```json
 {
+  "description": "事件订阅响应 - 服务器返回的订阅响应\n\n【字段说明】\n- subscription_id: str - 订阅 ID\n- replayed_count: int - 回放事件数（默认 0）\n\n【设计目的】\n返回订阅 ID 和回放事件数，用于客户端管理订阅。",
   "properties": {
     "subscription_id": {
       "title": "Subscription Id",
@@ -297,9 +303,12 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
 | `type` | `string` | no |
 | `mode` | `string` | no |
 | `title` | `string` | no |
+| `cwd` | `string` | no |
+| `trust_decision` | `string` | no |
 
 ```json
 {
+  "description": "会话创建命令 - 客户端请求创建会话\n\n【字段说明】\n- type: Literal[\"session.create\"] - 命令类型\n- mode: SessionMode - 会话模式（默认 \"chat\"）\n- title: str - 会话标题（默认空字符串）\n- cwd: str - 会话绑定的工作目录（沙箱根），实现多项目隔离\n- trust_decision: str - 客户端对信任询问的先行答复（\"allow\"/\"deny\"/\"ask\"，\n  \"\"=未表态走服务端流程）。CLI 信任对话框答复后重连创建会话时携带\n\n【cwd 的作用】\n每个会话可绑定独立的项目目录（类似 VS Code 的 workspace），\nAgent 的文件操作被限制在此目录内。\n- 在 D:/project-a 启动 TUI → 会话 A 的 cwd = D:/project-a\n- 在 E:/project-b 启动 TUI → 会话 B 的 cwd = E:/project-b\n- cwd 为空时使用 Core 启动时的 CWD 作为兜底\n\n【设计目的】\n创建新的会话，设置会话模式、标题和工作目录。\n\n【响应】\nSessionCreateResult - 包含会话 ID 和状态",
   "properties": {
     "type": {
       "const": "session.create",
@@ -319,6 +328,16 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
     "title": {
       "default": "",
       "title": "Title",
+      "type": "string"
+    },
+    "cwd": {
+      "default": "",
+      "title": "Cwd",
+      "type": "string"
+    },
+    "trust_decision": {
+      "default": "",
+      "title": "Trust Decision",
       "type": "string"
     }
   },
@@ -347,9 +366,15 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
 |---|---|---|
 | `session_id` | `string` | yes |
 | `status` | `string` | yes |
+| `auto_mode` | `string` | no |
+| `permission_mode` | `string` | no |
+| `effort_level` | `string` | no |
+| `model_preset` | `string` | no |
+| `trust` | `string` | no |
 
 ```json
 {
+  "description": "会话创建响应 - 服务器返回的会话创建响应\n\n【字段说明】\n- session_id: str - 会话 ID\n- status: SessionStatus - 会话状态\n- auto_mode: str - 当前自动模式（\"off\" / \"read_only\" / \"on\"，legacy 三态）\n- permission_mode: str - 当前权限模式（五态），新客户端应以此为准\n- effort_level: str - 当前努力等级（\"minimal\" / \"low\" / \"medium\" / \"high\" / \"max\"）\n- model_preset: str - 当前模型预设（\"fast\" / \"balanced\" / \"powerful\"）\n- trust: str - 该会话 cwd 生效的信任档（\"allow\"/\"deny\"/\"ask\"）\n\n【设计目的】\n返回会话 ID、状态和当前配置，用于客户端管理会话。",
   "properties": {
     "session_id": {
       "title": "Session Id",
@@ -358,10 +383,37 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
     "status": {
       "enum": [
         "active",
+        "running",
         "waiting_for_input",
+        "interrupted",
         "closed"
       ],
       "title": "Status",
+      "type": "string"
+    },
+    "auto_mode": {
+      "default": "off",
+      "title": "Auto Mode",
+      "type": "string"
+    },
+    "permission_mode": {
+      "default": "default",
+      "title": "Permission Mode",
+      "type": "string"
+    },
+    "effort_level": {
+      "default": "medium",
+      "title": "Effort Level",
+      "type": "string"
+    },
+    "model_preset": {
+      "default": "balanced",
+      "title": "Model Preset",
+      "type": "string"
+    },
+    "trust": {
+      "default": "ask",
+      "title": "Trust",
       "type": "string"
     }
   },
@@ -394,9 +446,12 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
 | `type` | `string` | no |
 | `session_id` | `string` | yes |
 | `content` | `string` | yes |
+| `skill_name` | `string` | no |
+| `skip_auto_skill` | `boolean` | no |
 
 ```json
 {
+  "description": "发送消息命令 - 客户端向会话发送消息\n\n【字段说明】\n- type: Literal[\"session.send_message\"] - 命令类型\n- session_id: str - 会话 ID\n- content: str - 消息内容\n- skill_name: str - 手动指定技能名称（TUI 确认后回传，空=不指定）\n- skip_auto_skill: bool - 跳过自动技能匹配（用户拒绝后回传 True）\n\n【设计目的】\n向指定会话发送消息，触发 Agent 运行。\n\n【skill_name 与 skip_auto_skill 的配合】\n- skill_name 非空 → 使用指定技能（用户已确认）\n- skip_auto_skill=True → 跳过自动匹配（用户拒绝），正常处理\n- 两者都为默认值 → 触发自动匹配预检查，若命中则返回 skill_match 待确认\n- content 以 \"/\" 开头 → 手动触发，与 skill_name 无关\n\n【响应】\nSessionSendMessageResult - 包含运行 ID 或技能匹配信息",
   "properties": {
     "type": {
       "const": "session.send_message",
@@ -411,6 +466,16 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
     "content": {
       "title": "Content",
       "type": "string"
+    },
+    "skill_name": {
+      "default": "",
+      "title": "Skill Name",
+      "type": "string"
+    },
+    "skip_auto_skill": {
+      "default": false,
+      "title": "Skip Auto Skill",
+      "type": "boolean"
     }
   },
   "required": [
@@ -431,7 +496,7 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
   "method": "session.send_message",
   "params": {
     "session_id": "sess-abc123def456",
-    "content": "\u603b\u7ed3 README.md"
+    "content": "总结 README.md"
   }
 }
 ```
@@ -440,19 +505,32 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
 
 | Field | Type | Required |
 |---|---|---|
-| `run_id` | `string` | yes |
+| `run_id` | `string` | no |
+| `skill_match` | `object | null` | no |
 
 ```json
 {
+  "description": "发送消息响应 - 服务器返回的发送消息响应\n\n【字段说明】\n- run_id: str - 运行 ID（空字符串表示未启动 run，如技能待确认）\n- skill_match: dict | None - 自动匹配到的技能信息（name/score/description），\n  非空时 TUI 应弹出确认控件，用户确认后重新发送\n\n【两种响应场景】\n1. 正常执行：run_id 非空，skill_match 为 None\n2. 技能待确认：run_id 为空，skill_match 包含匹配信息",
   "properties": {
     "run_id": {
+      "default": "",
       "title": "Run Id",
       "type": "string"
+    },
+    "skill_match": {
+      "anyOf": [
+        {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Skill Match"
     }
   },
-  "required": [
-    "run_id"
-  ],
   "title": "SessionSendMessageResult",
   "type": "object"
 }
@@ -479,6 +557,7 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
 
 ```json
 {
+  "description": "获取历史命令 - 客户端获取会话历史消息\n\n【字段说明】\n- type: Literal[\"session.get_history\"] - 命令类型\n- session_id: str - 会话 ID\n\n【设计目的】\n获取指定会话的历史消息，用于客户端显示聊天记录。\n\n【响应】\nSessionGetHistoryResult - 包含消息列表",
   "properties": {
     "type": {
       "const": "session.get_history",
@@ -507,6 +586,7 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
 
 ```json
 {
+  "description": "获取历史响应 - 服务器返回的历史消息响应\n\n【字段说明】\n- messages: list[dict[str, Any]] - 消息列表\n\n【设计目的】\n返回会话历史消息，用于客户端显示聊天记录。",
   "properties": {
     "messages": {
       "items": {
@@ -534,6 +614,7 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
 
 ```json
 {
+  "description": "关闭会话命令 - 客户端请求关闭会话\n\n【字段说明】\n- type: Literal[\"session.close\"] - 命令类型\n- session_id: str - 会话 ID\n\n【设计目的】\n关闭指定会话，释放相关资源。\n\n【响应】\nSessionCloseResult - 包含会话状态",
   "properties": {
     "type": {
       "const": "session.close",
@@ -562,11 +643,14 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
 
 ```json
 {
+  "description": "关闭会话响应 - 服务器返回的关闭会话响应\n\n【字段说明】\n- status: SessionStatus - 会话状态\n\n【设计目的】\n返回会话状态，用于客户端确认会话已关闭。",
   "properties": {
     "status": {
       "enum": [
         "active",
+        "running",
         "waiting_for_input",
+        "interrupted",
         "closed"
       ],
       "title": "Status",
@@ -577,6 +661,1526 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
     "status"
   ],
   "title": "SessionCloseResult",
+  "type": "object"
+}
+```
+
+### PermissionRespondCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `tool_use_id` | `string` | yes |
+| `decision` | `string` | yes |
+
+```json
+{
+  "description": "权限响应命令 - 客户端响应权限请求\n\n【字段说明】\n- type: Literal[\"permission.respond\"] - 命令类型\n- tool_use_id: str - 工具调用 ID\n- decision: str - 决策类型（\"allow_once\" | \"always_allow\" | \"deny_once\" | \"always_deny\"）\n\n【设计目的】\n响应服务器的权限请求，决定是否允许工具调用。\n\n【决策类型】\n- allow_once: 允许一次\n- always_allow: 始终允许（更新缓存）\n- deny_once: 拒绝一次\n- always_deny: 始终拒绝（更新缓存）\n\n【响应】\nPermissionRespondResult - 包含是否成功",
+  "properties": {
+    "type": {
+      "const": "permission.respond",
+      "default": "permission.respond",
+      "title": "Type",
+      "type": "string"
+    },
+    "tool_use_id": {
+      "title": "Tool Use Id",
+      "type": "string"
+    },
+    "decision": {
+      "title": "Decision",
+      "type": "string"
+    }
+  },
+  "required": [
+    "tool_use_id",
+    "decision"
+  ],
+  "title": "PermissionRespondCommand",
+  "type": "object"
+}
+```
+
+### PermissionRespondResult
+
+| Field | Type | Required |
+|---|---|---|
+| `ok` | `boolean` | no |
+
+```json
+{
+  "description": "权限响应结果 - 服务器返回的权限响应结果\n\n【字段说明】\n- ok: bool - 是否成功（默认 True）\n\n【设计目的】\n返回权限响应是否成功处理。",
+  "properties": {
+    "ok": {
+      "default": true,
+      "title": "Ok",
+      "type": "boolean"
+    }
+  },
+  "title": "PermissionRespondResult",
+  "type": "object"
+}
+```
+
+### TrustRespondCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `session_id` | `string` | yes |
+| `cwd` | `string` | no |
+| `decision` | `string` | yes |
+| `persistent` | `boolean` | no |
+
+```json
+{
+  "description": "信任响应命令 - 客户端答复信任询问（或主动变更某目录的信任档）\n\n【字段说明】\n- type: Literal[\"trust.respond\"] - 命令类型\n- session_id: str - 触发询问的会话 ID（立即对该会话生效）\n- cwd: str - 被决定的目录；空字符串 = 用该会话的 cwd\n- decision: str - \"allow\" | \"deny\" | \"ask\"（ask=撤销持久决定回到未决态）\n- persistent: bool - 是否写入 trust.toml（False=仅本次会话的临时决定）\n\n【设计目的】\n与 permission.respond 的关键差异：信任询问不阻塞执行，\n本命令随时可发、去抖不发也无妨——它改的是\"以后的规则\"，\n不是\"这一次的放行\"。",
+  "properties": {
+    "type": {
+      "const": "trust.respond",
+      "default": "trust.respond",
+      "title": "Type",
+      "type": "string"
+    },
+    "session_id": {
+      "title": "Session Id",
+      "type": "string"
+    },
+    "cwd": {
+      "default": "",
+      "title": "Cwd",
+      "type": "string"
+    },
+    "decision": {
+      "title": "Decision",
+      "type": "string"
+    },
+    "persistent": {
+      "default": true,
+      "title": "Persistent",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "session_id",
+    "decision"
+  ],
+  "title": "TrustRespondCommand",
+  "type": "object"
+}
+```
+
+### TrustRespondResult
+
+| Field | Type | Required |
+|---|---|---|
+| `ok` | `boolean` | no |
+| `trust` | `string` | no |
+
+```json
+{
+  "description": "信任响应结果 - 服务器返回的生效信任档\n\n【字段说明】\n- ok: bool - 是否成功处理（decision 非法时为 False）\n- trust: str - 该会话现在的生效信任档（\"allow\"/\"deny\"/\"ask\"）",
+  "properties": {
+    "ok": {
+      "default": true,
+      "title": "Ok",
+      "type": "boolean"
+    },
+    "trust": {
+      "default": "ask",
+      "title": "Trust",
+      "type": "string"
+    }
+  },
+  "title": "TrustRespondResult",
+  "type": "object"
+}
+```
+
+### TrustListCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+
+```json
+{
+  "description": "信任列表命令 - 客户端查询全部持久信任条目\n\n【字段说明】\n- type: Literal[\"trust.list\"] - 命令类型\n\n【响应】\nTrustListResult - 归一化目录键 → 决定 的映射",
+  "properties": {
+    "type": {
+      "const": "trust.list",
+      "default": "trust.list",
+      "title": "Type",
+      "type": "string"
+    }
+  },
+  "title": "TrustListCommand",
+  "type": "object"
+}
+```
+
+### TrustListResult
+
+| Field | Type | Required |
+|---|---|---|
+| `entries` | `object` | no |
+
+```json
+{
+  "description": "信任列表结果\n\n【字段说明】\n- entries: dict[str, str] - 归一化目录键 → \"allow\"/\"deny\"",
+  "properties": {
+    "entries": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "default": {},
+      "title": "Entries",
+      "type": "object"
+    }
+  },
+  "title": "TrustListResult",
+  "type": "object"
+}
+```
+
+### TrustRevokeCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `cwd` | `string` | yes |
+
+```json
+{
+  "description": "信任撤销命令 - 删除某目录的持久信任决定（回到未决态）\n\n【字段说明】\n- type: Literal[\"trust.revoke\"] - 命令类型\n- cwd: str - 目标目录（与 trust.toml 键做同样的归一化后再比对）\n\n【响应】\nTrustRevokeResult - ok=是否确实删掉了条目",
+  "properties": {
+    "type": {
+      "const": "trust.revoke",
+      "default": "trust.revoke",
+      "title": "Type",
+      "type": "string"
+    },
+    "cwd": {
+      "title": "Cwd",
+      "type": "string"
+    }
+  },
+  "required": [
+    "cwd"
+  ],
+  "title": "TrustRevokeCommand",
+  "type": "object"
+}
+```
+
+### TrustRevokeResult
+
+| Field | Type | Required |
+|---|---|---|
+| `ok` | `boolean` | no |
+
+```json
+{
+  "description": "信任撤销结果\n\n【字段说明】\n- ok: bool - 是否删掉了既有条目（目录本就无记录时 False）",
+  "properties": {
+    "ok": {
+      "default": true,
+      "title": "Ok",
+      "type": "boolean"
+    }
+  },
+  "title": "TrustRevokeResult",
+  "type": "object"
+}
+```
+
+### FileChangesListCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `session_id` | `string` | yes |
+| `run_id` | `string` | no |
+
+```json
+{
+  "description": "文件变更清单命令 - 查询某次 run 被影子快照记录的文件变更（S9 Part C）\n\n【字段说明】\n- type: Literal[\"files.changes\"] - 命令类型\n- session_id: str - 会话 ID\n- run_id: str - 目标 run；空字符串 = 该会话最近一次有变更账本的 run\n\n【响应】\nFileChangesListResult - 每个文件一行：工具/时间/是否新建/是否拍全/外部改动冲突",
+  "properties": {
+    "type": {
+      "const": "files.changes",
+      "default": "files.changes",
+      "title": "Type",
+      "type": "string"
+    },
+    "session_id": {
+      "title": "Session Id",
+      "type": "string"
+    },
+    "run_id": {
+      "default": "",
+      "title": "Run Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "session_id"
+  ],
+  "title": "FileChangesListCommand",
+  "type": "object"
+}
+```
+
+### FileChangeInfo
+
+| Field | Type | Required |
+|---|---|---|
+| `path` | `string` | yes |
+| `tool` | `string` | no |
+| `ts` | `string` | no |
+| `was_new` | `boolean` | no |
+| `captured` | `boolean` | no |
+| `conflict` | `boolean` | no |
+
+```json
+{
+  "description": "单文件变更条目 - files.changes 结果里的行模型\n\n【字段说明】\n- path: str - 工具当时使用的路径原样\n- tool: str - 产生变更的工具名\n- ts: str - 变更前捕获时间（ISO 8601）\n- was_new: bool - 写前不存在（还原 = 删除）\n- captured: bool - 快照是否拍全（False=超限/读不了，无法还原）\n- conflict: bool - 盘上当前内容 != 我们写完时的样子（被外部改过）",
+  "properties": {
+    "path": {
+      "title": "Path",
+      "type": "string"
+    },
+    "tool": {
+      "default": "",
+      "title": "Tool",
+      "type": "string"
+    },
+    "ts": {
+      "default": "",
+      "title": "Ts",
+      "type": "string"
+    },
+    "was_new": {
+      "default": false,
+      "title": "Was New",
+      "type": "boolean"
+    },
+    "captured": {
+      "default": true,
+      "title": "Captured",
+      "type": "boolean"
+    },
+    "conflict": {
+      "default": false,
+      "title": "Conflict",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "path"
+  ],
+  "title": "FileChangeInfo",
+  "type": "object"
+}
+```
+
+### FileChangesListResult
+
+| Field | Type | Required |
+|---|---|---|
+| `run_id` | `string` | no |
+| `changes` | `array` | no |
+
+```json
+{
+  "$defs": {
+    "FileChangeInfo": {
+      "description": "单文件变更条目 - files.changes 结果里的行模型\n\n【字段说明】\n- path: str - 工具当时使用的路径原样\n- tool: str - 产生变更的工具名\n- ts: str - 变更前捕获时间（ISO 8601）\n- was_new: bool - 写前不存在（还原 = 删除）\n- captured: bool - 快照是否拍全（False=超限/读不了，无法还原）\n- conflict: bool - 盘上当前内容 != 我们写完时的样子（被外部改过）",
+      "properties": {
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "tool": {
+          "default": "",
+          "title": "Tool",
+          "type": "string"
+        },
+        "ts": {
+          "default": "",
+          "title": "Ts",
+          "type": "string"
+        },
+        "was_new": {
+          "default": false,
+          "title": "Was New",
+          "type": "boolean"
+        },
+        "captured": {
+          "default": true,
+          "title": "Captured",
+          "type": "boolean"
+        },
+        "conflict": {
+          "default": false,
+          "title": "Conflict",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "title": "FileChangeInfo",
+      "type": "object"
+    }
+  },
+  "description": "文件变更清单结果\n\n【字段说明】\n- run_id: str - 实际列出的是哪次 run 的账本（请求空 run_id 时由服务端选定）\n- changes: list[FileChangeInfo] - 按文件归并后的最近状态",
+  "properties": {
+    "run_id": {
+      "default": "",
+      "title": "Run Id",
+      "type": "string"
+    },
+    "changes": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/FileChangeInfo"
+      },
+      "title": "Changes",
+      "type": "array"
+    }
+  },
+  "title": "FileChangesListResult",
+  "type": "object"
+}
+```
+
+### FileRestoreCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `session_id` | `string` | yes |
+| `run_id` | `string` | no |
+| `paths` | `array` | no |
+| `force` | `boolean` | no |
+
+```json
+{
+  "description": "文件还原命令 - 把选中文件回滚到该 run 变更前状态（S9 Part C）\n\n【字段说明】\n- type: Literal[\"files.restore\"] - 命令类型\n- session_id: str - 会话 ID\n- run_id: str - 目标 run；空 = 最近一次有账本的 run（与 files.changes 同规则）\n- paths: list[str] - 要还原的文件（[\"*\"] = 全部）\n- force: bool - 冲突文件（还原后又被外部改过）是否强还原；默认跳过\n\n【设计目的】\n还原前先给\"当前内容\"记一次反向快照（tool=\"restore\"），还原本身可撤销——\n与对话回溯是两个独立操作，用户明确选择要回滚哪个（避免 undo 语义模糊）。",
+  "properties": {
+    "type": {
+      "const": "files.restore",
+      "default": "files.restore",
+      "title": "Type",
+      "type": "string"
+    },
+    "session_id": {
+      "title": "Session Id",
+      "type": "string"
+    },
+    "run_id": {
+      "default": "",
+      "title": "Run Id",
+      "type": "string"
+    },
+    "paths": {
+      "default": [
+        "*"
+      ],
+      "items": {
+        "type": "string"
+      },
+      "title": "Paths",
+      "type": "array"
+    },
+    "force": {
+      "default": false,
+      "title": "Force",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "session_id"
+  ],
+  "title": "FileRestoreCommand",
+  "type": "object"
+}
+```
+
+### FileRestoreItem
+
+| Field | Type | Required |
+|---|---|---|
+| `path` | `string` | yes |
+| `status` | `string` | yes |
+| `detail` | `string` | no |
+
+```json
+{
+  "description": "单文件还原结果行\n\n【字段说明】\n- path: str - 文件路径\n- status: str - \"restored\" | \"skipped\"（冲突未 force） | \"failed\"（没快照/写盘错误）\n- detail: str - 跳过/失败原因",
+  "properties": {
+    "path": {
+      "title": "Path",
+      "type": "string"
+    },
+    "status": {
+      "title": "Status",
+      "type": "string"
+    },
+    "detail": {
+      "default": "",
+      "title": "Detail",
+      "type": "string"
+    }
+  },
+  "required": [
+    "path",
+    "status"
+  ],
+  "title": "FileRestoreItem",
+  "type": "object"
+}
+```
+
+### FileRestoreResult
+
+| Field | Type | Required |
+|---|---|---|
+| `ok` | `boolean` | no |
+| `run_id` | `string` | no |
+| `results` | `array` | no |
+
+```json
+{
+  "$defs": {
+    "FileRestoreItem": {
+      "description": "单文件还原结果行\n\n【字段说明】\n- path: str - 文件路径\n- status: str - \"restored\" | \"skipped\"（冲突未 force） | \"failed\"（没快照/写盘错误）\n- detail: str - 跳过/失败原因",
+      "properties": {
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "status": {
+          "title": "Status",
+          "type": "string"
+        },
+        "detail": {
+          "default": "",
+          "title": "Detail",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "status"
+      ],
+      "title": "FileRestoreItem",
+      "type": "object"
+    }
+  },
+  "description": "文件还原结果\n\n【字段说明】\n- ok: bool - 是否全部成功（有 skipped/failed 即 False）\n- run_id: str - 实际作用的 run\n- results: list[FileRestoreItem] - 逐文件结果",
+  "properties": {
+    "ok": {
+      "default": true,
+      "title": "Ok",
+      "type": "boolean"
+    },
+    "run_id": {
+      "default": "",
+      "title": "Run Id",
+      "type": "string"
+    },
+    "results": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/FileRestoreItem"
+      },
+      "title": "Results",
+      "type": "array"
+    }
+  },
+  "title": "FileRestoreResult",
+  "type": "object"
+}
+```
+
+### SessionSetAutoModeCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `session_id` | `string` | yes |
+| `mode` | `string` | yes |
+
+```json
+{
+  "description": "设置自动模式命令 - 客户端请求设置会话的自动模式\n\n【字段说明】\n- type: Literal[\"session.set_auto_mode\"] - 命令类型\n- session_id: str - 会话 ID\n- mode: str - 自动模式（\"off\" / \"read_only\" / \"on\"）\n\n【设计目的】\n允许客户端动态切换自动模式，控制是否自动批准低风险工具调用。\n\n【响应】\nSessionSetAutoModeResult - 包含设置后的模式",
+  "properties": {
+    "type": {
+      "const": "session.set_auto_mode",
+      "default": "session.set_auto_mode",
+      "title": "Type",
+      "type": "string"
+    },
+    "session_id": {
+      "title": "Session Id",
+      "type": "string"
+    },
+    "mode": {
+      "title": "Mode",
+      "type": "string"
+    }
+  },
+  "required": [
+    "session_id",
+    "mode"
+  ],
+  "title": "SessionSetAutoModeCommand",
+  "type": "object"
+}
+```
+
+### SessionSetAutoModeResult
+
+| Field | Type | Required |
+|---|---|---|
+| `mode` | `string` | yes |
+
+```json
+{
+  "description": "设置自动模式响应 - 服务器返回的设置结果\n\n【字段说明】\n- mode: str - 当前自动模式\n\n【设计目的】\n返回设置后的自动模式，用于客户端同步状态。",
+  "properties": {
+    "mode": {
+      "title": "Mode",
+      "type": "string"
+    }
+  },
+  "required": [
+    "mode"
+  ],
+  "title": "SessionSetAutoModeResult",
+  "type": "object"
+}
+```
+
+### SessionSetPermissionModeCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `session_id` | `string` | yes |
+| `mode` | `string` | yes |
+
+```json
+{
+  "description": "设置权限模式命令 - 客户端请求切换某会话的五态权限模式\n\n【字段说明】\n- type: Literal[\"session.set_permission_mode\"] - 命令类型\n- session_id: str - 会话 ID\n- mode: str - 权限模式（default/acceptEdits/plan/auto/bypassPermissions）\n\n【设计目的】\n对齐 Claude Code 的 Shift+Tab 模式循环：模式是 per-session 的策略档，\n取代旧的三态 auto_mode（后者保留一版兼容映射）。切换只改写审批链的\nTier3~6，deny 地板/强制 ASK/hook 永远不受模式影响。\n\n【响应】\nSessionSetPermissionModeResult - 包含切换前后两个模式，便于客户端回显",
+  "properties": {
+    "type": {
+      "const": "session.set_permission_mode",
+      "default": "session.set_permission_mode",
+      "title": "Type",
+      "type": "string"
+    },
+    "session_id": {
+      "title": "Session Id",
+      "type": "string"
+    },
+    "mode": {
+      "title": "Mode",
+      "type": "string"
+    }
+  },
+  "required": [
+    "session_id",
+    "mode"
+  ],
+  "title": "SessionSetPermissionModeCommand",
+  "type": "object"
+}
+```
+
+### SessionSetPermissionModeResult
+
+| Field | Type | Required |
+|---|---|---|
+| `mode` | `string` | yes |
+| `previous_mode` | `string` | yes |
+
+```json
+{
+  "description": "设置权限模式响应 - 服务器返回的切换结果\n\n【字段说明】\n- mode: str - 切换后的生效模式\n- previous_mode: str - 切换前的模式（供客户端展示\"从哪来\"）\n\n【设计目的】\n返回前后两个值而非只返回新值：多端连接同一会话时，发起端需要知道\nprevious 才能正确回滚 UI 状态（另一台机器已经抢先切过模式的情况）。",
+  "properties": {
+    "mode": {
+      "title": "Mode",
+      "type": "string"
+    },
+    "previous_mode": {
+      "title": "Previous Mode",
+      "type": "string"
+    }
+  },
+  "required": [
+    "mode",
+    "previous_mode"
+  ],
+  "title": "SessionSetPermissionModeResult",
+  "type": "object"
+}
+```
+
+### SessionSetEffortLevelCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `session_id` | `string` | yes |
+| `level` | `string` | yes |
+
+```json
+{
+  "description": "设置努力等级命令 - 客户端请求设置会话的努力等级\n\n【字段说明】\n- type: Literal[\"session.set_effort_level\"] - 命令类型\n- session_id: str - 会话 ID\n- level: str - 努力等级（\"minimal\" / \"low\" / \"medium\" / \"high\" / \"max\"）\n\n【设计目的】\n允许客户端动态切换努力等级，控制 Agent 执行深度。\n等级越高，Agent 会读更多文件、做更多验证、搜索更深。\n\n【响应】\nSessionSetEffortLevelResult - 包含设置后的等级",
+  "properties": {
+    "type": {
+      "const": "session.set_effort_level",
+      "default": "session.set_effort_level",
+      "title": "Type",
+      "type": "string"
+    },
+    "session_id": {
+      "title": "Session Id",
+      "type": "string"
+    },
+    "level": {
+      "title": "Level",
+      "type": "string"
+    }
+  },
+  "required": [
+    "session_id",
+    "level"
+  ],
+  "title": "SessionSetEffortLevelCommand",
+  "type": "object"
+}
+```
+
+### SessionSetEffortLevelResult
+
+| Field | Type | Required |
+|---|---|---|
+| `level` | `string` | yes |
+
+```json
+{
+  "description": "设置努力等级响应 - 服务器返回的设置结果\n\n【字段说明】\n- level: str - 当前努力等级\n\n【设计目的】\n返回设置后的努力等级，用于客户端同步状态。",
+  "properties": {
+    "level": {
+      "title": "Level",
+      "type": "string"
+    }
+  },
+  "required": [
+    "level"
+  ],
+  "title": "SessionSetEffortLevelResult",
+  "type": "object"
+}
+```
+
+### SessionSetModelCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `session_id` | `string` | yes |
+| `preset` | `string` | yes |
+
+```json
+{
+  "description": "设置模型预设命令 - 客户端请求设置会话的模型预设\n\n【字段说明】\n- type: Literal[\"session.set_model\"] - 命令类型\n- session_id: str - 会话 ID\n- preset: str - 模型预设（\"fast\" / \"balanced\" / \"powerful\"）\n\n【设计目的】\n允许客户端动态切换模型预设，控制 Agent 使用哪个 LLM 模型。\n切换后，下一次 Agent run 会使用新预设对应的模型。\n\n【响应】\nSessionSetModelResult - 包含设置后的预设",
+  "properties": {
+    "type": {
+      "const": "session.set_model",
+      "default": "session.set_model",
+      "title": "Type",
+      "type": "string"
+    },
+    "session_id": {
+      "title": "Session Id",
+      "type": "string"
+    },
+    "preset": {
+      "title": "Preset",
+      "type": "string"
+    }
+  },
+  "required": [
+    "session_id",
+    "preset"
+  ],
+  "title": "SessionSetModelCommand",
+  "type": "object"
+}
+```
+
+### SessionSetModelResult
+
+| Field | Type | Required |
+|---|---|---|
+| `preset` | `string` | yes |
+
+```json
+{
+  "description": "设置模型预设响应 - 服务器返回的设置结果\n\n【字段说明】\n- preset: str - 当前模型预设\n\n【设计目的】\n返回设置后的模型预设，用于客户端同步状态。",
+  "properties": {
+    "preset": {
+      "title": "Preset",
+      "type": "string"
+    }
+  },
+  "required": [
+    "preset"
+  ],
+  "title": "SessionSetModelResult",
+  "type": "object"
+}
+```
+
+### SessionSetEngineCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `session_id` | `string` | yes |
+| `engine` | `string` | yes |
+
+```json
+{
+  "description": "设置 Agent 引擎命令 - 客户端请求动态切换执行引擎\n\n【字段说明】\n- type: Literal[\"session.set_engine\"] - 命令类型\n- session_id: str - 会话 ID\n- engine: str - 引擎名称（legacy / langgraph / plan_execute / debate / pipeline / auto）\n\n【设计目的】\n允许客户端在运行时动态切换 Agent 引擎，无需重启 core。\n不同引擎适合不同任务：legacy（简单）、langgraph（ReAct）、plan_execute（规划执行）、\ndebate（辩论）、pipeline（多角色流水线）。\n\n【响应】\nSessionSetEngineResult - 包含设置后的引擎名称",
+  "properties": {
+    "type": {
+      "const": "session.set_engine",
+      "default": "session.set_engine",
+      "title": "Type",
+      "type": "string"
+    },
+    "session_id": {
+      "title": "Session Id",
+      "type": "string"
+    },
+    "engine": {
+      "title": "Engine",
+      "type": "string"
+    }
+  },
+  "required": [
+    "session_id",
+    "engine"
+  ],
+  "title": "SessionSetEngineCommand",
+  "type": "object"
+}
+```
+
+### SessionSetEngineResult
+
+| Field | Type | Required |
+|---|---|---|
+| `engine` | `string` | yes |
+
+```json
+{
+  "description": "设置引擎响应 - 服务器返回的设置结果\n\n【字段说明】\n- engine: str - 当前引擎名称",
+  "properties": {
+    "engine": {
+      "title": "Engine",
+      "type": "string"
+    }
+  },
+  "required": [
+    "engine"
+  ],
+  "title": "SessionSetEngineResult",
+  "type": "object"
+}
+```
+
+### RunCancelCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `run_id` | `string` | yes |
+
+```json
+{
+  "description": "运行取消命令 - 客户端请求中断一个正在执行的 run\n\n【字段说明】\n- type: Literal[\"run.cancel\"] - 命令类型\n- run_id: str - 要取消的运行 ID\n\n【设计目的】\nClaude Code 里对应\"Esc 中断当前 turn\"。daemon 端按 run_id 找到运行任务并\n取消：工具执行/LLM 流式输出被打断，已产生的消息仍会写入会话历史，\nRunFinishedEvent 以 status=failed / reason=cancelled 收尾。\n取消是幂等的：run 已结束或不存在时 accepted=False，不报错。\n\n【响应】\nRunCancelResult - accepted 表示是否命中了一个活跃 run",
+  "properties": {
+    "type": {
+      "const": "run.cancel",
+      "default": "run.cancel",
+      "title": "Type",
+      "type": "string"
+    },
+    "run_id": {
+      "title": "Run Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "run_id"
+  ],
+  "title": "RunCancelCommand",
+  "type": "object"
+}
+```
+
+**Example:**
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "u-6",
+  "method": "run.cancel",
+  "params": {
+    "type": "run.cancel",
+    "run_id": "20260516-100000-abc123"
+  }
+}
+```
+
+### RunCancelResult
+
+| Field | Type | Required |
+|---|---|---|
+| `accepted` | `boolean` | yes |
+
+```json
+{
+  "description": "取消响应 - accepted 表示取消请求是否命中活跃 run\n\n【字段说明】\n- accepted: bool - 是否找到并取消了该 run（False=已结束/不存在）",
+  "properties": {
+    "accepted": {
+      "title": "Accepted",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "accepted"
+  ],
+  "title": "RunCancelResult",
+  "type": "object"
+}
+```
+
+**Example:**
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "u-6",
+  "result": {
+    "accepted": true
+  }
+}
+```
+
+### RunSteerCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `run_id` | `string` | yes |
+| `message` | `string` | yes |
+
+```json
+{
+  "description": "运行中修正命令 - 用户在 run 执行期间注入一条修正意见\n\n【字段说明】\n- type: Literal[\"run.steer\"] - 命令类型\n- run_id: str - 目标运行 ID\n- message: str - 修正内容（如\"方向错了，改用 asyncio\"）\n\n【设计目的】\nClaude Code 里对应\"运行中直接打字改向\"（in-flight steering）。\ndaemon 端把消息排进该 run 的 steering 队列，Agent 在下一次调用 LLM 前\n把它作为 user 消息注入对话，模型即刻看到并调整方向。\n不中断当前正在执行的工具调用——队列消费发生在回合边界。\n\n【响应】\nRunSteerResult - accepted 表示是否命中活跃 run；未命中时客户端应改发 send_message",
+  "properties": {
+    "type": {
+      "const": "run.steer",
+      "default": "run.steer",
+      "title": "Type",
+      "type": "string"
+    },
+    "run_id": {
+      "title": "Run Id",
+      "type": "string"
+    },
+    "message": {
+      "title": "Message",
+      "type": "string"
+    }
+  },
+  "required": [
+    "run_id",
+    "message"
+  ],
+  "title": "RunSteerCommand",
+  "type": "object"
+}
+```
+
+**Example:**
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "u-7",
+  "method": "run.steer",
+  "params": {
+    "type": "run.steer",
+    "run_id": "20260516-100000-abc123",
+    "message": "方向错了，改用 asyncio"
+  }
+}
+```
+
+### RunSteerResult
+
+| Field | Type | Required |
+|---|---|---|
+| `accepted` | `boolean` | yes |
+| `queued` | `integer` | no |
+
+```json
+{
+  "description": "修正入队响应 - accepted 表示消息是否成功排进活跃 run 队列\n\n【字段说明】\n- accepted: bool - 是否命中活跃 run\n- queued: int - 该 run 当前积压的修正消息数（含本条）",
+  "properties": {
+    "accepted": {
+      "title": "Accepted",
+      "type": "boolean"
+    },
+    "queued": {
+      "default": 0,
+      "title": "Queued",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "accepted"
+  ],
+  "title": "RunSteerResult",
+  "type": "object"
+}
+```
+
+**Example:**
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "u-7",
+  "result": {
+    "accepted": true,
+    "queued": 1
+  }
+}
+```
+
+### SessionListCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+
+```json
+{
+  "description": "会话列表命令 - 客户端请求列出所有会话\n\n【字段说明】\n- type: Literal[\"session.list\"] - 命令类型\n\n【设计目的】\n允许客户端获取所有会话的列表，\n用于 TUI 标签页显示和会话切换。\n\n【响应】\nSessionListResult - 包含会话列表",
+  "properties": {
+    "type": {
+      "const": "session.list",
+      "default": "session.list",
+      "title": "Type",
+      "type": "string"
+    }
+  },
+  "title": "SessionListCommand",
+  "type": "object"
+}
+```
+
+### SessionInfo
+
+| Field | Type | Required |
+|---|---|---|
+| `id` | `string` | yes |
+| `title` | `string` | yes |
+| `status` | `string` | yes |
+| `mode` | `string` | yes |
+| `updated_at` | `string` | yes |
+
+```json
+{
+  "description": "会话信息 - 会话列表中的单个会话信息\n\n【字段说明】\n- id: str - 会话 ID\n- title: str - 会话标题\n- status: str - 会话状态（active / waiting_for_input / closed）\n- mode: str - 会话模式（one_shot / chat）\n- updated_at: str - 最后更新时间\n\n【设计目的】\n轻量级的会话信息，用于列表展示，\n不包含完整消息历史以减少传输量。",
+  "properties": {
+    "id": {
+      "title": "Id",
+      "type": "string"
+    },
+    "title": {
+      "title": "Title",
+      "type": "string"
+    },
+    "status": {
+      "title": "Status",
+      "type": "string"
+    },
+    "mode": {
+      "title": "Mode",
+      "type": "string"
+    },
+    "updated_at": {
+      "title": "Updated At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "id",
+    "title",
+    "status",
+    "mode",
+    "updated_at"
+  ],
+  "title": "SessionInfo",
+  "type": "object"
+}
+```
+
+### SessionListResult
+
+| Field | Type | Required |
+|---|---|---|
+| `sessions` | `array` | yes |
+
+```json
+{
+  "$defs": {
+    "SessionInfo": {
+      "description": "会话信息 - 会话列表中的单个会话信息\n\n【字段说明】\n- id: str - 会话 ID\n- title: str - 会话标题\n- status: str - 会话状态（active / waiting_for_input / closed）\n- mode: str - 会话模式（one_shot / chat）\n- updated_at: str - 最后更新时间\n\n【设计目的】\n轻量级的会话信息，用于列表展示，\n不包含完整消息历史以减少传输量。",
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "status": {
+          "title": "Status",
+          "type": "string"
+        },
+        "mode": {
+          "title": "Mode",
+          "type": "string"
+        },
+        "updated_at": {
+          "title": "Updated At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "status",
+        "mode",
+        "updated_at"
+      ],
+      "title": "SessionInfo",
+      "type": "object"
+    }
+  },
+  "description": "会话列表响应 - 服务器返回的会话列表\n\n【字段说明】\n- sessions: list[SessionInfo] - 会话列表，按更新时间倒序排列\n\n【设计目的】\n返回所有会话的摘要信息，\n用于 TUI 标签页显示和会话切换。",
+  "properties": {
+    "sessions": {
+      "items": {
+        "$ref": "#/$defs/SessionInfo"
+      },
+      "title": "Sessions",
+      "type": "array"
+    }
+  },
+  "required": [
+    "sessions"
+  ],
+  "title": "SessionListResult",
+  "type": "object"
+}
+```
+
+### SessionRenameCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `session_id` | `string` | yes |
+| `title` | `string` | yes |
+
+```json
+{
+  "description": "重命名会话命令 - 客户端请求重命名会话标题\n\n【字段说明】\n- type: Literal[\"session.rename\"] - 命令类型\n- session_id: str - 会话 ID\n- title: str - 新的会话标题\n\n【设计目的】\n允许用户自定义会话标题，\n便于在多标签中识别不同会话。\n\n【响应】\nSessionRenameResult - 包含重命名后的会话信息",
+  "properties": {
+    "type": {
+      "const": "session.rename",
+      "default": "session.rename",
+      "title": "Type",
+      "type": "string"
+    },
+    "session_id": {
+      "title": "Session Id",
+      "type": "string"
+    },
+    "title": {
+      "title": "Title",
+      "type": "string"
+    }
+  },
+  "required": [
+    "session_id",
+    "title"
+  ],
+  "title": "SessionRenameCommand",
+  "type": "object"
+}
+```
+
+### SessionRenameResult
+
+| Field | Type | Required |
+|---|---|---|
+| `session_id` | `string` | yes |
+| `title` | `string` | yes |
+
+```json
+{
+  "description": "重命名会话响应 - 服务器返回的重命名结果\n\n【字段说明】\n- session_id: str - 会话 ID\n- title: str - 新的会话标题\n\n【设计目的】\n返回重命名后的会话信息，\n用于客户端同步标签页标题。",
+  "properties": {
+    "session_id": {
+      "title": "Session Id",
+      "type": "string"
+    },
+    "title": {
+      "title": "Title",
+      "type": "string"
+    }
+  },
+  "required": [
+    "session_id",
+    "title"
+  ],
+  "title": "SessionRenameResult",
+  "type": "object"
+}
+```
+
+### SessionCompactCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `session_id` | `string` | yes |
+| `focus` | `string` | no |
+
+```json
+{
+  "description": "上下文压缩命令 - 客户端请求压缩会话上下文\n\n【字段说明】\n- type: Literal[\"session.compact\"] - 命令类型\n- session_id: str - 会话 ID\n- focus: str - 压缩焦点（默认空字符串）\n\n【设计目的】\n压缩会话上下文，减少令牌消耗，延长对话长度。\n\n【响应】\nSessionCompactResult - 包含压缩后的令牌数和节省的令牌数",
+  "properties": {
+    "type": {
+      "const": "session.compact",
+      "default": "session.compact",
+      "title": "Type",
+      "type": "string"
+    },
+    "session_id": {
+      "title": "Session Id",
+      "type": "string"
+    },
+    "focus": {
+      "default": "",
+      "title": "Focus",
+      "type": "string"
+    }
+  },
+  "required": [
+    "session_id"
+  ],
+  "title": "SessionCompactCommand",
+  "type": "object"
+}
+```
+
+### SessionCompactResult
+
+| Field | Type | Required |
+|---|---|---|
+| `summary_tokens` | `integer` | yes |
+| `saved_tokens` | `integer` | yes |
+
+```json
+{
+  "description": "上下文压缩响应 - 服务器返回的上下文压缩响应\n\n【字段说明】\n- summary_tokens: int - 压缩后的令牌数\n- saved_tokens: int - 节省的令牌数\n\n【设计目的】\n返回压缩结果，用于客户端显示压缩效果。",
+  "properties": {
+    "summary_tokens": {
+      "title": "Summary Tokens",
+      "type": "integer"
+    },
+    "saved_tokens": {
+      "title": "Saved Tokens",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "summary_tokens",
+    "saved_tokens"
+  ],
+  "title": "SessionCompactResult",
+  "type": "object"
+}
+```
+
+### SessionCheckpointListCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `session_id` | `string` | yes |
+
+```json
+{
+  "description": "检查点列表命令 - 客户端获取会话检查点列表\n\n【字段说明】\n- type: Literal[\"session.checkpoint.list\"] - 命令类型\n- session_id: str - 会话 ID\n\n【设计目的】\n获取会话的检查点列表，用于客户端显示和选择检查点。\n\n【响应】\nSessionCheckpointListResult - 包含检查点列表和线程 ID",
+  "properties": {
+    "type": {
+      "const": "session.checkpoint.list",
+      "default": "session.checkpoint.list",
+      "title": "Type",
+      "type": "string"
+    },
+    "session_id": {
+      "title": "Session Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "session_id"
+  ],
+  "title": "SessionCheckpointListCommand",
+  "type": "object"
+}
+```
+
+### CheckpointInfo
+
+| Field | Type | Required |
+|---|---|---|
+| `checkpoint_id` | `string` | yes |
+| `step` | `integer` | yes |
+| `timestamp` | `string` | yes |
+| `summary` | `string` | yes |
+| `node` | `string | null` | no |
+| `run_id` | `string` | no |
+
+```json
+{
+  "description": "检查点信息 - 包含单个检查点的详细信息\n\n【字段说明】\n- checkpoint_id: str - 检查点 ID\n- step: int - 步骤编号\n- timestamp: str - 时间戳\n- summary: str - 检查点摘要\n- node: str | None - 节点名称（可选）\n- run_id: str - 该检查点所属运行 ID（checkpoint↔run 交叉索引；旧数据为空串）\n\n【设计目的】\n封装单个检查点的详细信息，用于客户端显示。",
+  "properties": {
+    "checkpoint_id": {
+      "title": "Checkpoint Id",
+      "type": "string"
+    },
+    "step": {
+      "title": "Step",
+      "type": "integer"
+    },
+    "timestamp": {
+      "title": "Timestamp",
+      "type": "string"
+    },
+    "summary": {
+      "title": "Summary",
+      "type": "string"
+    },
+    "node": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Node"
+    },
+    "run_id": {
+      "default": "",
+      "title": "Run Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "checkpoint_id",
+    "step",
+    "timestamp",
+    "summary"
+  ],
+  "title": "CheckpointInfo",
+  "type": "object"
+}
+```
+
+### SessionCheckpointListResult
+
+| Field | Type | Required |
+|---|---|---|
+| `checkpoints` | `array` | yes |
+| `thread_id` | `string` | yes |
+
+```json
+{
+  "$defs": {
+    "CheckpointInfo": {
+      "description": "检查点信息 - 包含单个检查点的详细信息\n\n【字段说明】\n- checkpoint_id: str - 检查点 ID\n- step: int - 步骤编号\n- timestamp: str - 时间戳\n- summary: str - 检查点摘要\n- node: str | None - 节点名称（可选）\n- run_id: str - 该检查点所属运行 ID（checkpoint↔run 交叉索引；旧数据为空串）\n\n【设计目的】\n封装单个检查点的详细信息，用于客户端显示。",
+      "properties": {
+        "checkpoint_id": {
+          "title": "Checkpoint Id",
+          "type": "string"
+        },
+        "step": {
+          "title": "Step",
+          "type": "integer"
+        },
+        "timestamp": {
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "summary": {
+          "title": "Summary",
+          "type": "string"
+        },
+        "node": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Node"
+        },
+        "run_id": {
+          "default": "",
+          "title": "Run Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "checkpoint_id",
+        "step",
+        "timestamp",
+        "summary"
+      ],
+      "title": "CheckpointInfo",
+      "type": "object"
+    }
+  },
+  "description": "检查点列表响应 - 服务器返回的检查点列表响应\n\n【字段说明】\n- checkpoints: list[CheckpointInfo] - 检查点列表\n- thread_id: str - 线程 ID\n\n【设计目的】\n返回检查点列表和线程 ID，用于客户端显示和管理检查点。",
+  "properties": {
+    "checkpoints": {
+      "items": {
+        "$ref": "#/$defs/CheckpointInfo"
+      },
+      "title": "Checkpoints",
+      "type": "array"
+    },
+    "thread_id": {
+      "title": "Thread Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "checkpoints",
+    "thread_id"
+  ],
+  "title": "SessionCheckpointListResult",
+  "type": "object"
+}
+```
+
+### SessionCheckpointRestoreCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `session_id` | `string` | yes |
+| `checkpoint_id` | `string` | yes |
+
+```json
+{
+  "description": "检查点恢复命令 - 客户端请求恢复到指定检查点\n\n【字段说明】\n- type: Literal[\"session.checkpoint.restore\"] - 命令类型\n- session_id: str - 会话 ID\n- checkpoint_id: str - 检查点 ID\n\n【设计目的】\n将会话恢复到指定检查点，实现回溯功能。\n\n【响应】\nSessionCheckpointRestoreResult - 包含恢复结果",
+  "properties": {
+    "type": {
+      "const": "session.checkpoint.restore",
+      "default": "session.checkpoint.restore",
+      "title": "Type",
+      "type": "string"
+    },
+    "session_id": {
+      "title": "Session Id",
+      "type": "string"
+    },
+    "checkpoint_id": {
+      "title": "Checkpoint Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "session_id",
+    "checkpoint_id"
+  ],
+  "title": "SessionCheckpointRestoreCommand",
+  "type": "object"
+}
+```
+
+### SessionCheckpointRestoreResult
+
+| Field | Type | Required |
+|---|---|---|
+| `success` | `boolean` | yes |
+| `checkpoint_id` | `string` | yes |
+| `step` | `integer` | yes |
+| `message` | `string` | yes |
+
+```json
+{
+  "description": "检查点恢复响应 - 服务器返回的检查点恢复响应\n\n【字段说明】\n- success: bool - 是否成功\n- checkpoint_id: str - 检查点 ID\n- step: int - 步骤编号\n- message: str - 消息\n\n【设计目的】\n返回恢复结果，用于客户端确认恢复是否成功。",
+  "properties": {
+    "success": {
+      "title": "Success",
+      "type": "boolean"
+    },
+    "checkpoint_id": {
+      "title": "Checkpoint Id",
+      "type": "string"
+    },
+    "step": {
+      "title": "Step",
+      "type": "integer"
+    },
+    "message": {
+      "title": "Message",
+      "type": "string"
+    }
+  },
+  "required": [
+    "success",
+    "checkpoint_id",
+    "step",
+    "message"
+  ],
+  "title": "SessionCheckpointRestoreResult",
   "type": "object"
 }
 ```
@@ -594,6 +2198,7 @@ Events pushed from daemon to subscribed clients over the same TCP connection.
 
 ```json
 {
+  "description": "事件推送封装对象 - 封装服务器向客户端推送的事件\n\n【字段说明】\n- kind: Literal[\"event\"] - 类型标识（固定为 \"event\"）\n- event: dict[str, Any] - 事件数据（Event.model_dump() 的序列化结果）\n\n【设计目的】\n封装服务器向客户端推送的事件，\n便于客户端区分事件和 JSON-RPC 响应。\n\n【示例】\n```python\nenvelope = EventPushEnvelope(\n    event={\"type\": \"run.started\", \"run_id\": \"run_01\", \"goal\": \"hello world\"}\n)\n```",
   "properties": {
     "kind": {
       "const": "event",
@@ -643,6 +2248,7 @@ Events sent over the IPC socket (daemon → client).
 
 ```json
 {
+  "description": "核心服务启动事件 - 核心服务启动时发送\n\n【字段说明】\n- type: Literal[\"core.started\"] - 事件类型\n- listen_addr: str - 监听地址（如 \"127.0.0.1:7437\"）\n- version: str - 服务版本\n\n【设计目的】\n通知客户端核心服务已启动，提供监听地址和版本信息。",
   "properties": {
     "type": {
       "const": "core.started",
@@ -668,10 +2274,6 @@ Events sent over the IPC socket (daemon → client).
 }
 ```
 
-## Run Events
-
-Events written to `runs/<run_id>/events.jsonl` and forwarded over IPC to subscribed clients.
-
 ### RunStartedEvent
 
 | Field | Type | Required |
@@ -683,6 +2285,7 @@ Events written to `runs/<run_id>/events.jsonl` and forwarded over IPC to subscri
 
 ```json
 {
+  "description": "运行开始事件 - Agent 运行开始时发送\n\n【字段说明】\n- type: Literal[\"run.started\"] - 事件类型\n- run_id: str - 运行 ID\n- goal: str - 运行目标\n- ts: str - 时间戳（ISO 8601）\n\n【设计目的】\n通知客户端 Agent 运行已开始，提供运行 ID 和目标。",
   "properties": {
     "type": {
       "const": "run.started",
@@ -719,7 +2322,7 @@ Events written to `runs/<run_id>/events.jsonl` and forwarded over IPC to subscri
 {
   "type": "run.started",
   "run_id": "20260516-100000-abc123",
-  "goal": "\u603b\u7ed3 README.md",
+  "goal": "总结 README.md",
   "ts": "2026-05-16T10:00:00.001Z"
 }
 ```
@@ -737,6 +2340,7 @@ Events written to `runs/<run_id>/events.jsonl` and forwarded over IPC to subscri
 
 ```json
 {
+  "description": "运行结束事件 - Agent 运行结束时发送\n\n【字段说明】\n- type: Literal[\"run.finished\"] - 事件类型\n- run_id: str - 运行 ID\n- status: str - 运行状态（\"success\" | \"failed\"）\n- reason: str | None - 结束原因（\"exceeded_max_steps\" | \"cancelled\" | \"llm_error\" | ...）\n- steps: int - 执行步骤数\n- ts: str - 时间戳（ISO 8601）\n\n【设计目的】\n通知客户端 Agent 运行已结束，提供运行状态和结束原因。",
   "properties": {
     "type": {
       "const": "run.finished",
@@ -808,6 +2412,7 @@ Events written to `runs/<run_id>/events.jsonl` and forwarded over IPC to subscri
 
 ```json
 {
+  "description": "步骤开始事件 - 执行步骤开始时发送\n\n【字段说明】\n- type: Literal[\"step.started\"] - 事件类型\n- run_id: str - 运行 ID\n- step: int - 步骤编号\n- ts: str - 时间戳（ISO 8601）\n\n【设计目的】\n通知客户端执行步骤已开始，提供步骤编号。",
   "properties": {
     "type": {
       "const": "step.started",
@@ -860,6 +2465,7 @@ Events written to `runs/<run_id>/events.jsonl` and forwarded over IPC to subscri
 
 ```json
 {
+  "description": "步骤结束事件 - 执行步骤结束时发送\n\n【字段说明】\n- type: Literal[\"step.finished\"] - 事件类型\n- run_id: str - 运行 ID\n- step: int - 步骤编号\n- ts: str - 时间戳（ISO 8601）\n\n【设计目的】\n通知客户端执行步骤已结束，提供步骤编号。",
   "properties": {
     "type": {
       "const": "step.finished",
@@ -914,6 +2520,7 @@ Events written to `runs/<run_id>/events.jsonl` and forwarded over IPC to subscri
 
 ```json
 {
+  "description": "工具调用开始事件 - 工具调用开始时发送\n\n【字段说明】\n- type: Literal[\"tool.call_started\"] - 事件类型\n- run_id: str - 运行 ID\n- tool_use_id: str - 工具调用 ID\n- tool_name: str - 工具名称\n- params: dict[str, Any] - 工具参数\n- ts: str - 时间戳（ISO 8601）\n\n【设计目的】\n通知客户端工具调用已开始，提供工具名称和参数。",
   "properties": {
     "type": {
       "const": "tool.call_started",
@@ -984,6 +2591,7 @@ Events written to `runs/<run_id>/events.jsonl` and forwarded over IPC to subscri
 
 ```json
 {
+  "description": "工具调用结束事件 - 工具调用成功结束时发送\n\n【字段说明】\n- type: Literal[\"tool.call_finished\"] - 事件类型\n- run_id: str - 运行 ID\n- tool_use_id: str - 工具调用 ID\n- tool_name: str - 工具名称\n- elapsed_ms: int - 执行耗时（毫秒）\n- output: str - 工具输出内容（用于 TUI 显示）\n- ts: str - 时间戳（ISO 8601）\n\n【设计目的】\n通知客户端工具调用已成功结束，提供执行耗时和输出内容。",
   "properties": {
     "type": {
       "const": "tool.call_finished",
@@ -1058,6 +2666,7 @@ Events written to `runs/<run_id>/events.jsonl` and forwarded over IPC to subscri
 
 ```json
 {
+  "description": "工具调用失败事件 - 工具调用失败时发送\n\n【字段说明】\n- type: Literal[\"tool.call_failed\"] - 事件类型\n- run_id: str - 运行 ID\n- tool_use_id: str - 工具调用 ID\n- tool_name: str - 工具名称\n- error_class: str - 错误类型（\"runtime_error\" | \"timeout\" | \"schema_error\" | \"permission_denied\" | \"rate_limited\"）\n- error_message: str - 错误消息\n- elapsed_ms: int - 执行耗时（毫秒）\n- attempt: int - 尝试次数（1=首次尝试，2=首次重试，3=第二次重试）\n- ts: str - 时间戳（ISO 8601）\n\n【设计目的】\n通知客户端工具调用已失败，提供错误类型和错误消息。",
   "properties": {
     "type": {
       "const": "tool.call_failed",
@@ -1129,65 +2738,6 @@ Events written to `runs/<run_id>/events.jsonl` and forwarded over IPC to subscri
 }
 ```
 
-### LlmModelSelectedEvent
-
-| Field | Type | Required |
-|---|---|---|
-| `type` | `string` | no |
-| `run_id` | `string` | yes |
-| `model` | `string` | yes |
-| `strategy` | `string` | yes |
-| `ts` | `string` | yes |
-
-```json
-{
-  "properties": {
-    "type": {
-      "const": "llm.model_selected",
-      "default": "llm.model_selected",
-      "title": "Type",
-      "type": "string"
-    },
-    "run_id": {
-      "title": "Run Id",
-      "type": "string"
-    },
-    "model": {
-      "title": "Model",
-      "type": "string"
-    },
-    "strategy": {
-      "title": "Strategy",
-      "type": "string"
-    },
-    "ts": {
-      "title": "Ts",
-      "type": "string"
-    }
-  },
-  "required": [
-    "run_id",
-    "model",
-    "strategy",
-    "ts"
-  ],
-  "title": "LlmModelSelectedEvent",
-  "type": "object"
-}
-```
-
-**Example:**
-
-```json
-{
-  "type": "llm.model_selected",
-  "run_id": "20260516-100000-abc123",
-  "model": "claude-sonnet-4-6",
-  "strategy": "static",
-  "ts": "2026-05-16T10:00:00.001Z"
-}
-```
-
 ### LlmTokenEvent
 
 | Field | Type | Required |
@@ -1199,6 +2749,7 @@ Events written to `runs/<run_id>/events.jsonl` and forwarded over IPC to subscri
 
 ```json
 {
+  "description": "LLM 令牌事件 - LLM 生成令牌时发送（流式输出）\n\n【字段说明】\n- type: Literal[\"llm.token\"] - 事件类型\n- run_id: str - 运行 ID\n- token: str - 生成的令牌\n- ts: str - 时间戳（ISO 8601）\n\n【设计目的】\n流式通知客户端 LLM 正在生成令牌，实现实时输出。",
   "properties": {
     "type": {
       "const": "llm.token",
@@ -1255,6 +2806,7 @@ Events written to `runs/<run_id>/events.jsonl` and forwarded over IPC to subscri
 
 ```json
 {
+  "description": "LLM 使用事件 - LLM 请求完成后发送（包含令牌使用统计）\n\n【字段说明】\n- type: Literal[\"llm.usage\"] - 事件类型\n- run_id: str - 运行 ID\n- input_tokens: int - 输入令牌数\n- output_tokens: int - 输出令牌数\n- cache_read_input_tokens: int - 缓存读取的输入令牌数\n- cache_creation_input_tokens: int - 缓存创建的输入令牌数\n- context_pct: float - 上下文使用率（0.0 到 1.0）\n- ts: str - 时间戳（ISO 8601）\n\n【设计目的】\n通知客户端 LLM 令牌使用情况，用于成本统计和监控。",
   "properties": {
     "type": {
       "const": "llm.usage",
@@ -1319,6 +2871,66 @@ Events written to `runs/<run_id>/events.jsonl` and forwarded over IPC to subscri
 }
 ```
 
+### LlmModelSelectedEvent
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `run_id` | `string` | yes |
+| `model` | `string` | yes |
+| `strategy` | `string` | yes |
+| `ts` | `string` | yes |
+
+```json
+{
+  "description": "LLM 模型选择事件 - LLM 模型选择完成后发送\n\n【字段说明】\n- type: Literal[\"llm.model_selected\"] - 事件类型\n- run_id: str - 运行 ID\n- model: str - 选择的模型名称\n- strategy: str - 选择策略（\"static\" | \"rule_based\" | \"cost_budget\"）\n- ts: str - 时间戳（ISO 8601）\n\n【设计目的】\n通知客户端选择了哪个 LLM 模型，提供选择策略。",
+  "properties": {
+    "type": {
+      "const": "llm.model_selected",
+      "default": "llm.model_selected",
+      "title": "Type",
+      "type": "string"
+    },
+    "run_id": {
+      "title": "Run Id",
+      "type": "string"
+    },
+    "model": {
+      "title": "Model",
+      "type": "string"
+    },
+    "strategy": {
+      "title": "Strategy",
+      "type": "string"
+    },
+    "ts": {
+      "title": "Ts",
+      "type": "string"
+    }
+  },
+  "required": [
+    "run_id",
+    "model",
+    "strategy",
+    "ts"
+  ],
+  "title": "LlmModelSelectedEvent",
+  "type": "object"
+}
+```
+
+**Example:**
+
+```json
+{
+  "type": "llm.model_selected",
+  "run_id": "20260516-100000-abc123",
+  "model": "claude-sonnet-4-6",
+  "strategy": "static",
+  "ts": "2026-05-16T10:00:00.001Z"
+}
+```
+
 ### LogLineEvent
 
 | Field | Type | Required |
@@ -1332,6 +2944,7 @@ Events written to `runs/<run_id>/events.jsonl` and forwarded over IPC to subscri
 
 ```json
 {
+  "description": "日志事件 - 系统产生日志时发送\n\n【字段说明】\n- type: Literal[\"log.line\"] - 事件类型\n- run_id: str - 运行 ID（可能为空）\n- level: str - 日志级别（\"DEBUG\" | \"INFO\" | \"WARNING\" | \"ERROR\"）\n- source: str - 日志来源（模块名）\n- message: str - 日志消息\n- ts: str - 时间戳（ISO 8601）\n\n【设计目的】\n通知客户端系统日志，便于调试和监控。",
   "properties": {
     "type": {
       "const": "log.line",
@@ -1385,8 +2998,6 @@ Events written to `runs/<run_id>/events.jsonl` and forwarded over IPC to subscri
 }
 ```
 
-## Session Events
-
 ### SessionCreatedEvent
 
 | Field | Type | Required |
@@ -1398,6 +3009,7 @@ Events written to `runs/<run_id>/events.jsonl` and forwarded over IPC to subscri
 
 ```json
 {
+  "description": "会话创建事件 - 会话创建时发送\n\n【字段说明】\n- type: Literal[\"session.created\"] - 事件类型\n- session_id: str - 会话 ID\n- mode: str - 会话模式\n- ts: str - 时间戳（ISO 8601）\n\n【设计目的】\n通知客户端会话已创建，提供会话 ID 和模式。",
   "properties": {
     "type": {
       "const": "session.created",
@@ -1450,6 +3062,7 @@ Events written to `runs/<run_id>/events.jsonl` and forwarded over IPC to subscri
 
 ```json
 {
+  "description": "会话消息接收事件 - 会话收到消息时发送\n\n【字段说明】\n- type: Literal[\"session.message_received\"] - 事件类型\n- session_id: str - 会话 ID\n- content: str - 消息内容\n- ts: str - 时间戳（ISO 8601）\n\n【设计目的】\n通知客户端会话收到消息，提供消息内容。",
   "properties": {
     "type": {
       "const": "session.message_received",
@@ -1486,7 +3099,7 @@ Events written to `runs/<run_id>/events.jsonl` and forwarded over IPC to subscri
 {
   "type": "session.message_received",
   "session_id": "sess-abc123def456",
-  "content": "\u603b\u7ed3 README.md",
+  "content": "总结 README.md",
   "ts": "2026-05-16T10:00:00.001Z"
 }
 ```
@@ -1502,6 +3115,7 @@ Events written to `runs/<run_id>/events.jsonl` and forwarded over IPC to subscri
 
 ```json
 {
+  "description": "会话等待输入事件 - 会话等待用户输入时发送\n\n【字段说明】\n- type: Literal[\"session.waiting_for_input\"] - 事件类型\n- session_id: str - 会话 ID\n- last_run_id: str - 最后一个运行 ID\n- ts: str - 时间戳（ISO 8601）\n\n【设计目的】\n通知客户端会话正在等待用户输入，\n客户端可以显示输入提示。",
   "properties": {
     "type": {
       "const": "session.waiting_for_input",
@@ -1553,6 +3167,7 @@ Events written to `runs/<run_id>/events.jsonl` and forwarded over IPC to subscri
 
 ```json
 {
+  "description": "会话恢复事件 - 会话恢复时发送\n\n【字段说明】\n- type: Literal[\"session.resumed\"] - 事件类型\n- session_id: str - 会话 ID\n- ts: str - 时间戳（ISO 8601）\n\n【设计目的】\n通知客户端会话已恢复，\n客户端可以更新界面状态。",
   "properties": {
     "type": {
       "const": "session.resumed",
@@ -1598,6 +3213,7 @@ Events written to `runs/<run_id>/events.jsonl` and forwarded over IPC to subscri
 
 ```json
 {
+  "description": "会话关闭事件 - 会话关闭时发送\n\n【字段说明】\n- type: Literal[\"session.closed\"] - 事件类型\n- session_id: str - 会话 ID\n- ts: str - 时间戳（ISO 8601）\n\n【设计目的】\n通知客户端会话已关闭，\n客户端可以清理资源。",
   "properties": {
     "type": {
       "const": "session.closed",
@@ -1630,6 +3246,823 @@ Events written to `runs/<run_id>/events.jsonl` and forwarded over IPC to subscri
   "type": "session.closed",
   "session_id": "sess-abc123def456",
   "ts": "2026-05-16T10:00:00.001Z"
+}
+```
+
+### SessionAutoModeChangedEvent
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `session_id` | `string` | yes |
+| `mode` | `string` | yes |
+| `ts` | `string` | yes |
+
+```json
+{
+  "description": "会话自动模式变更事件 - 自动模式切换时发送\n\n【字段说明】\n- type: Literal[\"session.auto_mode_changed\"] - 事件类型\n- session_id: str - 会话 ID\n- mode: str - 新的自动模式\n- ts: str - 时间戳（ISO 8601）\n\n【设计目的】\n通知客户端自动模式已变更，\n客户端可以更新状态栏显示。",
+  "properties": {
+    "type": {
+      "const": "session.auto_mode_changed",
+      "default": "session.auto_mode_changed",
+      "title": "Type",
+      "type": "string"
+    },
+    "session_id": {
+      "title": "Session Id",
+      "type": "string"
+    },
+    "mode": {
+      "title": "Mode",
+      "type": "string"
+    },
+    "ts": {
+      "title": "Ts",
+      "type": "string"
+    }
+  },
+  "required": [
+    "session_id",
+    "mode",
+    "ts"
+  ],
+  "title": "SessionAutoModeChangedEvent",
+  "type": "object"
+}
+```
+
+### SessionPermissionModeChangedEvent
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `session_id` | `string` | yes |
+| `mode` | `string` | yes |
+| `previous_mode` | `string` | yes |
+| `ts` | `string` | yes |
+
+```json
+{
+  "description": "会话权限模式变更事件 - 五态权限模式切换时广播\n\n【字段说明】\n- type: Literal[\"session.permission_mode_changed\"] - 事件类型\n- session_id: str - 目标会话\n- mode: str - 新模式（default/acceptEdits/plan/auto/bypassPermissions）\n- previous_mode: str - 切换前的模式\n- ts: str - 时间戳（ISO 8601）\n\n【设计目的】\n模式是 per-session 的且可从任一端切换（TUI 快捷键、RPC、另一台设备），\n所有订阅端都要刷新状态栏——previous_mode 一并带上是为了让 UI 能显示\n\"从哪来\"，而不是只能记住本地旧值（本地缓存可能早已过期）。",
+  "properties": {
+    "type": {
+      "const": "session.permission_mode_changed",
+      "default": "session.permission_mode_changed",
+      "title": "Type",
+      "type": "string"
+    },
+    "session_id": {
+      "title": "Session Id",
+      "type": "string"
+    },
+    "mode": {
+      "title": "Mode",
+      "type": "string"
+    },
+    "previous_mode": {
+      "title": "Previous Mode",
+      "type": "string"
+    },
+    "ts": {
+      "title": "Ts",
+      "type": "string"
+    }
+  },
+  "required": [
+    "session_id",
+    "mode",
+    "previous_mode",
+    "ts"
+  ],
+  "title": "SessionPermissionModeChangedEvent",
+  "type": "object"
+}
+```
+
+### SessionEffortLevelChangedEvent
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `session_id` | `string` | yes |
+| `level` | `string` | yes |
+| `ts` | `string` | yes |
+
+```json
+{
+  "description": "会话努力等级变更事件 - 努力等级切换时发送\n\n【字段说明】\n- type: Literal[\"session.effort_level_changed\"] - 事件类型\n- session_id: str - 会话 ID\n- level: str - 新的努力等级（minimal / low / medium / high / max）\n- ts: str - 时间戳（ISO 8601）\n\n【设计目的】\n通知客户端努力等级已变更，\n客户端可以更新状态栏显示。",
+  "properties": {
+    "type": {
+      "const": "session.effort_level_changed",
+      "default": "session.effort_level_changed",
+      "title": "Type",
+      "type": "string"
+    },
+    "session_id": {
+      "title": "Session Id",
+      "type": "string"
+    },
+    "level": {
+      "title": "Level",
+      "type": "string"
+    },
+    "ts": {
+      "title": "Ts",
+      "type": "string"
+    }
+  },
+  "required": [
+    "session_id",
+    "level",
+    "ts"
+  ],
+  "title": "SessionEffortLevelChangedEvent",
+  "type": "object"
+}
+```
+
+### SessionModelChangedEvent
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `session_id` | `string` | yes |
+| `preset` | `string` | yes |
+| `model` | `string` | yes |
+| `ts` | `string` | yes |
+
+```json
+{
+  "description": "会话模型预设变更事件 - 模型预设切换时发送\n\n【字段说明】\n- type: Literal[\"session.model_changed\"] - 事件类型\n- session_id: str - 会话 ID\n- preset: str - 新的模型预设（fast / balanced / powerful）\n- model: str - 对应的模型名称\n- ts: str - 时间戳（ISO 8601）\n\n【设计目的】\n通知客户端模型预设已变更，\n客户端可以更新状态栏显示。",
+  "properties": {
+    "type": {
+      "const": "session.model_changed",
+      "default": "session.model_changed",
+      "title": "Type",
+      "type": "string"
+    },
+    "session_id": {
+      "title": "Session Id",
+      "type": "string"
+    },
+    "preset": {
+      "title": "Preset",
+      "type": "string"
+    },
+    "model": {
+      "title": "Model",
+      "type": "string"
+    },
+    "ts": {
+      "title": "Ts",
+      "type": "string"
+    }
+  },
+  "required": [
+    "session_id",
+    "preset",
+    "model",
+    "ts"
+  ],
+  "title": "SessionModelChangedEvent",
+  "type": "object"
+}
+```
+
+### SessionEngineChangedEvent
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `session_id` | `string` | yes |
+| `engine` | `string` | yes |
+| `ts` | `string` | yes |
+
+```json
+{
+  "description": "会话引擎变更事件 - Agent 引擎切换时发送\n\n【字段说明】\n- type: Literal[\"session.engine_changed\"] - 事件类型\n- session_id: str - 会话 ID\n- engine: str - 新的引擎名称（legacy / langgraph / plan_execute / debate / pipeline / auto）\n- ts: str - 时间戳（ISO 8601）\n\n【设计目的】\n通知客户端 Agent 引擎已变更，\n客户端可以更新状态栏显示并刷新检查点可用性。\n多客户端场景下确保所有连接的 TUI 状态同步。",
+  "properties": {
+    "type": {
+      "const": "session.engine_changed",
+      "default": "session.engine_changed",
+      "title": "Type",
+      "type": "string"
+    },
+    "session_id": {
+      "title": "Session Id",
+      "type": "string"
+    },
+    "engine": {
+      "title": "Engine",
+      "type": "string"
+    },
+    "ts": {
+      "title": "Ts",
+      "type": "string"
+    }
+  },
+  "required": [
+    "session_id",
+    "engine",
+    "ts"
+  ],
+  "title": "SessionEngineChangedEvent",
+  "type": "object"
+}
+```
+
+### SessionRenamedEvent
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `session_id` | `string` | yes |
+| `title` | `string` | yes |
+| `ts` | `string` | yes |
+
+```json
+{
+  "description": "会话重命名事件 - 会话标题变更时发送\n\n【字段说明】\n- type: Literal[\"session.renamed\"] - 事件类型\n- session_id: str - 会话 ID\n- title: str - 新的会话标题\n- ts: str - 时间戳（ISO 8601）\n\n【设计目的】\n通知客户端会话标题已变更，\n客户端可以更新标签页显示。",
+  "properties": {
+    "type": {
+      "const": "session.renamed",
+      "default": "session.renamed",
+      "title": "Type",
+      "type": "string"
+    },
+    "session_id": {
+      "title": "Session Id",
+      "type": "string"
+    },
+    "title": {
+      "title": "Title",
+      "type": "string"
+    },
+    "ts": {
+      "title": "Ts",
+      "type": "string"
+    }
+  },
+  "required": [
+    "session_id",
+    "title",
+    "ts"
+  ],
+  "title": "SessionRenamedEvent",
+  "type": "object"
+}
+```
+
+### ContextCompactedEvent
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `session_id` | `string` | yes |
+| `run_id` | `string` | yes |
+| `original_tokens` | `integer` | yes |
+| `summary_tokens` | `integer` | yes |
+| `ts` | `string` | yes |
+
+```json
+{
+  "description": "上下文压缩事件 - 上下文压缩完成后发送\n\n【字段说明】\n- type: Literal[\"context.compacted\"] - 事件类型\n- session_id: str - 会话 ID\n- run_id: str - 运行 ID\n- original_tokens: int - 原始令牌数\n- summary_tokens: int - 压缩后的令牌数\n- ts: str - 时间戳（ISO 8601）\n\n【设计目的】\n通知客户端上下文已压缩，\n提供压缩前后的令牌数对比。",
+  "properties": {
+    "type": {
+      "const": "context.compacted",
+      "default": "context.compacted",
+      "title": "Type",
+      "type": "string"
+    },
+    "session_id": {
+      "title": "Session Id",
+      "type": "string"
+    },
+    "run_id": {
+      "title": "Run Id",
+      "type": "string"
+    },
+    "original_tokens": {
+      "title": "Original Tokens",
+      "type": "integer"
+    },
+    "summary_tokens": {
+      "title": "Summary Tokens",
+      "type": "integer"
+    },
+    "ts": {
+      "title": "Ts",
+      "type": "string"
+    }
+  },
+  "required": [
+    "session_id",
+    "run_id",
+    "original_tokens",
+    "summary_tokens",
+    "ts"
+  ],
+  "title": "ContextCompactedEvent",
+  "type": "object"
+}
+```
+
+### PermissionRequestedEvent
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `run_id` | `string` | yes |
+| `tool_use_id` | `string` | yes |
+| `tool_name` | `string` | yes |
+| `params` | `object` | yes |
+| `param_preview` | `string` | yes |
+| `session_id` | `string` | yes |
+| `ts` | `string` | yes |
+
+```json
+{
+  "description": "权限请求事件 - 需要用户审批权限时发送\n\n【字段说明】\n- type: Literal[\"permission.requested\"] - 事件类型\n- run_id: str - 运行 ID\n- tool_use_id: str - 工具调用 ID\n- tool_name: str - 工具名称\n- params: dict[str, Any] - 工具参数\n- param_preview: str - 参数预览\n- session_id: str - 会话 ID\n- ts: str - 时间戳（ISO 8601）\n\n【设计目的】\n通知客户端需要用户审批权限，\n客户端可以显示审批对话框。",
+  "properties": {
+    "type": {
+      "const": "permission.requested",
+      "default": "permission.requested",
+      "title": "Type",
+      "type": "string"
+    },
+    "run_id": {
+      "title": "Run Id",
+      "type": "string"
+    },
+    "tool_use_id": {
+      "title": "Tool Use Id",
+      "type": "string"
+    },
+    "tool_name": {
+      "title": "Tool Name",
+      "type": "string"
+    },
+    "params": {
+      "additionalProperties": true,
+      "title": "Params",
+      "type": "object"
+    },
+    "param_preview": {
+      "title": "Param Preview",
+      "type": "string"
+    },
+    "session_id": {
+      "title": "Session Id",
+      "type": "string"
+    },
+    "ts": {
+      "title": "Ts",
+      "type": "string"
+    }
+  },
+  "required": [
+    "run_id",
+    "tool_use_id",
+    "tool_name",
+    "params",
+    "param_preview",
+    "session_id",
+    "ts"
+  ],
+  "title": "PermissionRequestedEvent",
+  "type": "object"
+}
+```
+
+### PermissionGrantedEvent
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `run_id` | `string` | yes |
+| `tool_use_id` | `string` | yes |
+| `decision` | `string` | yes |
+| `ts` | `string` | yes |
+
+```json
+{
+  "description": "权限授予事件 - 用户授予权限后发送\n\n【字段说明】\n- type: Literal[\"permission.granted\"] - 事件类型\n- run_id: str - 运行 ID\n- tool_use_id: str - 工具调用 ID\n- decision: str - 决策类型（\"allow_once\" | \"always_allow\" | \"auto_allow\"）\n- ts: str - 时间戳（ISO 8601）\n\n【设计目的】\n通知客户端权限已授予，\n客户端可以更新权限状态。",
+  "properties": {
+    "type": {
+      "const": "permission.granted",
+      "default": "permission.granted",
+      "title": "Type",
+      "type": "string"
+    },
+    "run_id": {
+      "title": "Run Id",
+      "type": "string"
+    },
+    "tool_use_id": {
+      "title": "Tool Use Id",
+      "type": "string"
+    },
+    "decision": {
+      "title": "Decision",
+      "type": "string"
+    },
+    "ts": {
+      "title": "Ts",
+      "type": "string"
+    }
+  },
+  "required": [
+    "run_id",
+    "tool_use_id",
+    "decision",
+    "ts"
+  ],
+  "title": "PermissionGrantedEvent",
+  "type": "object"
+}
+```
+
+### PermissionDeniedEvent
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `run_id` | `string` | yes |
+| `tool_use_id` | `string` | yes |
+| `decision` | `string` | yes |
+| `ts` | `string` | yes |
+
+```json
+{
+  "description": "权限拒绝事件 - 用户拒绝权限后发送\n\n【字段说明】\n- type: Literal[\"permission.denied\"] - 事件类型\n- run_id: str - 运行 ID\n- tool_use_id: str - 工具调用 ID\n- decision: str - 决策类型（\"deny_once\" | \"always_deny\" | \"auto_deny\"）\n- ts: str - 时间戳（ISO 8601）\n\n【设计目的】\n通知客户端权限已拒绝，\n客户端可以更新权限状态。",
+  "properties": {
+    "type": {
+      "const": "permission.denied",
+      "default": "permission.denied",
+      "title": "Type",
+      "type": "string"
+    },
+    "run_id": {
+      "title": "Run Id",
+      "type": "string"
+    },
+    "tool_use_id": {
+      "title": "Tool Use Id",
+      "type": "string"
+    },
+    "decision": {
+      "title": "Decision",
+      "type": "string"
+    },
+    "ts": {
+      "title": "Ts",
+      "type": "string"
+    }
+  },
+  "required": [
+    "run_id",
+    "tool_use_id",
+    "decision",
+    "ts"
+  ],
+  "title": "PermissionDeniedEvent",
+  "type": "object"
+}
+```
+
+### TrustRequestedEvent
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `session_id` | `string` | yes |
+| `cwd` | `string` | yes |
+| `has_instruction_files` | `boolean` | no |
+| `ts` | `string` | yes |
+
+```json
+{
+  "description": "信任请求事件 - 会话创建时该目录的信任决定未决（ask）时发送\n\n【字段说明】\n- type: Literal[\"trust.requested\"] - 事件类型\n- session_id: str - 会话 ID\n- cwd: str - 会话工作目录（绝对路径）\n- has_instruction_files: bool - 目录下是否存在 CLAUDE.md/AGENTS.md/.claude/settings.json\n  这类会被 iwan 自动读进系统提示的文件（陌生目录+注入文件=风险更大，客户端据此加强提示）\n- ts: str - 时间戳（ISO 8601）\n\n【设计目的】\n与 permission.requested 不同，本事件不阻塞任何执行：会话照建、\n写操作照走逐次审批（ask 现状语义）。客户端可弹信任对话框，\n答复经 trust.respond 命令落 TrustStore，影响的是\"以后的会话\"。",
+  "properties": {
+    "type": {
+      "const": "trust.requested",
+      "default": "trust.requested",
+      "title": "Type",
+      "type": "string"
+    },
+    "session_id": {
+      "title": "Session Id",
+      "type": "string"
+    },
+    "cwd": {
+      "title": "Cwd",
+      "type": "string"
+    },
+    "has_instruction_files": {
+      "default": false,
+      "title": "Has Instruction Files",
+      "type": "boolean"
+    },
+    "ts": {
+      "title": "Ts",
+      "type": "string"
+    }
+  },
+  "required": [
+    "session_id",
+    "cwd",
+    "ts"
+  ],
+  "title": "TrustRequestedEvent",
+  "type": "object"
+}
+```
+
+### TrustChangedEvent
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `session_id` | `string` | yes |
+| `cwd` | `string` | yes |
+| `decision` | `string` | yes |
+| `persistent` | `boolean` | no |
+| `ts` | `string` | yes |
+
+```json
+{
+  "description": "信任变更事件 - 某目录的信任决定被设定或撤销时发送\n\n【字段说明】\n- type: Literal[\"trust.changed\"] - 事件类型\n- session_id: str - 触发变更的会话 ID\n- cwd: str - 被变更的目录（归一化绝对路径）\n- decision: str - \"allow\" | \"deny\" | \"ask\"（ask=撤销持久决定回到未决态）\n- persistent: bool - 是否写入了 trust.toml（会话级临时决定为 False）\n- ts: str - 时间戳（ISO 8601）\n\n【设计目的】\n多客户端一致性：TUI 里信任了目录，CLI/别的 TUI 面板要能刷新列表；\n同时是审计事件，信任变更本身就是高价值日志。",
+  "properties": {
+    "type": {
+      "const": "trust.changed",
+      "default": "trust.changed",
+      "title": "Type",
+      "type": "string"
+    },
+    "session_id": {
+      "title": "Session Id",
+      "type": "string"
+    },
+    "cwd": {
+      "title": "Cwd",
+      "type": "string"
+    },
+    "decision": {
+      "title": "Decision",
+      "type": "string"
+    },
+    "persistent": {
+      "default": true,
+      "title": "Persistent",
+      "type": "boolean"
+    },
+    "ts": {
+      "title": "Ts",
+      "type": "string"
+    }
+  },
+  "required": [
+    "session_id",
+    "cwd",
+    "decision",
+    "ts"
+  ],
+  "title": "TrustChangedEvent",
+  "type": "object"
+}
+```
+
+### SubagentStartedEvent
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `run_id` | `string` | yes |
+| `parent_run_id` | `string` | yes |
+| `description` | `string` | yes |
+| `ts` | `string` | yes |
+
+```json
+{
+  "description": "子 Agent 开始事件 - 子 Agent 开始运行时发送\n\n【字段说明】\n- type: Literal[\"subagent.started\"] - 事件类型\n- run_id: str - 子 Agent 运行 ID\n- parent_run_id: str - 父运行 ID\n- description: str - 子 Agent 描述\n- ts: str - 时间戳（ISO 8601）\n\n【设计目的】\n通知客户端子 Agent 已开始运行，\n提供父运行 ID 和描述。",
+  "properties": {
+    "type": {
+      "const": "subagent.started",
+      "default": "subagent.started",
+      "title": "Type",
+      "type": "string"
+    },
+    "run_id": {
+      "title": "Run Id",
+      "type": "string"
+    },
+    "parent_run_id": {
+      "title": "Parent Run Id",
+      "type": "string"
+    },
+    "description": {
+      "title": "Description",
+      "type": "string"
+    },
+    "ts": {
+      "title": "Ts",
+      "type": "string"
+    }
+  },
+  "required": [
+    "run_id",
+    "parent_run_id",
+    "description",
+    "ts"
+  ],
+  "title": "SubagentStartedEvent",
+  "type": "object"
+}
+```
+
+### SubagentFinishedEvent
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `run_id` | `string` | yes |
+| `parent_run_id` | `string` | yes |
+| `status` | `string` | yes |
+| `ts` | `string` | yes |
+
+```json
+{
+  "description": "子 Agent 结束事件 - 子 Agent 运行结束时发送\n\n【字段说明】\n- type: Literal[\"subagent.finished\"] - 事件类型\n- run_id: str - 子 Agent 运行 ID\n- parent_run_id: str - 父运行 ID\n- status: str - 运行状态（\"success\" | \"failed\"）\n- ts: str - 时间戳（ISO 8601）\n\n【设计目的】\n通知客户端子 Agent 已运行结束，\n提供运行状态。",
+  "properties": {
+    "type": {
+      "const": "subagent.finished",
+      "default": "subagent.finished",
+      "title": "Type",
+      "type": "string"
+    },
+    "run_id": {
+      "title": "Run Id",
+      "type": "string"
+    },
+    "parent_run_id": {
+      "title": "Parent Run Id",
+      "type": "string"
+    },
+    "status": {
+      "title": "Status",
+      "type": "string"
+    },
+    "ts": {
+      "title": "Ts",
+      "type": "string"
+    }
+  },
+  "required": [
+    "run_id",
+    "parent_run_id",
+    "status",
+    "ts"
+  ],
+  "title": "SubagentFinishedEvent",
+  "type": "object"
+}
+```
+
+### SkillInvokedEvent
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `skill_name` | `string` | yes |
+| `arguments` | `string` | yes |
+| `run_id` | `string` | yes |
+| `ts` | `string` | yes |
+| `auto_triggered` | `boolean` | no |
+| `match_score` | `number` | no |
+
+```json
+{
+  "description": "Skill 调用事件 - Skill 被调用时发送\n\n【字段说明】\n- type: Literal[\"skill.invoked\"] - 事件类型\n- skill_name: str - Skill 名称\n- arguments: str - Skill 参数\n- run_id: str - 运行 ID\n- ts: str - 时间戳（ISO 8601）\n- auto_triggered: bool - 是否自动触发（默认 False）\n- match_score: float - 匹配分数（默认 0.0）\n\n【设计目的】\n通知客户端 Skill 已被调用，\n提供 Skill 名称、参数和匹配信息。",
+  "properties": {
+    "type": {
+      "const": "skill.invoked",
+      "default": "skill.invoked",
+      "title": "Type",
+      "type": "string"
+    },
+    "skill_name": {
+      "title": "Skill Name",
+      "type": "string"
+    },
+    "arguments": {
+      "title": "Arguments",
+      "type": "string"
+    },
+    "run_id": {
+      "title": "Run Id",
+      "type": "string"
+    },
+    "ts": {
+      "title": "Ts",
+      "type": "string"
+    },
+    "auto_triggered": {
+      "default": false,
+      "title": "Auto Triggered",
+      "type": "boolean"
+    },
+    "match_score": {
+      "default": 0.0,
+      "title": "Match Score",
+      "type": "number"
+    }
+  },
+  "required": [
+    "skill_name",
+    "arguments",
+    "run_id",
+    "ts"
+  ],
+  "title": "SkillInvokedEvent",
+  "type": "object"
+}
+```
+
+### HookEvaluatedEvent
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `run_id` | `string` | yes |
+| `session_id` | `string` | yes |
+| `tool_name` | `string` | yes |
+| `hook_event` | `string` | yes |
+| `command` | `string` | yes |
+| `decision` | `string` | yes |
+| `reason` | `string` | no |
+| `elapsed_ms` | `integer` | no |
+| `ts` | `string` | yes |
+
+```json
+{
+  "description": "hook 裁定事件 - PreToolUse/PostToolUse hook 实际执行后发送\n\n【字段说明】\n- type: Literal[\"hook.evaluated\"] - 事件类型\n- run_id: str - 运行 ID（无运行上下文时为空串）\n- session_id: str - 会话 ID\n- tool_name: str - 被评估的工具名\n- hook_event: str - 生命周期点（\"PreToolUse\" | \"PostToolUse\"）\n- command: str - hook 的 argv 拼接（审计可读回）\n- decision: str - 裁定（\"allow\" | \"deny\" | \"ask\" | \"none\"）\n- reason: str - 裁定理由（JSON reason / stderr 摘要，截断后）\n- elapsed_ms: int - hook 子进程耗时\n- ts: str - 时间戳（ISO 8601）\n\n【设计目的】\n让 TUI 事件流可见\"哪条 hook 在哪个生命周期点对哪个工具说了什么\"——\nhook 是外部进程，没有这条事件它就是黑盒；观测性优先在 TUI 落地。",
+  "properties": {
+    "type": {
+      "const": "hook.evaluated",
+      "default": "hook.evaluated",
+      "title": "Type",
+      "type": "string"
+    },
+    "run_id": {
+      "title": "Run Id",
+      "type": "string"
+    },
+    "session_id": {
+      "title": "Session Id",
+      "type": "string"
+    },
+    "tool_name": {
+      "title": "Tool Name",
+      "type": "string"
+    },
+    "hook_event": {
+      "title": "Hook Event",
+      "type": "string"
+    },
+    "command": {
+      "title": "Command",
+      "type": "string"
+    },
+    "decision": {
+      "title": "Decision",
+      "type": "string"
+    },
+    "reason": {
+      "default": "",
+      "title": "Reason",
+      "type": "string"
+    },
+    "elapsed_ms": {
+      "default": 0,
+      "title": "Elapsed Ms",
+      "type": "integer"
+    },
+    "ts": {
+      "title": "Ts",
+      "type": "string"
+    }
+  },
+  "required": [
+    "run_id",
+    "session_id",
+    "tool_name",
+    "hook_event",
+    "command",
+    "decision",
+    "ts"
+  ],
+  "title": "HookEvaluatedEvent",
+  "type": "object"
 }
 ```
 

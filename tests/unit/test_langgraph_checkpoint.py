@@ -226,3 +226,47 @@ async def test_runner_restore_checkpoint_memory(tmp_path: Path) -> None:
     restored = saver.get_tuple({"configurable": {"thread_id": "restore_test", "checkpoint_id": checkpoint_id}})
     assert restored is not None
     assert "channel_values" in restored.checkpoint
+
+
+class _SpySaver:
+    """记录 close 是否被调用的 checkpointer 替身"""
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+# 功能：runner.close() 不得关闭 daemon 注入的共享 checkpointer（一次 restore 毒死全 daemon 的回归锁）
+# 设计：用记录 close 调用的 spy 替身而非真 sqlite，把"所有权语义"隔离成单一断言；
+#      旧实现无条件 close 共享实例，此测试在旧代码上必红
+@pytest.mark.asyncio
+async def test_runner_close_preserves_shared_checkpointer() -> None:
+    """验证 runner 不关闭 daemon 注入的共享 checkpointer"""
+    from iwan_claude.core.runner import AgentRunner
+
+    shared = _SpySaver()
+    runner = AgentRunner(IwanConfig(), checkpointer=shared)
+    await runner.close()
+    assert shared.closed is False
+    assert runner._checkpointer is None
+
+
+# 功能：runner 自己懒建的 sqlite checkpointer 必须在 close() 时被真正回收（连接关闭后不可用）
+# 设计：所有权修复若矫枉过正（owned 也不关）会泄漏 aiosqlite 连接；用"close 后
+#      aget_tuple 必抛"反向证明回收生效，比断言内部属性更接近用户可见行为
+@pytest.mark.asyncio
+async def test_runner_close_closes_owned_sqlite(tmp_path: Path) -> None:
+    """验证 runner 自己懒建的 sqlite checkpointer 会被真正回收（连接关闭后不可用）"""
+    from iwan_claude.core.runner import AgentRunner
+
+    config = IwanConfig(agent=AgentConfig(
+        checkpoint_backend="sqlite",
+        checkpoint_db_path=str(tmp_path / "cp.db"),
+    ))
+    runner = AgentRunner(config)
+    saver = await runner._init_checkpointer()
+    assert saver is not None
+    await runner.close()
+    with pytest.raises(Exception):
+        await saver.aget_tuple({"configurable": {"thread_id": "x"}})

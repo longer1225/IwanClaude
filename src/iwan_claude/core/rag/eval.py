@@ -43,10 +43,10 @@ A: 我构建了包含 50+ 问题的标注测试集，每个问题标注了相关
 """
 from __future__ import annotations
 
+import ast  # 自动生成测试集时提取顶层符号
 import asyncio  # 异步编程核心
 import json  # 读写测试集
 import logging  # 日志输出
-import os  # 环境变量
 from dataclasses import dataclass, field  # 数据类定义
 from pathlib import Path  # 文件路径处理
 from typing import Any  # 类型注解
@@ -263,12 +263,75 @@ BUILTIN_TESTSET: list[EvalQuestion] = [
 ]
 
 
+# 递归遍历 root 下的 .py/.md 文件（跳过常见的垃圾目录）
+def _walk_source_files(root: str) -> list[Path]:
+    """收集可作为评估语料的源码/文档文件"""
+    skip_dirs = {".git", "node_modules", ".venv", "__pycache__", ".pytest_cache"}
+    files: list[Path] = []
+    for path in Path(root).rglob("*"):
+        if any(part in skip_dirs for part in path.parts):
+            continue
+        if path.is_file() and path.suffix in (".py", ".md"):
+            files.append(path)
+    return files
+
+
+# 基于项目文件自动生成弱标注测试集（--generate 模式的实现）
+def generate_test_set(root: str) -> list[EvalQuestion]:
+    """
+    自动生成评估测试集
+
+    【策略】
+    - .py 文件：用 ast 提取顶层函数/类名，生成"xxx 定义在哪里"式查询，
+      相关文档标注为该文件本身（符号名几乎必然出现在文件内容中，
+      是廉价但真实有效的 recall 下界探针）
+    - .md 文件：取首个一级标题作为查询
+
+    【局限】
+    这是"弱标注"——查询全部来自字面标识符，偏向关键词检索，
+    不能衡量深层语义能力；适合当回归基线，不适合当质量上限证明。
+    """
+    questions: list[EvalQuestion] = []
+    for file_path in _walk_source_files(root):
+        rel = str(file_path)
+        if file_path.suffix == ".py":
+            try:
+                source = file_path.read_text(encoding="utf-8")
+                tree = ast.parse(source)
+            except (OSError, SyntaxError, ValueError):
+                continue
+            for node in tree.body:
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    questions.append(EvalQuestion(
+                        query=f"{node.name} 定义在哪里",
+                        relevant_sources=[rel],
+                        category="code_navigation",
+                    ))
+        elif file_path.suffix == ".md":
+            try:
+                text = file_path.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            for line in text.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("# "):
+                    questions.append(EvalQuestion(
+                        query=stripped[2:].strip(),
+                        relevant_sources=[rel],
+                        category="documentation",
+                    ))
+                    break
+    return questions
+
+
 # =============================================================================
 # 指标计算核心函数
 # =============================================================================
 
 
-def compute_recall_at_k(retrieved_sources: list[str], relevant_sources: list[str], k: int) -> float:
+def compute_recall_at_k(
+    retrieved_sources: list[str], relevant_sources: list[str] | set[str], k: int
+) -> float:
     """
     计算 Recall@K - 前 K 个结果中命中相关文档的比例
 
@@ -298,7 +361,9 @@ def compute_recall_at_k(retrieved_sources: list[str], relevant_sources: list[str
     return len(top_k & relevant_set) / len(relevant_set)
 
 
-def compute_precision_at_k(retrieved_sources: list[str], relevant_sources: list[str], k: int) -> float:
+def compute_precision_at_k(
+    retrieved_sources: list[str], relevant_sources: list[str] | set[str], k: int
+) -> float:
     """
     计算 Precision@K - 前 K 个结果中相关文档占的比例
 
@@ -323,7 +388,9 @@ def compute_precision_at_k(retrieved_sources: list[str], relevant_sources: list[
     return hits / k
 
 
-def compute_hit_at_k(retrieved_sources: list[str], relevant_sources: list[str], k: int) -> bool:
+def compute_hit_at_k(
+    retrieved_sources: list[str], relevant_sources: list[str] | set[str], k: int
+) -> bool:
     """
     计算 Hit@K - 前 K 个结果中是否至少有一个相关文档
 
@@ -340,7 +407,9 @@ def compute_hit_at_k(retrieved_sources: list[str], relevant_sources: list[str], 
     return bool(top_k & relevant_set)
 
 
-def compute_mrr(retrieved_sources: list[str], relevant_sources: list[str]) -> float:
+def compute_mrr(
+    retrieved_sources: list[str], relevant_sources: list[str] | set[str]
+) -> float:
     """
     计算 MRR (Mean Reciprocal Rank) - 平均倒数排名
 
@@ -446,11 +515,17 @@ class RAGEvaluator:
         # 执行检索（取 top_k=10 用于评估）
         raw_results = await self._index_manager.search(question.query, top_k=10)
 
+        # 【设计】两侧来源路径统一 resolve 成绝对路径再比对——
+        # chunk.source_path 自 2026-09 评审起恒为绝对路径，而测试集标注
+        # （内置和 --generate 产物）是仓库相对路径；不换算的话交集恒为空，
+        # 所有指标静默归零，eval 报告会"看起来在工作、其实全是 0 分"
+        relevant = {str(Path(r).resolve()) for r in question.relevant_sources}
+
         # 提取来源路径列表
         retrieved_sources = []
         retrieved_chunks = []
         for chunk, score in raw_results:
-            source = chunk.source_path
+            source = str(Path(chunk.source_path).resolve())
             retrieved_sources.append(source)
             retrieved_chunks.append((chunk.text[:200], score))
 
@@ -461,20 +536,20 @@ class RAGEvaluator:
 
         for k in self._k_values:
             recall_at_k[k] = compute_recall_at_k(
-                retrieved_sources, question.relevant_sources, k
+                retrieved_sources, relevant, k
             )
             precision_at_k[k] = compute_precision_at_k(
-                retrieved_sources, question.relevant_sources, k
+                retrieved_sources, relevant, k
             )
             hit_at_k[k] = compute_hit_at_k(
-                retrieved_sources, question.relevant_sources, k
+                retrieved_sources, relevant, k
             )
 
         # 计算 MRR 和第一个命中位置
-        mrr = compute_mrr(retrieved_sources, question.relevant_sources)
+        mrr = compute_mrr(retrieved_sources, relevant)
         first_hit = None
         for rank, source in enumerate(retrieved_sources, start=1):
-            if source in set(question.relevant_sources):
+            if source in relevant:
                 first_hit = rank
                 break
 
@@ -584,7 +659,10 @@ def run_chunk_ablation(
     ...     testset, root_dir="./src"
     ... )
     >>> for r in results:
-    ...     print(f"chunk={r['chunk_size']} overlap={r['chunk_overlap']} recall@5={r['recall@5']:.3f}")
+    ...     print(
+    ...         f"chunk={r['chunk_size']} overlap={r['chunk_overlap']} "
+    ...         f"recall@5={r['recall@5']:.3f}"
+    ...     )
     """
     configs = [
         {"chunk_size": 256, "chunk_overlap": 0},
@@ -626,7 +704,9 @@ def run_chunk_ablation(
             "precision@5": summary.avg_precision_at_k.get(5, 0),
             "mrr": summary.avg_mrr,
             "hit_rate": summary.overall_hit_rate,
-            "total_chunks": index_mgr._meta.get("total_chunks", 0),
+            # status() 取真实 chunk 数；旧写法读 _meta["total_chunks"]——
+            # 该键从未被写入过，消融实验的规模列恒为 0
+            "total_chunks": index_mgr.status().total_chunks,
         })
 
         # 清理索引
@@ -672,7 +752,10 @@ def print_summary(summary: EvalSummary) -> None:
     # 分类指标
     if summary.category_breakdown:
         print("\n  【分类指标】")
-        print(f"  {'分类':<16} {'数量':>6} {'Recall@3':>10} {'Recall@5':>10} {'MRR':>8} {'命中率':>8}")
+        print(
+            f"  {'分类':<16} {'数量':>6} {'Recall@3':>10} "
+            f"{'Recall@5':>10} {'MRR':>8} {'命中率':>8}"
+        )
         print(f"  {'-'*58}")
         for cat, metrics in sorted(summary.category_breakdown.items()):
             print(
@@ -735,10 +818,7 @@ if __name__ == "__main__":
 
     # --generate 模式：自动生成测试集
     if args.generate:
-        from iwan_claude.core.rag.chunker import DocumentChunker
-
-        chunker = DocumentChunker()
-        testset = chunker.generate_test_set(args.root)
+        testset = generate_test_set(args.root)
         output_path = "rag_testset_generated.json"
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(
@@ -759,7 +839,7 @@ if __name__ == "__main__":
 
     # --testset 模式：加载自定义测试集
     elif args.testset:
-        with open(args.testset, "r", encoding="utf-8") as f:
+        with open(args.testset, encoding="utf-8") as f:
             raw = json.load(f)
         testset = [EvalQuestion(**item) for item in raw]
 
@@ -779,6 +859,7 @@ if __name__ == "__main__":
         print("请在代码中初始化 KnowledgeIndexManager 并调用 evaluate() 方法")
         print("\n示例代码:")
         print("""
+import asyncio
 from iwan_claude.core.rag import (
     DocumentChunker, EmbeddingProvider,
     MemoryVectorStore, KnowledgeIndexManager,
@@ -786,18 +867,18 @@ from iwan_claude.core.rag import (
 
 chunker = DocumentChunker(chunk_size=512, chunk_overlap=64)
 store = MemoryVectorStore()
+# API Key 从环境变量读取（QIANWEN_API_KEY / QWEN_API_KEY / DASHSCOPE_API_KEY 等）
 embedder = EmbeddingProvider(
     model="text-embedding-v3",
-    base_url="https://api.deepseek.com/v1",
-    api_key=os.environ.get("DEEPSEEK_API_KEY", ""),
+    base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
 )
 index_mgr = KnowledgeIndexManager(store, embedder, chunker)
 
-# 索引目标目录
-index_mgr.index_directory("src/")
+async def main() -> None:
+    # index_directory 是协程，且 incremental=True 时按 mtime 跳过未变更文件
+    await index_mgr.index_directory(root=".", include=["**/*.py", "**/*.md"])
+    evaluator = RAGEvaluator(index_mgr, testset)
+    print_summary(await evaluator.evaluate())
 
-# 评估
-evaluator = RAGEvaluator(index_mgr, testset)
-summary = asyncio.run(evaluator.evaluate())
-print_summary(summary)
+asyncio.run(main())
         """)

@@ -72,9 +72,19 @@ from iwan_claude.core.bus.commands import (
     CheckpointInfo,                 # 检查点信息
     EventSubscribeCommand,          # 事件订阅命令
     EventSubscribeResult,           # 事件订阅结果
+    FileChangeInfo,                 # 文件变更条目
+    FileChangesListCommand,         # 文件变更清单命令
+    FileChangesListResult,          # 文件变更清单结果
+    FileRestoreCommand,             # 文件还原命令
+    FileRestoreItem,                # 文件还原结果行
+    FileRestoreResult,              # 文件还原结果
     PermissionRespondCommand,       # 权限响应命令
     PermissionRespondResult,        # 权限响应结果
     PongResult,                     # Ping 响应
+    RunCancelCommand,               # 取消运行命令
+    RunCancelResult,                # 取消运行结果
+    RunSteerCommand,                # 运行中修正命令
+    RunSteerResult,                 # 运行中修正结果
     SessionCheckpointListCommand,   # 检查点列表命令
     SessionCheckpointListResult,    # 检查点列表结果
     SessionCheckpointRestoreCommand, # 检查点恢复命令
@@ -91,6 +101,8 @@ from iwan_claude.core.bus.commands import (
     SessionSendMessageResult,       # 发送消息结果
     SessionSetAutoModeCommand,      # 设置自动模式命令
     SessionSetAutoModeResult,       # 设置自动模式结果
+    SessionSetPermissionModeCommand,   # 设置五态权限模式命令
+    SessionSetPermissionModeResult,    # 设置五态权限模式结果
     SessionSetEffortLevelCommand,   # 设置努力等级命令
     SessionSetEffortLevelResult,    # 设置努力等级结果
     SessionSetModelCommand,         # 设置模型预设命令
@@ -102,20 +114,35 @@ from iwan_claude.core.bus.commands import (
     SessionInfo,                    # 会话信息
     SessionRenameCommand,           # 重命名会话命令
     SessionRenameResult,            # 重命名会话结果
+    TrustListCommand,               # 信任列表命令
+    TrustListResult,                # 信任列表结果
+    TrustRespondCommand,            # 信任响应命令
+    TrustRespondResult,             # 信任响应结果
+    TrustRevokeCommand,             # 信任撤销命令
+    TrustRevokeResult,              # 信任撤销结果
 )
 from iwan_claude.core.bus.envelope import EventPushEnvelope  # 事件推送封装
 
 # 导入核心组件
-from iwan_claude.core.config import IwanConfig, get_config   # 配置
+from iwan_claude.core.config import (
+    IwanConfig,
+    get_config,
+    resolve_checkpoint_db_path,                            # checkpoint DB 路径解析（锚定会话根）
+)   # 配置
 from iwan_claude.core.events.bus import EventBus             # 事件总线
 from iwan_claude.core.llm import create_provider_from_config # LLM 提供者创建
 from iwan_claude.core.logging_setup import setup_logging     # 日志初始化
 from iwan_claude.core.mcp.server import McpServerManager     # MCP 服务器管理
 from iwan_claude.core.permissions.manager import PermissionManager  # 权限管理
 from iwan_claude.core.permissions.storage import load_policy_file   # 加载权限策略
+from iwan_claude.core.trust import TrustStore, normalize_dir_key    # Layer 0 信任门
+from iwan_claude.core.shadow import ShadowStore                     # Layer 4 文件回滚
+from iwan_claude.core.run_registry import add_steer, request_cancel  # 活跃运行注册表：取消/修正
 from iwan_claude.core.runner import AgentRunner              # Agent 运行器
 from iwan_claude.core.runs import events_file, new_run_id    # 运行相关工具
 from iwan_claude.core.session import SessionManager, SessionStore  # 会话管理
+# 后台子 Agent 注册表：每 daemon 唯一实例，跨 run 共享
+from iwan_claude.core.subagent.registry import BackgroundTaskRegistry
 from iwan_claude.core.trace.record import TraceRecord        # 跟踪记录
 from iwan_claude.core.trace.writer import TraceWriter        # 跟踪写入器
 from iwan_claude.core.transport.ipc_broadcaster import IpcEventBroadcaster  # IPC 广播器
@@ -135,6 +162,15 @@ def _now() -> str:
         str: ISO 格式的时间字符串
     """
     return datetime.datetime.now(UTC).isoformat()
+
+
+# 目录里是否存在会被自动读进系统提示的指令/配置文件（信任弹窗的风险提示依据）
+def _has_instruction_files(cwd: str) -> bool:
+    base = Path(cwd)
+    for name in ("CLAUDE.md", "AGENTS.md", ".claude/settings.json"):
+        if (base / name).exists():
+            return True
+    return False
 
 
 class CoreApp:
@@ -178,6 +214,8 @@ class CoreApp:
         self._running_runs: set[asyncio.Task[Any]] = set()
         # 会话管理器：管理用户会话
         self._sessions: SessionManager | None = None
+        # 会话根目录（run setup 时按配置刷新）：replay 旁路查找事件文件用
+        self._sessions_root: Path = Path("~/.iwan/sessions").expanduser()
         # 权限管理器：控制工具调用权限
         self._permission_manager: PermissionManager | None = None
         # MCP 服务器管理器：管理外部 MCP 工具服务器
@@ -188,6 +226,8 @@ class CoreApp:
         self._checkpointer_ctx: Any | None = None
         # 跨会话记忆管理器：LongTermMemory + VectorMemory（start 时初始化）
         self._memory: Any | None = None
+        # Layer 0 项目信任存储（start 时按 [permission] trust_file 初始化）
+        self._trust_store: TrustStore | None = None
 
     # 初始化 LangGraph Checkpointer
     async def _init_checkpointer(self) -> None:
@@ -218,20 +258,25 @@ class CoreApp:
         # SQLite 持久化存储：适合生产环境
         elif backend == "sqlite":
             from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-            db_path = Path(self._config.agent.checkpoint_db_path)
+
+            from iwan_claude.core.runner import prune_sqlite_checkpoints
+            # 相对路径锚定会话根父级（daemon 懒启动 cwd 不定）
+            db_path = resolve_checkpoint_db_path(self._config.agent)
             # 确保目录存在
             db_path.parent.mkdir(parents=True, exist_ok=True)
             conn_str = str(db_path.resolve())
-            
+
             # 创建异步上下文管理器
             # AsyncSqliteSaver.from_conn_string() 返回一个异步上下文管理器
             # 需要使用 await ctx.__aenter__() 来获取实际的 saver 对象
             ctx = AsyncSqliteSaver.from_conn_string(conn_str)
             saver = await ctx.__aenter__()
-            
+
             # 保存上下文和 saver 对象
             self._checkpointer_ctx = ctx
             self._checkpointer = saver
+            # 启动期保留策略：裁剪早于任何客户端连接建立，无并发写风险
+            await prune_sqlite_checkpoints(saver, self._config.agent.checkpoint_keep_last)
             logger.info("checkpointer: using sqlite backend at %s", conn_str)
         
         # 未知后端
@@ -357,9 +402,42 @@ class CoreApp:
 
         # 返回会话 ID、状态和当前配置
         auto_mode = self._permission_manager.get_auto_mode() if self._permission_manager is not None else "off"
+        permission_mode = (
+            self._permission_manager.get_permission_mode(session.id)
+            if self._permission_manager is not None else "default"
+        )
         effort_level = self._permission_manager.get_effort_level() if self._permission_manager is not None else "medium"
         model_preset = self._permission_manager.get_model_preset() if self._permission_manager is not None else "balanced"
-        return SessionCreateResult(session_id=session.id, status=session.status, auto_mode=auto_mode, effort_level=effort_level, model_preset=model_preset)
+        # ===== Layer 0 信任门（S9 Part A）=====
+        # 信任判定对准的目录必须与会话实际工作目录一致：cmd.cwd 为空时
+        # create() 走 daemon 进程 CWD 兜底，这里用同一判据，否则弹窗问 A 写的是 B
+        effective_cwd = cmd.cwd or os.getcwd()
+        trust = "ask"
+        if self._trust_store is not None and self._permission_manager is not None:
+            if cmd.trust_decision in ("allow", "deny"):
+                # 客户端先行答复（信任对话框答完再建会话）：直接落持久决定
+                trust = cmd.trust_decision
+                self._trust_store.set_decision(effective_cwd, trust)
+            else:
+                trust = self._trust_store.lookup(effective_cwd)
+            self._permission_manager.set_trust(session.id, trust)
+            if trust == "ask":
+                # 未决目录：广播 trust.requested 供在线客户端弹信任对话框。
+                # 只通知不等待——会话照常可用（ask=写操作逐次审批的现状语义）
+                from iwan_claude.core.bus.events import TrustRequestedEvent
+                await self._bus.publish(
+                    TrustRequestedEvent(
+                        session_id=session.id,
+                        cwd=effective_cwd,
+                        has_instruction_files=_has_instruction_files(effective_cwd),
+                        ts=_now(),
+                    )
+                )
+        return SessionCreateResult(
+            session_id=session.id, status=session.status, auto_mode=auto_mode,
+            permission_mode=permission_mode, effort_level=effort_level, model_preset=model_preset,
+            trust=trust,
+        )
 
     # 向 session 发送一条用户消息并同步等待对应 run 完成
     async def _session_send_handler(self, params: dict[str, Any]) -> SessionSendMessageResult:
@@ -376,6 +454,19 @@ class CoreApp:
 
         # 验证请求参数
         cmd = SessionSendMessageCommand.model_validate(params)
+
+        # ===== Layer 0 信任复查（覆盖 resume/重启场景）=====
+        # 从磁盘恢复的会话不走 session.create，内存信任档是空的；未登记时
+        # 按该会话 cwd 查一次 TrustStore——resume 进 deny 目录的会话同样被拦
+        if (
+            self._trust_store is not None
+            and self._permission_manager is not None
+            and not self._permission_manager.has_trust(cmd.session_id)
+        ):
+            sess = self._sessions._get_session(cmd.session_id)
+            self._permission_manager.set_trust(
+                cmd.session_id, self._trust_store.lookup(sess.cwd or os.getcwd())
+            )
 
         # 发送消息并等待任务完成
         result = await self._sessions.send_message(
@@ -443,8 +534,182 @@ class CoreApp:
         
         # 响应权限请求：唤醒等待的协程
         self._permission_manager.respond(cmd.tool_use_id, cmd.decision)
-        
+
         return PermissionRespondResult()
+
+    # 处理 trust.respond：登记/撤销某目录的信任决定（不阻塞执行，改的是"以后的规则"）
+    async def _trust_respond_handler(self, params: dict[str, Any]) -> TrustRespondResult:
+        """
+        处理 trust.respond RPC 请求 - 设定会话/目录的信任档
+
+        参数：
+            params: 请求参数，含 session_id / cwd（空=会话 cwd）/ decision / persistent
+
+        返回：
+            TrustRespondResult: ok + 该会话现在的生效信任档
+        """
+        assert self._sessions is not None
+        assert self._permission_manager is not None
+        assert self._trust_store is not None
+
+        cmd = TrustRespondCommand.model_validate(params)
+        # 空 session_id = 无会话操作（`iwan trust grant/deny` 的 CLI 场景）：
+        # 此时必须显式给 cwd，只改持久层，不碰任何会话内存态
+        session = None
+        if cmd.session_id:
+            # 会话不存在会抛 SessionError → JSON-RPC 错误，不静默吞掉
+            session = self._sessions._get_session(cmd.session_id)
+        cwd = cmd.cwd or (session.cwd if session is not None else "")
+        if not cwd and session is None:
+            return TrustRespondResult(ok=False, trust="ask")
+        cwd = cwd or os.getcwd()
+        if cmd.decision not in ("allow", "deny", "ask"):
+            return TrustRespondResult(
+                ok=False, trust=self._permission_manager.get_trust(cmd.session_id))
+        # 会话内存态立即生效（deny 从下一枚工具调用起拦）
+        if session is not None:
+            self._permission_manager.set_trust(cmd.session_id, cmd.decision)
+        if cmd.persistent:
+            if cmd.decision == "ask":
+                self._trust_store.revoke(cwd)
+            else:
+                self._trust_store.set_decision(cwd, cmd.decision)
+        # 生效值：持久答复以重查结果为准（inherit 可能让祖先决定继续赢）
+        effective = self._trust_store.lookup(cwd) if cmd.persistent else cmd.decision
+        from iwan_claude.core.bus.events import TrustChangedEvent
+        await self._bus.publish(
+            TrustChangedEvent(
+                session_id=cmd.session_id,
+                cwd=normalize_dir_key(cwd),
+                decision=cmd.decision,
+                persistent=cmd.persistent,
+                ts=_now(),
+            )
+        )
+        return TrustRespondResult(ok=True, trust=effective)
+
+    # 处理 trust.list：全量持久信任条目（CLI/TUI 展示与自查）
+    async def _trust_list_handler(self, params: dict[str, Any]) -> TrustListResult:
+        """
+        处理 trust.list RPC 请求 - 列出 trust.toml 全部条目
+        """
+        assert self._trust_store is not None
+        return TrustListResult(entries=self._trust_store.entries())
+
+    # 处理 trust.revoke：删除某目录的持久决定（回到未决态；deny 撤销后恢复 ask）
+    async def _trust_revoke_handler(self, params: dict[str, Any]) -> TrustRevokeResult:
+        """
+        处理 trust.revoke RPC 请求 - 撤销某目录的持久信任决定
+
+        参数：
+            params: 请求参数，含 cwd（与 trust.toml 键做同样归一化后比对）
+
+        返回：
+            TrustRevokeResult: ok=是否确实删掉了条目
+        """
+        assert self._trust_store is not None
+        cmd = TrustRevokeCommand.model_validate(params)
+        removed = self._trust_store.revoke(cmd.cwd)
+        if removed:
+            # 广播让在线客户端刷新信任面板；session_id 空串=非会话发起
+            from iwan_claude.core.bus.events import TrustChangedEvent
+            await self._bus.publish(
+                TrustChangedEvent(
+                    session_id="",
+                    cwd=normalize_dir_key(cmd.cwd),
+                    decision="ask",
+                    persistent=True,
+                    ts=_now(),
+                )
+            )
+        return TrustRevokeResult(ok=removed)
+
+    # 定位指定会话/run 的影子账本；run_id 空 = 按 mtime 取最近一个有账本的 run
+    def _shadow_store_for(self, session_id: str, run_id: str) -> tuple[ShadowStore | None, str]:
+        """
+        组装 ShadowStore（对象目录=会话级 shadow/，账本=该 run 的 file_changes.json）
+
+        参数：
+            session_id: 会话 ID（不存在时由调用方的 _get_session 提前拦下）
+            run_id: 目标 run；"" = 自动选最近有账本的 run
+
+        返回：
+            (ShadowStore | None, 实际选定的 run_id)；无账本时 (None, "")
+        """
+        assert self._sessions is not None and self._config is not None
+        store = self._sessions._store
+        sess_dir = store.session_dir(session_id)
+        runs_dir = store.runs_dir(session_id)
+        max_bytes = self._config.sandbox.shadow_max_file_bytes
+        if run_id:
+            ledger = runs_dir / run_id / "file_changes.json"
+            if not ledger.exists():
+                return None, run_id
+            return ShadowStore(sess_dir / "shadow", ledger, max_file_bytes=max_bytes), run_id
+        # 自动选档：账本文件的存在本身就是"该 run 做过写操作"的证据
+        ledgers = sorted(
+            runs_dir.glob("*/file_changes.json"),
+            key=lambda p: p.stat().st_mtime,
+        ) if runs_dir.exists() else []
+        if not ledgers:
+            return None, ""
+        chosen = ledgers[-1]
+        return ShadowStore(sess_dir / "shadow", chosen, max_file_bytes=max_bytes), chosen.parent.name
+
+    # 处理 files.changes：列出该 run 被影子快照记录的文件变更（含冲突标记）
+    async def _file_changes_list_handler(
+        self, params: dict[str, Any]
+    ) -> FileChangesListResult:
+        """
+        处理 files.changes RPC 请求 - 文件变更清单
+
+        参数：
+            params: 请求参数，含 session_id 与可选 run_id（空=最近有账本的 run）
+
+        返回：
+            FileChangesListResult: 实际 run_id + 按文件归并的最近变更状态
+        """
+        assert self._sessions is not None
+        cmd = FileChangesListCommand.model_validate(params)
+        self._sessions._get_session(cmd.session_id)
+        shadow, chosen_run = self._shadow_store_for(cmd.session_id, cmd.run_id)
+        if shadow is None:
+            return FileChangesListResult(run_id=chosen_run, changes=[])
+        changes = [FileChangeInfo(**row) for row in shadow.changes_view()]
+        return FileChangesListResult(run_id=chosen_run, changes=changes)
+
+    # 处理 files.restore：把选中文件回滚到该 run 变更前（还原自带反向快照，可再撤销）
+    async def _file_restore_handler(self, params: dict[str, Any]) -> FileRestoreResult:
+        """
+        处理 files.restore RPC 请求 - 文件还原
+
+        参数：
+            params: 请求参数，含 session_id / run_id（空=最近）/ paths（["*"]=全部）/ force
+
+        返回：
+            FileRestoreResult: 逐文件结果；有 skipped/failed 时 ok=False
+        """
+        assert self._sessions is not None
+        cmd = FileRestoreCommand.model_validate(params)
+        self._sessions._get_session(cmd.session_id)
+        shadow, chosen_run = self._shadow_store_for(cmd.session_id, cmd.run_id)
+        if shadow is None:
+            return FileRestoreResult(
+                ok=False, run_id=chosen_run,
+                results=[FileRestoreItem(
+                    path="*", status="failed",
+                    detail="no shadow ledger found for this session/run",
+                )],
+            )
+        rows = shadow.restore(list(cmd.paths), force=cmd.force)
+        items = [FileRestoreItem(**row) for row in rows]
+        ok = all(it.status == "restored" for it in items)
+        logger.info(
+            "files.restore: session=%s run=%s restored=%d/%d force=%s",
+            cmd.session_id, chosen_run,
+            sum(1 for it in items if it.status == "restored"), len(items), cmd.force,
+        )
+        return FileRestoreResult(ok=ok, run_id=chosen_run, results=items)
 
     # 手动压缩 session thread，将摘要持久化写入 thread.jsonl
     async def _session_compact_handler(self, params: dict[str, Any]) -> SessionCompactResult:
@@ -574,12 +839,18 @@ class CoreApp:
         
         # 确保会话存在
         self._sessions._get_session(cmd.session_id)
-        
-        # 设置权限管理器的自动模式
+
+        # 旧值取该会话生效模式（legacy 改的是全局默认，per-session 覆盖可能让它不变）
+        previous = self._permission_manager.get_permission_mode(cmd.session_id)
+        # 设置权限管理器的自动模式（映射进五态的全局默认值）
         self._permission_manager.set_auto_mode(cmd.mode)
-        
+        effective = self._permission_manager.get_permission_mode(cmd.session_id)
+
         # 发布事件通知客户端模式已变更
-        from iwan_claude.core.bus.events import SessionAutoModeChangedEvent
+        from iwan_claude.core.bus.events import (
+            SessionAutoModeChangedEvent,
+            SessionPermissionModeChangedEvent,
+        )
         await self._bus.publish(
             SessionAutoModeChangedEvent(
                 session_id=cmd.session_id,
@@ -587,9 +858,57 @@ class CoreApp:
                 ts=_now(),
             )
         )
+        # 同步广播五态事件：新客户端只认 permission_mode_changed，
+        # legacy 入口若不发这条，多端状态栏就会停在过期档位
+        if effective != previous:
+            await self._bus.publish(
+                SessionPermissionModeChangedEvent(
+                    session_id=cmd.session_id,
+                    mode=effective,
+                    previous_mode=previous,
+                    ts=_now(),
+                )
+            )
         
         # 返回设置后的模式
         return SessionSetAutoModeResult(mode=cmd.mode)
+
+    # 切换指定会话的五态权限模式（对齐 Claude Code Shift+Tab；per-session 不伤及他席）
+    async def _session_set_permission_mode_handler(
+        self, params: dict[str, Any]
+    ) -> SessionSetPermissionModeResult:
+        """
+        处理 session.set_permission_mode RPC 请求 - 设置会话权限模式
+
+        参数：
+            params: 请求参数，包含 session_id 和 mode（五态之一）字段
+
+        返回：
+            SessionSetPermissionModeResult: 包含 mode 与 previous_mode
+        """
+        assert self._sessions is not None
+        assert self._permission_manager is not None
+
+        # 验证请求参数（非法 mode 在 manager 内抛 ValueError → JSON-RPC INTERNAL_ERROR）
+        cmd = SessionSetPermissionModeCommand.model_validate(params)
+
+        # 确保会话存在（不存在的 session_id 直接抛 SessionError）
+        self._sessions._get_session(cmd.session_id)
+
+        # 切换并拿到旧值，previous 随事件广播供多端一致刷新
+        previous = self._permission_manager.set_permission_mode(cmd.mode, cmd.session_id)
+
+        from iwan_claude.core.bus.events import SessionPermissionModeChangedEvent
+        await self._bus.publish(
+            SessionPermissionModeChangedEvent(
+                session_id=cmd.session_id,
+                mode=cmd.mode,
+                previous_mode=previous,
+                ts=_now(),
+            )
+        )
+
+        return SessionSetPermissionModeResult(mode=cmd.mode, previous_mode=previous)
 
     # 设置会话的努力等级
     async def _session_set_effort_level_handler(self, params: dict[str, Any]) -> SessionSetEffortLevelResult:
@@ -686,7 +1005,8 @@ class CoreApp:
         self._sessions._get_session(cmd.session_id)
 
         # 验证引擎名称有效性
-        valid_engines = {"legacy", "langgraph", "plan_execute", "debate", "pipeline"}
+        # "auto"：runner 每个 run 前用 engine_selector 按任务复杂度自动挑选引擎
+        valid_engines = {"legacy", "langgraph", "plan_execute", "debate", "pipeline", "auto"}
         if cmd.engine not in valid_engines:
             raise ValueError(
                 f"Invalid engine '{cmd.engine}'. Valid engines: {', '.join(sorted(valid_engines))}"
@@ -773,6 +1093,57 @@ class CoreApp:
             "checkpoint_backend": self._config.agent.checkpoint_backend,
         }
 
+    # 处理 run.cancel：按 run_id 请求取消活跃运行
+    async def _run_cancel_handler(self, params: dict[str, Any]) -> RunCancelResult:
+        """
+        处理 run.cancel RPC 请求 - 取消正在运行的任务
+
+        【学习要点】
+        1. 这里只做"举手示意"：request_cancel 给活跃 run 打标记并 cancel 其
+           asyncio.Task，真正的清场（保存轨迹、发 RunFinishedEvent(cancelled)）
+           由 runner 捕获 CancelledError 完成——取消语义收敛在一处，RPC 层零逻辑。
+        2. 不抛异常而是返回 accepted=False：run 可能刚好自然结束，取消是幂等
+           操作，客户端拿到的永远是"有没有命中"而不是错误码。
+        3. 与 session.close 的区别：close 是会话级销毁，cancel 只掐当前一次运行，
+           会话本身和已写入的历史都保留。
+
+        参数：
+            params: 请求参数，包含 run_id 字段
+
+        返回：
+            RunCancelResult: accepted 表示是否命中了一个活跃 run
+        """
+        cmd = RunCancelCommand.model_validate(params)
+        accepted = request_cancel(cmd.run_id)
+        logger.info("run.cancel run_id=%s accepted=%s", cmd.run_id, accepted)
+        return RunCancelResult(accepted=accepted)
+
+    # 处理 run.steer：向活跃运行注入运行中修正消息
+    async def _run_steer_handler(self, params: dict[str, Any]) -> RunSteerResult:
+        """
+        处理 run.steer RPC 请求 - 任务运行中给出修正评论
+
+        【学习要点】
+        1. steer 不进 RPC 的请求-响应同步路径：消息只 append 进该 run 的内存
+           队列（run_registry），由引擎在下一次调用 LLM 前的回合边界消费。
+           所以本方法"入队即成功"，模型何时读到是异步的。
+        2. accepted=False 表示 run 已结束/不存在，此时队列里没有这条消息——
+           客户端应当改发 session.send_message，避免用户以为修正已生效。
+        3. 不阻塞等待模型"看到"：如果等确认，取消/修正这种高频轻量操作会
+           被拖成一次完整 turn 的延迟。
+
+        参数：
+            params: 请求参数，包含 run_id 和 message 字段
+
+        返回：
+            RunSteerResult: accepted 表示是否命中活跃 run，queued 为当前积压条数
+        """
+        cmd = RunSteerCommand.model_validate(params)
+        queued = add_steer(cmd.run_id, cmd.message)
+        accepted = queued is not None
+        logger.info("run.steer run_id=%s accepted=%s queued=%s", cmd.run_id, accepted, queued)
+        return RunSteerResult(accepted=accepted, queued=queued or 0)
+
     # 注册客户端事件订阅，可选先回放 events.jsonl 历史再接收实时流
     async def _subscribe_handler(self, params: dict[str, Any]) -> EventSubscribeResult:
         """
@@ -833,9 +1204,11 @@ class CoreApp:
         # 获取事件文件路径
         path = events_file(run_id)
         
-        # 如果路径不存在，尝试在默认会话目录中查找
+        # 如果路径不存在，尝试在会话目录中查找（one_shot/chat run 的事件落在
+        # <sessions_root>/<sid>/runs/ 下；sessions_root 受 IWAN_SESSIONS_DIR 影响，
+        # 必须与初始化 SessionStore 时同源，否则测试/自定义目录回放恒为 0）
         if not path.exists():
-            for candidate in Path("~/.iwan/sessions").expanduser().glob(
+            for candidate in self._sessions_root.glob(
                 f"*/runs/{run_id}/events.jsonl"
             ):
                 path = candidate
@@ -921,14 +1294,53 @@ class CoreApp:
         # ===== 初始化权限管理器 =====
         # 加载权限策略文件，管理工具调用权限
         policy_file = Path("~/.iwan/policy.toml").expanduser()
+        # 声明式 deny/ask/allow 规则（[permission] 节；全空 = 规则引擎关闭）
+        from iwan_claude.core.permissions.rules import PermissionRules
+        permission_rules = PermissionRules(
+            deny=self._config.permission.deny,
+            ask=self._config.permission.ask,
+            allow=self._config.permission.allow,
+        )
+        # [[hooks]] 已在配置加载期校验过，这里解析成可执行规格并接入事件总线
+        # （registry 持 bus：每个实际跑过的 hook 广播 hook.evaluated，TUI 可观测）
+        from iwan_claude.core.hooks import HookRegistry, parse_hook_entries
+        hook_specs = parse_hook_entries(self._config.hooks)
+        hook_registry = HookRegistry(hook_specs, bus=self._bus)
+        # 启动默认模式：[permission] mode 优先；老配置 [agent] auto_mode 仅在
+        # 新键未动过（仍为 default）时经 AUTO_TO_MODE 折进来——新旧键共存时
+        # 更具体的 permission 节赢，这条判据写进设计文档 §3
+        from iwan_claude.core.permissions.manager import AUTO_TO_MODE
+        effective_mode = self._config.permission.mode
+        if effective_mode == "default" and self._config.agent.auto_mode != "off":
+            effective_mode = AUTO_TO_MODE[self._config.agent.auto_mode]
         self._permission_manager = PermissionManager(
             policy_file=policy_file,
             timeout_s=self._config.permission.timeout_s,
+            rules=permission_rules,
+            hooks=hook_registry,
+            default_mode=effective_mode,
+        )
+
+        # ===== 初始化项目信任存储（Layer 0 信任门，S9 Part A）=====
+        # 与权限层的关系：信任是上游 AND 门（目录能不能碰），权限是下游逐次裁决
+        # （这次碰要不要问）——两者独立评估，更严的一方生效
+        trust_path = Path(self._config.permission.trust_file).expanduser()
+        self._trust_store = TrustStore(
+            trust_path, inherit=self._config.permission.trust_inherit,
         )
         logger.info(
-            "permission manager: timeout_s=%.1f  persistent=%d entries",
+            "trust: store=%s inherit=%s entries=%d",
+            trust_path, self._config.permission.trust_inherit,
+            len(self._trust_store.entries()),
+        )
+        logger.info(
+            "permission manager: timeout_s=%.1f  default_mode=%s  persistent=%d entries"
+            "  rules=%d/%d/%d  hooks=%d",
             self._config.permission.timeout_s,
+            effective_mode,
             len(load_policy_file(policy_file)),
+            len(permission_rules.deny), len(permission_rules.ask), len(permission_rules.allow),
+            len(hook_specs),
         )
 
         # ===== 初始化事件广播器 =====
@@ -940,6 +1352,8 @@ class CoreApp:
         # ===== 初始化会话存储 =====
         # 获取会话根目录：优先使用环境变量 IWAN_SESSIONS_DIR，否则使用默认路径
         sessions_root = Path(os.environ.get("IWAN_SESSIONS_DIR", "~/.iwan/sessions")).expanduser()
+        # 保存根目录引用：replay 等旁路读事件时要按同一目录找，不能写死默认路径
+        self._sessions_root = sessions_root
         # 确保目录存在
         sessions_root.mkdir(parents=True, exist_ok=True)
         # 创建会话存储（基于文件系统）
@@ -982,7 +1396,12 @@ class CoreApp:
         memory_dir.mkdir(parents=True, exist_ok=True)
         long_term = LongTermMemory(memory_dir / "long_term.jsonl")
         try:
-            embedder = get_embedding_provider(self._config.rag, self._config.llm.base_url)
+            # timeout_s 接 [llm] embedding_timeout_s：向量记忆与 RAG 共用同一超时预算
+            embedder = get_embedding_provider(
+                self._config.rag,
+                self._config.llm.base_url,
+                timeout_s=self._config.llm.embedding_timeout_s,
+            )
         except Exception:
             logging.getLogger(__name__).exception(
                 "embedding provider init failed, vector memory disabled"
@@ -993,7 +1412,10 @@ class CoreApp:
             vector_memory=VectorMemory(
                 vector_store=get_vector_store(),
                 embedding_provider=embedder,
-                index_path=str(memory_dir / "vector_memory.json"),
+                # 【设计】index_path 是"目录"不是"文件"（store.save 会 mkdir 后写
+                # chunks.json/vectors.json 两个文件）——旧实现传 vector_memory.json，
+                # 用户磁盘上出现一个名叫 .json 的目录
+                index_path=str(memory_dir / "vector_memory"),
             ),
             project_context=render_claude_md_prompt(load_claude_md()),
         )
@@ -1002,7 +1424,12 @@ class CoreApp:
 
         # ===== 初始化会话管理器 =====
         # SessionManager 负责管理所有用户会话
-        # 使用 lambda 作为 runner_factory，确保每个会话都有独立的 AgentRunner
+        # 【设计】后台子 Agent 注册表挂在 CoreApp 上、每 daemon 唯一，
+        # 注入给每个 AgentRunner：AgentRunner 是每次用户发言新建的，
+        # 注册表若跟着 runner 走，上一轮 spawn_agent 的 run_id 下一轮
+        # 就查不到、也取消不了（工具描述的"稍后用 agent_result 取"变成假承诺）
+        self._subagent_registry = BackgroundTaskRegistry()
+        # 使用 lambda 作为 runner_factory，AgentRunner 每 run 新建、共享注册表
         self._sessions = SessionManager(
             store,
             runner_factory=lambda: AgentRunner(
@@ -1013,6 +1440,7 @@ class CoreApp:
                 mcp_manager=self._mcp_manager,
                 checkpointer=self._checkpointer,
                 memory_manager=self._memory,
+                task_registry=self._subagent_registry,
             ),
             bus=self._bus,
             provider=compact_provider,
@@ -1045,16 +1473,24 @@ class CoreApp:
         server.register("session.get_history", self._session_history_handler)
         server.register("session.close", self._session_close_handler)
         server.register("permission.respond", self._permission_respond_handler)
+        server.register("trust.respond", self._trust_respond_handler)
+        server.register("trust.list", self._trust_list_handler)
+        server.register("trust.revoke", self._trust_revoke_handler)
+        server.register("files.changes", self._file_changes_list_handler)
+        server.register("files.restore", self._file_restore_handler)
         server.register("session.compact", self._session_compact_handler)
         server.register("session.checkpoint.list", self._session_checkpoint_list_handler)
         server.register("session.checkpoint.restore", self._session_checkpoint_restore_handler)
         server.register("session.set_auto_mode", self._session_set_auto_mode_handler)
+        server.register("session.set_permission_mode", self._session_set_permission_mode_handler)
         server.register("session.set_effort_level", self._session_set_effort_level_handler)
         server.register("session.set_model", self._session_set_model_handler)
         server.register("session.set_engine", self._session_set_engine_handler)
         server.register("session.list", self._session_list_handler)
         server.register("session.rename", self._session_rename_handler)
         server.register("session.engine_info", self._session_engine_info_handler)
+        server.register("run.cancel", self._run_cancel_handler)
+        server.register("run.steer", self._run_steer_handler)
 
         # ===== 启动服务器 =====
         # start() 方法会启动 TCP 监听并返回绑定的地址
@@ -1111,6 +1547,17 @@ class CoreApp:
         # 等待所有任务完成（或被取消）
         if self._running_runs:
             await asyncio.gather(*self._running_runs, return_exceptions=True)
+
+        # 收尸后台子 Agent：只 cancel 不 await 的话，事件循环关闭时
+        # 未回收任务会以 "Task was destroyed but it is pending" 收场
+        registry = getattr(self, "_subagent_registry", None)
+        if registry is not None:
+            n_cancelled = await registry.shutdown()
+            if n_cancelled:
+                logger.info(
+                    "subagent registry: cancelled %d background task(s) on shutdown",
+                    n_cancelled,
+                )
         
         # 停止所有 MCP 服务器
         if self._mcp_manager is not None:

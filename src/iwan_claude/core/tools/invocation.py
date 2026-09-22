@@ -37,6 +37,7 @@ from iwan_claude.core.bus.events import (
 )
 from iwan_claude.core.events.bus import EventBus
 from iwan_claude.core.llm.types import ToolCallBlock
+from iwan_claude.core.shadow import get_active_shadow
 from iwan_claude.core.tools.base import ToolResult
 from iwan_claude.core.tools.errors import RateLimitedError
 from iwan_claude.core.tools.registry import ToolRegistry
@@ -314,6 +315,23 @@ async def invoke_tool(
             )
 
     # 5. 执行工具（带重试逻辑）
+    # ===== 影子快照：重试循环之前捕获一次写前状态（S9 Part C）=====
+    # 【为何在循环外】若在 attempt-1 失败后重拍，抓到的已是 attempt-1 写坏的
+    # 半损坏状态，回滚语义当场作废。故 prepare 只做一次、且早于任何写入尝试；
+    # commit 只在最终成功路径执行（见下方 result.is_error 为假处）。
+    shadow = get_active_shadow()
+    shadow_pending: list[dict[str, Any]] = []
+    if shadow is not None and hasattr(tool, "estimate_affected_paths"):
+        try:
+            affected = await tool.estimate_affected_paths(dict(tool_call.input))
+            shadow_pending = shadow.prepare(affected)
+        except Exception:
+            # 快照失败绝不拦执行：回滚是尽力而为的保险，不是正确性前置条件
+            logging.getLogger(__name__).warning(
+                "shadow prepare failed tool=%s", tool_call.name, exc_info=True,
+            )
+            shadow_pending = []
+
     # 循环次数：_MAX_RETRIES + 1（首次尝试 + 最多 N 次重试）
     # 使用模块级可变变量，以便单元测试通过 monkeypatch 覆盖（消除 sleep / 调小重试）
     for attempt in range(1, _MAX_RETRIES + 2):
@@ -338,7 +356,10 @@ async def invoke_tool(
                 error_class = result.error_type or "runtime_error"
                 error_message = result.content
             else:
-                # 工具执行成功，发布完成事件
+                # 工具执行成功，先落影子账（"写成功必有快照"在此闭合），
+                # 再发布完成事件——观察方看到 finished 时账本已一致
+                if shadow is not None and shadow_pending:
+                    shadow.commit(shadow_pending, tool_call.name)
                 await bus.publish(
                     ToolCallFinishedEvent(
                         run_id=run_id,
@@ -349,6 +370,18 @@ async def invoke_tool(
                         ts=_now(),
                     )
                 )
+                # PostToolUse hook（审计/后处理）：exit 2 的 stderr 以警告形式
+                # 追加进 tool 结果回灌模型；它无权撤销已发生的执行（设计文档 §2.5）
+                if permission_manager is not None:
+                    hook_warn = await permission_manager.run_post_tool_use_hooks(
+                        tool_call.name, dict(tool_call.input), result.content,
+                        session_id=session_id, run_id=run_id,
+                    )
+                    if hook_warn:
+                        result.content = (
+                            result.content + "\n\n" + hook_warn if result.content
+                            else hook_warn
+                        )
                 return result
 
         except RateLimitedError as exc:

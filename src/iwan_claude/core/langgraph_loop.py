@@ -34,16 +34,10 @@ LangGraphAgentLoop 模块 - 使用 LangGraph 构建的高级执行引擎
 from __future__ import annotations
 
 # asyncio：异步 I/O 框架
-# uuid：生成唯一标识符
-# datetime：日期时间处理
-# typing：类型提示（TypedDict、Literal）
 import asyncio
-import uuid
-from datetime import UTC, datetime
-from typing import Any, Literal, TypedDict
-
 # LangGraph 核心类：StateGraph 用于定义工作流，START 和 END 是特殊节点
 from langgraph.graph import END, START, StateGraph
+from typing import Any, Literal, TypedDict
 
 # 导入事件类型
 from iwan_claude.core.bus.events import StepFinishedEvent, StepStartedEvent
@@ -54,8 +48,17 @@ from iwan_claude.core.context import ExecutionContext           # 执行上下�
 from iwan_claude.core.effort import get_effort_params           # 努力等级参数查询
 from iwan_claude.core.events.bus import EventBus                # 事件总线
 from iwan_claude.core.llm.base import LLMProvider               # LLM 提供者接口
-from iwan_claude.core.llm.types import LlmResponse, ToolCallBlock  # LLM 响应类型
+from iwan_claude.core.llm.types import ToolCallBlock            # LLM 响应类型
+# 消息块构造共享工具（与 plan_execute/debate/pipeline 引擎共用）
+from iwan_claude.core.message_blocks import (
+    _add_tool_result_to_messages,
+    _assistant_msg_from_response,
+    _extract_last_assistant_text,
+    _extract_user_goal,
+    _now,
+)
 from iwan_claude.core.permissions.manager import PermissionManager  # 权限管理器
+from iwan_claude.core.run_registry import pop_steers, steer_as_message  # 运行中修正队列
 from iwan_claude.core.system_prompt import build_base_system_prompt  # 构建基础 system prompt
 from iwan_claude.core.tools.invocation import invoke_tool       # 工具调用函数
 from iwan_claude.core.tools.registry import ToolRegistry        # 工具注册表
@@ -64,15 +67,8 @@ import logging
 # 获取当前模块的日志记录器
 log = logging.getLogger(__name__)
 
-
-def _now() -> str:
-    """
-    获取当前 UTC 时间的 ISO 8601 格式字符串
-    
-    返回值：
-        str: 格式如 "2024-01-01T12:00:00+00:00" 的时间字符串
-    """
-    return datetime.now(UTC).isoformat()
+# 单次 run 允许的最大压缩次数，防止 compact↔chat 死循环
+_MAX_COMPACT_PER_RUN = 2
 
 
 class AgentState(TypedDict):
@@ -106,6 +102,13 @@ class AgentState(TypedDict):
     _tool_calls: list[ToolCallBlock] | None  # 工具调用列表（内部）
     _usage: Any | None                    # LLM 使用信息（内部）
     _reflect_count: int                   # 反思次数（防止无限反思）
+    max_steps: int                        # 本次 run 的最大步数（0 表示不限制）
+    _files_read: int                      # 已读取文件数（effort 限制，内部）
+    _compact_count: int                   # 本次 run 已压缩次数（防止 compact 死循环，内部）
+    # 【学习要点】checkpoint↔run 交叉索引：configurable 里的自定义键（run_id）不会被
+    # checkpointer 持久化，只有状态通道会进 checkpoint。把 run_id 做成通道，
+    # 每个 checkpoint 天然标注"属于哪次运行"，回溯面板才能按 run 分组。
+    run_id: str                           # 本次运行 ID（checkpoint 归属标注）
 
 
 class LangGraphAgentLoop:
@@ -262,6 +265,7 @@ class LangGraphAgentLoop:
                 "compact": "compact",              # 需要压缩
                 "end_turn": "reflect",             # 对话结束 → 先反思再决定
                 "error": "end",                   # 出错
+                "max_steps": "end",               # 达到步数上限 → 结束（end 标记 failed）
             },
         )
 
@@ -345,6 +349,11 @@ class LangGraphAgentLoop:
             "_stop_reason": None,                             # LLM 停止原因（内部）
             "_tool_calls": None,                              # 工具调用列表（内部）
             "_usage": None,                                   # LLM 使用信息（内部）
+            "_reflect_count": 0,                              # 反思计数初始化
+            "max_steps": context.max_steps,                   # 步数上限（防无限循环）
+            "_files_read": 0,                                 # 文件读取计数初始化
+            "_compact_count": 0,                              # 压缩计数初始化
+            "run_id": context.run_id,                         # checkpoint 归属标注（回溯按 run 分组）
         }
 
         # 确定 thread_id：优先使用 session_id，否则使用 run_id
@@ -399,7 +408,19 @@ class LangGraphAgentLoop:
         run_id = ""
         if config is not None and isinstance(config, dict):
             run_id = config.get("configurable", {}).get("run_id", "")
-        
+
+        # 步数守卫：达到 max_steps 上限时不再调用 LLM，直接走向结束
+        max_steps = state.get("max_steps", 0)
+        if max_steps > 0 and state["step"] + 1 > max_steps:
+            return {**state, "_stop_reason": "max_steps", "_tool_calls": None}
+
+        # 消费运行中修正（run.steer）：在下一次模型调用前注入对话历史
+        # 【设计】只注入为 user 消息，随轨迹进入消息历史——回合边界消费，
+        # 不打断正在执行的工具调用，与 Claude Code 的 in-flight steering 一致
+        steers = pop_steers(run_id)
+        if steers:
+            state["messages"] = state["messages"] + [steer_as_message(s) for s in steers]
+
         # 增加步骤计数器
         state["step"] += 1
 
@@ -472,7 +493,10 @@ class LangGraphAgentLoop:
         7. 默认 → "end_turn"：结束对话
         """
         sr = state.get("_stop_reason")
-        
+
+        # 步数守卫触发：直接结束（end 节点会标记为 failed）
+        if sr == "max_steps":
+            return "max_steps"
         # LLM 返回了工具调用
         if sr == "tool_use":
             return "tool_use"
@@ -487,10 +511,8 @@ class LangGraphAgentLoop:
             return "error"
 
         # 检查是否需要压缩（上下文过长）
-        if self._compactor and self._compact_threshold > 0:
-            total_len = sum(len(str(m.get("content", ""))) for m in state["messages"])
-            if total_len > self._compact_threshold:
-                return "compact"
+        if self._needs_compact(state):
+            return "compact"
 
         # token 限制需要压缩
         if sr == "max_tokens":
@@ -498,6 +520,20 @@ class LangGraphAgentLoop:
 
         # 默认：结束对话
         return "end_turn"
+
+    # 判断当前历史是否触发压缩：0<threshold<=1 按上下文占用率，>1 按字符数（兼容旧配置）
+    def _needs_compact(self, state: AgentState) -> bool:
+        if self._compactor is None or self._compact_threshold <= 0:
+            return False
+        # 压缩次数达到上限后不再触发，防止 compact↔chat 死循环
+        if state.get("_compact_count", 0) >= _MAX_COMPACT_PER_RUN:
+            return False
+        if self._compact_threshold <= 1:
+            usage = state.get("_usage")
+            pct = getattr(usage, "context_pct", 0.0) if usage is not None else 0.0
+            return pct >= self._compact_threshold
+        total_len = sum(len(str(m.get("content", ""))) for m in state["messages"])
+        return total_len > self._compact_threshold
 
     async def _tools_node(self, state: AgentState, config: Any | None = None) -> dict[str, Any]:
         """
@@ -595,16 +631,14 @@ class LangGraphAgentLoop:
         3. 默认 → "chat"：继续对话
         """
         sr = state.get("_stop_reason")
-        
+
         # 出错
         if sr == "error":
             return "error"
 
         # 检查是否需要压缩（上下文过长）
-        if self._compactor and self._compact_threshold > 0:
-            total_len = sum(len(str(m.get("content", ""))) for m in state["messages"])
-            if total_len > self._compact_threshold:
-                return "compact"
+        if self._needs_compact(state):
+            return "compact"
 
         # 默认：继续对话
         return "chat"
@@ -653,12 +687,16 @@ class LangGraphAgentLoop:
             # 执行会话压缩
             await self._compactor.compact(temp_ctx, self._provider)
         except Exception as exc:
-            # 压缩失败，记录警告并返回原状态（继续执行）
+            # 压缩失败，记录警告并返回原状态（继续执行）；计数仍递增，避免反复重试
             log.warning("Compaction failed, continuing without compact", exc_info=True)
-            return {**state}
+            return {**state, "_compact_count": state.get("_compact_count", 0) + 1}
 
-        # 返回压缩后的状态（更新消息历史）
-        return {**state, "messages": temp_ctx.messages}
+        # 返回压缩后的状态（更新消息历史）；递增压缩计数防止死循环
+        return {
+            **state,
+            "messages": temp_ctx.messages,
+            "_compact_count": state.get("_compact_count", 0) + 1,
+        }
 
     def _compact_router(self, state: AgentState) -> str:
         """
@@ -802,209 +840,18 @@ class LangGraphAgentLoop:
         3. 如果成功，提取最后一条 assistant 消息作为结果
         """
         sr = state.get("_stop_reason")
-        
+
+        # 达到步数上限：标记失败并说明原因（effort 等级或配置控制）
+        if sr == "max_steps":
+            return {
+                **state,
+                "status": "failed",
+                "fail_reason": f"max_steps exceeded (step={state['step']})",
+            }
+
         # 如果出错或当前状态为 failed
         if sr == "error" or state["status"] == "failed":
             return {**state, "status": "failed"}
-        
+
         # 如果成功，提取最后一条 assistant 消息作为结果
         return {**state, "status": "success", "result": _extract_last_assistant_text(state["messages"])}
-
-
-def _assistant_msg_from_response(response: LlmResponse) -> dict[str, Any]:
-    """
-    将 LLM 响应转换为 assistant 消息格式
-    
-    【学习要点】
-    1. 消息格式：根据停止原因使用不同的内容格式
-    2. 工具调用格式：使用 blocks 列表包含 thinking、text 和 tool_use
-    3. 文本格式：直接使用文本内容
-    
-    参数：
-        response: LLM 响应对象
-    
-    返回值：
-        dict: assistant 消息，格式为 {"role": "assistant", "content": ...}
-    
-    【消息格式说明】
-    - 有工具调用：content 是列表，包含多个 block（thinking、text、tool_use）
-    - 无工具调用：content 是字符串，直接包含文本内容
-    """
-    # 如果有工具调用（或 token 限制但有工具调用）
-    if response.stop_reason == "tool_use" or (response.stop_reason == "max_tokens" and response.tool_calls):
-        blocks = []
-        # 添加 thinking blocks（如果有）
-        if response.thinking_blocks:
-            for block in response.thinking_blocks:
-                # thinking_blocks 中的元素可能是 dict（如 {"thinking": "...", "signature": "..."}），
-                # 统一转换为字符串后再添加
-                if isinstance(block, dict):
-                    text = block.get("thinking") or block.get("text") or str(block)
-                else:
-                    text = str(block)
-                blocks.append({"type": "text", "text": text})
-        # 添加文本响应（如果有）
-        if response.text:
-            blocks.append({"type": "text", "text": response.text})
-        # 添加工具调用 blocks
-        for tc in response.tool_calls:
-            blocks.append({
-                "type": "tool_use",
-                "id": tc.id,
-                "name": tc.name,
-                "input": tc.input,
-            })
-        # 返回多 block 格式
-        return {"role": "assistant", "content": blocks}
-    else:
-        # 无工具调用，返回纯文本格式
-        content = response.text or ""
-        # 如果有 thinking blocks，添加到文本前面
-        if response.thinking_blocks:
-            # thinking_blocks 中的元素可能是 dict（如 {"thinking": "...", "signature": "..."}），
-            # 统一转换为字符串后再拼接
-            thinking_texts = []
-            for block in response.thinking_blocks:
-                if isinstance(block, dict):
-                    # 提取 thinking 或 text 字段，如果没有则转 JSON 字符串
-                    thinking_texts.append(block.get("thinking") or block.get("text") or str(block))
-                else:
-                    thinking_texts.append(str(block))
-            content = "\n".join(thinking_texts) + "\n" + content
-        return {"role": "assistant", "content": content}
-
-
-def _add_tool_result_to_messages(messages: list[dict[str, Any]], tool_use_id: str, result: Any) -> list[dict[str, Any]]:
-    """
-    将工具执行结果添加到消息历史
-    
-    【学习要点】
-    1. Anthropic API 要求：tool_result 必须在 user 消息中
-    2. 结果合并：如果最后一条消息已经是 user 消息且只有 tool_result，合并到该消息
-    3. 新消息创建：否则创建新的 user 消息
-    
-    参数：
-        messages: 当前消息历史
-        tool_use_id: 工具调用 ID（用于关联）
-        result: 工具执行结果
-    
-    返回值：
-        list: 更新后的消息历史
-    
-    【消息格式说明】
-    Anthropic API 要求 tool_result 必须在 user 消息中，格式为：
-    {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "...", "content": "..."}]}
-    """
-    # 创建 tool_result block
-    block: dict[str, Any] = {
-        "type": "tool_result",
-        "tool_use_id": tool_use_id,
-        "content": result.content if hasattr(result, "content") else str(result),
-    }
-    # 如果是错误结果，添加 is_error 标记
-    if result.is_error if hasattr(result, "is_error") else False:
-        block["is_error"] = True
-
-    # 获取最后一条消息
-    last = messages[-1] if messages else None
-    
-    # 如果最后一条消息是 user 消息且内容是列表且只包含 tool_result blocks
-    if (
-        last is not None
-        and last["role"] == "user"
-        and isinstance(last["content"], list)
-        and last["content"]
-        and all(b.get("type") == "tool_result" for b in last["content"])
-    ):
-        # 合并到最后一条消息
-        new_messages = messages[:-1] + [{**last, "content": last["content"] + [block]}]
-    else:
-        # 创建新的 user 消息
-        new_messages = messages + [{"role": "user", "content": [block]}]
-
-    return new_messages
-
-
-def _extract_last_assistant_text(messages: list[dict[str, Any]]) -> str:
-    """
-    从消息历史中提取最后一条 assistant 消息的文本内容
-    
-    【学习要点】
-    1. 反向遍历：从最后一条消息开始向前查找
-    2. 内容解析：处理不同格式的 content（字符串或列表）
-    3. 过滤 block：忽略 tool_use 和 tool_result block
-    
-    参数：
-        messages: 消息历史
-    
-    返回值：
-        str: 最后一条 assistant 消息的文本内容（去除空白）
-    
-    【提取逻辑】
-    1. 反向遍历消息列表
-    2. 找到第一条 role 为 assistant 的消息
-    3. 如果 content 是列表，只提取 text type 的 block
-    4. 如果 content 是字符串，直接返回
-    """
-    # 反向遍历消息列表
-    for msg in reversed(messages):
-        if msg.get("role") == "assistant":
-            content = msg.get("content", "")
-            
-            # 如果 content 是列表（多 block 格式）
-            if isinstance(content, list):
-                text_parts = []
-                for block in content:
-                    if isinstance(block, dict):
-                        if block.get("type") == "text":
-                            # 只提取 text block
-                            text_parts.append(block.get("text", ""))
-                        elif block.get("type") == "tool_use":
-                            # 忽略工具调用
-                            continue
-                        elif block.get("type") == "tool_result":
-                            # 忽略工具结果
-                            continue
-                    else:
-                        # 非字典类型，直接转换为字符串
-                        text_parts.append(str(block))
-                # 合并所有文本部分
-                return "\n".join(text_parts).strip()
-            
-            # 如果 content 是字符串
-            return str(content).strip()
-    
-    # 如果没有找到 assistant 消息
-    return ""
-
-
-def _extract_user_goal(messages: list[dict[str, Any]]) -> str:
-    """
-    从消息历史中提取用户原始任务（第一条非系统 user 消息）
-
-    参数：
-        messages: 消息历史
-
-    返回值：
-        str: 用户原始任务文本（截断到 500 字符）
-    """
-    for msg in messages:
-        if msg.get("role") != "user":
-            continue
-        content = msg.get("content", "")
-        if isinstance(content, str):
-            text = content
-        elif isinstance(content, list):
-            # 跳过只含 tool_result 的消息（工具回执不是用户原始任务）
-            if all(isinstance(b, dict) and b.get("type") == "tool_result" for b in content):
-                continue
-            text = " ".join(
-                b.get("text", "") for b in content
-                if isinstance(b, dict) and b.get("type") == "text"
-            )
-        else:
-            continue
-        text = text.strip()
-        if text:
-            return text[:500]
-    return ""

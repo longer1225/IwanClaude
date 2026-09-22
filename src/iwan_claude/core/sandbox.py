@@ -5,7 +5,8 @@
 1. 路径白名单：检查文件路径是否在 sandbox_root 内，非 OS 级隔离
 2. resolve() 防 symlink 逃逸：先解析真实路径再判断，symlink 指向沙箱外会被拦截
 3. allow_parent_dirs：允许访问 sandbox_root 的祖先目录（monorepo 场景）
-4. 单例模式：模块级 _sandbox_manager，init_sandbox() 初始化，get_sandbox() 获取
+4. 会话隔离：全局默认实例（init_sandbox）+ 上下文实例（set_sandbox_root 写
+   contextvar），并发会话不再互相覆写沙箱根；相对路径统一基于沙箱根（会话 cwd）解析
 
 【安全模型】
 沙箱根 = 项目工作目录（CWD），Agent 可操作项目文件，但不能越界到 ~/.ssh、/etc 等。
@@ -20,9 +21,10 @@
 """
 from __future__ import annotations
 
+import contextvars
+import dataclasses
 import os
 from pathlib import Path
-from typing import Optional
 
 from iwan_claude.core.config import SandboxConfig
 
@@ -216,6 +218,13 @@ class SandboxManager:
 
         return False
 
+    # 把相对路径解析为基于沙箱根（即会话 cwd）的绝对路径，与 bash 子进程的 cwd 语义保持一致
+    def _resolve_rel(self, path_str: str) -> Path:
+        path = Path(path_str)
+        if not path.is_absolute():
+            path = self._sandbox_root / path
+        return path.resolve()
+
     def is_path_allowed(self, path_str: str) -> bool:
         """
         判断路径是否在沙箱允许范围内（不抛异常）
@@ -228,20 +237,16 @@ class SandboxManager:
 
         【注意】
         - 沙箱未启用时始终返回 True
-        - 相对路径会基于 CWD 解析为绝对路径
+        - 相对路径基于沙箱根（会话 cwd）解析，与 bash 工具的 cwd 语义一致
         - symlink 会被 resolve() 解析为真实路径
         """
         if not self._config.enabled:
             return True
 
-        path = Path(path_str)
-        if not path.is_absolute():
-            path = (Path.cwd() / path).resolve()
-        else:
-            path = path.resolve()
-
+        path = self._resolve_rel(path_str)
         return self._is_path_allowed(path)
 
+    # 验证路径是否在沙箱内，越界时抛出 SandboxAccessError；相对路径基于沙箱根（会话 cwd）解析
     def validate_path(self, path_str: str, operation: str = "access") -> Path:
         """
         验证路径是否在沙箱内，越界时抛出 SandboxAccessError
@@ -258,22 +263,13 @@ class SandboxManager:
 
         【注意】
         - 沙箱未启用时直接返回 resolve 后的路径
-        - 相对路径基于 CWD 解析
+        - 相对路径基于沙箱根（会话 cwd）解析，与 bash 子进程行为一致
         - symlink 被 resolve() 解析，防止 symlink 逃逸
         """
-        if not self._config.enabled:
-            path = Path(path_str)
-            if not path.is_absolute():
-                path = (Path.cwd() / path).resolve()
-            else:
-                path = path.resolve()
-            return path
+        path = self._resolve_rel(path_str)
 
-        path = Path(path_str)
-        if not path.is_absolute():
-            path = (Path.cwd() / path).resolve()
-        else:
-            path = path.resolve()
+        if not self._config.enabled:
+            return path
 
         if self._is_path_allowed(path):
             return path
@@ -297,7 +293,8 @@ class SandboxManager:
         size = len(content) if isinstance(content, bytes) else len(content.encode("utf-8"))
         if size > self._config.max_file_size:
             raise ValueError(
-                f"file size {size} bytes exceeds sandbox limit of {self._config.max_file_size} bytes"
+                f"file size {size} bytes exceeds sandbox limit "
+                f"of {self._config.max_file_size} bytes"
             )
 
     def get_total_used(self) -> int:
@@ -385,17 +382,32 @@ class SandboxManager:
 
 
 # ======================================================================
-# 模块级单例管理
+# 模块级单例管理（全局默认 + 会话级隔离）
 # ======================================================================
+#
+# 并发安全设计：
+# - _sandbox_manager 是"全局默认"沙箱（daemon 启动 / init_sandbox 设置），
+#   不再被会话动态覆写，避免并发会话互相踩踏。
+# - _active_sandbox 是 contextvar：asyncio 每个 Task 创建时拷贝当前上下文，
+#   会话请求链（send_message → runner → tool.invoke）都在同一 Task 树内，
+#   set_sandbox_root 只影响当前上下文，天然实现 per-session 隔离。
+# - _sandbox_by_session 按 session_id 显式键控，供需要跨上下文获取的调用方使用。
 
-_sandbox_manager: Optional[SandboxManager] = None
+_sandbox_manager: SandboxManager | None = None
+# 当前执行上下文绑定的沙箱实例（会话级隔离的核心）
+_active_sandbox: contextvars.ContextVar[SandboxManager | None] = contextvars.ContextVar(
+    "iwan_active_sandbox", default=None
+)
+# 按 session_id 键控的沙箱实例表（显式访问路径）
+_sandbox_by_session: dict[str, SandboxManager] = {}
 
 
 def init_sandbox(config: SandboxConfig) -> None:
     """
-    初始化全局沙箱管理器
+    初始化全局默认沙箱管理器
 
     在 AgentRunner.__init__ 中调用，用配置初始化沙箱。
+    注意：只覆写"全局默认"实例；已绑定 contextvar 的会话仍使用自己的沙箱。
     """
     global _sandbox_manager
     _sandbox_manager = SandboxManager(config)
@@ -409,16 +421,32 @@ def init_sandbox(config: SandboxConfig) -> None:
     )
 
 
+# 如果未初始化，创建一个禁用的默认沙箱（放行所有路径）
 def _ensure_default_sandbox() -> None:
-    """如果未初始化，创建一个禁用的默认沙箱（放行所有路径）"""
     global _sandbox_manager
     if _sandbox_manager is None:
         _sandbox_manager = SandboxManager(SandboxConfig(enabled=False))
 
 
-def get_sandbox() -> SandboxManager:
-    """获取全局沙箱管理器实例"""
+def get_sandbox(session_id: str | None = None) -> SandboxManager:
+    """
+    获取沙箱管理器实例（优先级：当前上下文 > session_id > 全局默认）
+
+    【参数】
+    - session_id: 会话 ID（可选）。当前上下文未绑定沙箱时按此 ID 查找。
+
+    【返回】
+    - SandboxManager: 当前执行位置应使用的沙箱实例
+    """
+    active = _active_sandbox.get()
+    if active is not None:
+        return active
+    if session_id:
+        by_session = _sandbox_by_session.get(session_id)
+        if by_session is not None:
+            return by_session
     _ensure_default_sandbox()
+    assert _sandbox_manager is not None
     return _sandbox_manager
 
 
@@ -464,23 +492,50 @@ def get_search_root() -> Path:
     return Path.cwd()
 
 
-def set_sandbox_root(new_root: str | Path) -> None:
+def set_sandbox_root(new_root: str | Path, session_id: str = "") -> SandboxManager:
     """
-    动态切换全局沙箱根目录
+    为当前执行上下文（会话）绑定新的沙箱根目录
 
     【使用场景】
-    会话切换时调用此函数，将沙箱根目录绑定到新会话的项目目录。
-    这是实现多会话多项目隔离的核心入口。
+    会话创建 / send_message 时调用，把沙箱根绑定到该会话的项目目录。
+    实现方式是克隆当前有效沙箱的配置并生成新实例存入 contextvar（以及可选的
+    session_id 键控表），**不修改共享的全局默认实例**——这是并发会话隔离的关键。
 
     【参数】
-    - new_root: str | Path - 新的沙箱根目录路径（通常来自 TUI 启动时的 CWD）
+    - new_root: str | Path - 新的沙箱根目录路径（通常来自会话 cwd）
+    - session_id: str - 会话 ID（可选），提供时同时登记到按 session 键控的表
+
+    【返回】
+    - SandboxManager: 绑定后的会话级沙箱实例
 
     【示例】
-    # TUI 在 D:/my-project 启动时
-    set_sandbox_root("D:\\my-project")
-    # 之后所有文件操作都会限制在 D:/my-project 内
+    # 会话任务内（每个 asyncio Task 上下文独立）
+    set_sandbox_root("D:\\my-project", session_id=sid)
+    # 之后当前任务树内的所有文件操作都会限制在 D:\\my-project 内
     """
-    get_sandbox().set_root(new_root)
+    base = get_sandbox(session_id or None)
+    # dataclasses.replace 生成配置副本，只改 root，其余（黑白名单/配额）随全局配置继承
+    new_config = dataclasses.replace(base._config, root=str(new_root))
+    manager = SandboxManager(new_config)
+    manager.ensure_sandbox_exists()
+    _active_sandbox.set(manager)
+    if session_id:
+        _sandbox_by_session[session_id] = manager
+    import logging
+    logging.getLogger(__name__).info(
+        "sandbox root bound: session=%s root=%s", session_id or "-", manager.root,
+    )
+    return manager
+
+
+# 获取指定会话键控的沙箱实例（不存在返回 None；不读 contextvar）
+def peek_session_sandbox(session_id: str) -> SandboxManager | None:
+    return _sandbox_by_session.get(session_id)
+
+
+# 会话结束时清理其键控沙箱实例，防止 _sandbox_by_session 无限增长
+def remove_session_sandbox(session_id: str) -> None:
+    _sandbox_by_session.pop(session_id, None)
 
 
 def scrub_env(env: dict[str, str]) -> dict[str, str]:
@@ -505,11 +560,12 @@ def scrub_env(env: dict[str, str]) -> dict[str, str]:
     """
     import re
 
-    # 沙箱未初始化或未启用时，不脱敏
-    if _sandbox_manager is None or not _sandbox_manager.enabled:
+    # 使用当前上下文生效的沙箱（会话隔离）；未初始化或未启用时不脱敏
+    sandbox = get_sandbox()
+    if not sandbox.enabled:
         return env
 
-    patterns = _sandbox_manager.env_scrub_patterns
+    patterns = sandbox.env_scrub_patterns
     if not patterns:
         return env
 

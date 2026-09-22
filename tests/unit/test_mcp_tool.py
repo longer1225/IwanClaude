@@ -4,7 +4,12 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from iwan_claude.core.mcp.client import McpClient, McpServerUnavailableError, McpToolDef
+from iwan_claude.core.mcp.client import (
+    McpClient,
+    McpServerUnavailableError,
+    McpToolDef,
+    McpToolError,
+)
 from iwan_claude.core.mcp.tool import McpTool
 
 
@@ -34,11 +39,11 @@ async def test_invoke_calls_mcp_client() -> None:
     client.call_tool.assert_called_once_with("read_file", {"path": "/tmp/test.txt"})
 
 
-# 功能：工具名应以 {server_name}__ 为前缀防止命名冲突
-# 设计：验证 McpTool.name 格式为 "filesystem__read_file"
+# 功能：工具全名格式必须是 mcp__{server}__{tool}（对齐 Claude Code 命名空间惯例）
+# 设计：mcp__ 前缀不只是好看——权限引擎靠它表达 `mcp__*` 一刀切管控外部工具，测试锁死契约防回退
 def test_tool_name_prefixed() -> None:
     tool, _ = _make_tool("read_file", "filesystem")
-    assert tool.name == "filesystem__read_file"
+    assert tool.name == "mcp__filesystem__read_file"
 
 
 # 功能：client 抛 McpServerUnavailableError 时应返回 is_error=True 且不重新抛出
@@ -49,8 +54,33 @@ async def test_unavailable_returns_error() -> None:
     client.call_tool = AsyncMock(side_effect=McpServerUnavailableError("process died"))
     result = await tool.invoke({"path": "/tmp/x.txt"})
     assert result.is_error
-    assert result.error_type == "runtime_error"
+    assert result.error_type == "server_offline"
     assert "filesystem" in result.content
+
+
+# 功能：不可用异常含 timeout 字样时 error_type 应为 timeout 而非 server_offline
+# 设计：超时语义是"结果未知、副作用可能已发生"，与"连接已死"对模型的重试决策完全不同，分型必须测
+@pytest.mark.asyncio
+async def test_timeout_error_type_split() -> None:
+    tool, client = _make_tool()
+    client.call_tool = AsyncMock(
+        side_effect=McpServerUnavailableError("MCP server read timeout after 30s")
+    )
+    result = await tool.invoke({"path": "/tmp/x.txt"})
+    assert result.is_error
+    assert result.error_type == "timeout"
+
+
+# 功能：client 抛 McpToolError（工具业务失败）时 error_type 应为 tool_error
+# 设计：tool_error 暗示"改参数再试"是合理路径，与 server_offline（重试无用）区分开
+@pytest.mark.asyncio
+async def test_tool_error_type_split() -> None:
+    tool, client = _make_tool()
+    client.call_tool = AsyncMock(side_effect=McpToolError("query failed: no such table"))
+    result = await tool.invoke({"path": "/tmp/x.txt"})
+    assert result.is_error
+    assert result.error_type == "tool_error"
+    assert "no such table" in result.content
 
 
 # 功能：client 抛其他异常时应返回 runtime_error 类型的 ToolResult

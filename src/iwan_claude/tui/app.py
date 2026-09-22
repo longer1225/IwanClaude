@@ -66,13 +66,35 @@ from iwan_claude.tui.formatters import _preview, _params_str, _param_summary  # 
 from iwan_claude.tui.models import _SessionState  # 会话状态数据类
 from iwan_claude.tui.widgets import (  # 所有自定义 UI 组件
     ChatTextArea,
+    FileChangesSelect,
     LLMStreamBlock,
     PermissionBlock,
     PermissionSelect,
     SkillConfirm,
     SlashCompleteWidget,
     ToolCallBlock,
+    TrustSelect,
 )
+
+
+# 五态权限模式的 Shift+Tab 循环顺序（对齐 Claude Code 的档位递进方向：
+# 越靠后越放行，bypassPermissions 垫底收尾——危险档要多按几下才到）
+_PERMISSION_MODE_CYCLE: tuple[str, ...] = (
+    "default", "acceptEdits", "plan", "auto", "bypassPermissions",
+)
+
+# /auto 参数的 legacy 三态别名 → 五态映射（daemon 端 AUTO_TO_MODE 的客户端镜像；
+# 保一版旧口令肌记，下个大版本连别名一起退）
+_AUTO_ALIAS_TO_MODE: dict[str, str] = {
+    "off": "default", "read_only": "auto", "on": "acceptEdits",
+}
+
+# 五态 → legacy 三态的反推（与 daemon PermissionManager._MODE_TO_AUTO 同表；
+# 只为仍读 _auto_mode 的旧显示/测试供值，模式切换本身不走这条路）
+_MODE_TO_AUTO_DISPLAY: dict[str, str] = {
+    "default": "off", "auto": "read_only", "acceptEdits": "on",
+    "plan": "off", "bypassPermissions": "on",
+}
 
 
 class IwanTuiApp(App[None]):
@@ -102,6 +124,7 @@ class IwanTuiApp(App[None]):
     - Ctrl+R：搜索历史
     - Ctrl+T/W：新建/关闭会话
     - Alt+1~9：切换会话
+    - Shift+Tab：循环切换五态权限模式（运行中也可切——跑偏时现场放行）
 
     设计模式说明：
     - 采用单 App 多会话架构，通过 _SessionState 管理每个会话的独立 UI 状态
@@ -119,6 +142,8 @@ class IwanTuiApp(App[None]):
         Binding("ctrl+q", "quit", "退出"),
         # F6 触发 action_checkpoint_list()，列出检查点
         Binding("f6", "checkpoint_list", "列出检查点"),
+        # F7 召唤文件变更回滚面板（S9 Part C2：看本次会话改过哪些文件、勾选还原）
+        Binding("f7", "file_changes", "文件变更/回滚"),
         # Ctrl+P 触发 Textual 内置的命令面板
         Binding("ctrl+p", "app_command", "命令面板"),
         # Ctrl+R 触发 action_search_history()，搜索历史
@@ -137,6 +162,14 @@ class IwanTuiApp(App[None]):
         Binding("alt+7", "switch_session(7)", "切换到会话7"),
         Binding("alt+8", "switch_session(8)", "切换到会话8"),
         Binding("alt+9", "switch_session(9)", "切换到会话9"),
+        # Esc 触发 action_cancel_run()：取消当前运行中的任务（无任务时是空操作）
+        # 【设计】不用 Priority 绑定：ChatInput 的斜杠弹窗、PermissionSelect
+        # 自己会消费按键，事件冒泡到 App 层才轮到这条——天然让位于模态交互
+        Binding("escape", "cancel_run", "取消当前任务"),
+        # Shift+Tab 触发 action_cycle_permission_mode()：五态权限模式循环。
+        # 【设计】覆盖 Textual 默认的 shift+tab 后退焦点导航——本界面焦点组
+        # 少（输入框/审批条），模式循环的价值高于焦点遍历；运行中同样生效
+        Binding("shift+tab", "cycle_permission_mode", "切换权限模式"),
     ]
 
     # 定义全局 CSS 样式，控制应用的视觉外观
@@ -248,6 +281,8 @@ class IwanTuiApp(App[None]):
         # 斜杠命令候选列表：[(命令名, 描述), ...]
         # 在 on_mount() 中构建，供斜杠命令自动补全使用
         self._slash_items: list[tuple[str, str]] = []
+        # 文件变更回滚面板（S9 C2）：同一时刻最多挂一个，重复 F7 复用刷新
+        self._files_panel: FileChangesSelect | None = None
         # 用户输入历史列表，用于 Ctrl+R 搜索历史功能
         # 最多保存 100 条记录，新记录插入头部
         self._history: list[str] = []
@@ -256,6 +291,12 @@ class IwanTuiApp(App[None]):
         self._header_state: str = "connecting"
         # 进入 running 状态时刻的 perf_counter()；非 running 时为 None
         self._run_start_ts: float | None = None
+        # 【学习要点】看门狗的正确时钟是"最后一次收到事件"而不是"run 开始"：
+        # 健康的 Agent 任务跑 5-10 分钟很常见，若按开始时间计时，60 秒就会
+        # 误杀正在正常执行的任务。只要事件还在流动（token/step/tool/usage），
+        # 进程就活着；连续静默超过阈值才说明 daemon 掉线或事件泵死了。
+        # 用 monotonic 而非 perf_counter：语义就是"墙上经过时间"，跨平台更稳。
+        self._last_activity_ts: float = time.monotonic()
 
     @property
     def _session_id(self) -> str | None:
@@ -358,6 +399,27 @@ class IwanTuiApp(App[None]):
             self._refresh_tabbar()  # 刷新标签栏以反映忙碌状态变化
 
     @property
+    def _active_run_id(self) -> str:
+        """
+        当前会话正在运行的 run_id（只读属性）
+
+        【设计】run_id 是取消/修正的"寻址坐标"：daemon 端 run_registry 按
+        run_id 索引活跃的 asyncio.Task。TUI 从 session.send_message 的响应里
+        拿到它，run 结束（run.finished / waiting_for_input / watchdog）时清空。
+        多标签页各自独立——所以它存在 _SessionState 里而不是 App 属性上。
+
+        返回：
+            str - 活跃 run 的 ID；空串表示当前会话没有运行中的任务
+        """
+        return self._state.active_run_id if self._state else ""
+
+    @_active_run_id.setter
+    def _active_run_id(self, value: str) -> None:
+        """设置（或清空）当前会话的活跃 run_id"""
+        if self._state:
+            self._state.active_run_id = value
+
+    @property
     def _auto_mode(self) -> str:
         """
         当前会话的自动模式（只读属性）
@@ -374,9 +436,32 @@ class IwanTuiApp(App[None]):
 
     @_auto_mode.setter
     def _auto_mode(self, value: str) -> None:
-        """设置当前会话的自动模式"""
+        """设置当前会话的自动模式（legacy 三态显示值）"""
         if self._state:
             self._state.auto_mode = value
+
+    @property
+    def _permission_mode(self) -> str:
+        """
+        当前会话的五态权限模式（只读属性）
+
+        【学习要点】五态语义矩阵见 docs/design/permission-modes.md：
+        - "default"：非只读工具逐一弹问
+        - "acceptEdits"：写文件白名单自动放行，bash 仍要问
+        - "plan"：只读探索，写类工具直接 DENY
+        - "auto"：仅只读工具自动放行
+        - "bypassPermissions"：全部放行（deny 地板/强制 ASK 仍保留）
+
+        返回：
+            str - 权限模式值
+        """
+        return self._state.permission_mode if self._state else "default"
+
+    @_permission_mode.setter
+    def _permission_mode(self, value: str) -> None:
+        """设置当前会话的五态权限模式"""
+        if self._state:
+            self._state.permission_mode = value
 
     @property
     def _effort_level(self) -> str:
@@ -900,12 +985,13 @@ class IwanTuiApp(App[None]):
         # 初始化命令列表，包含所有系统内置命令
         items: list[tuple[str, str]] = [
             ("help", "显示帮助信息"),
-            ("auto", "切换自动模式 (off|read_only|on)"),
+            ("auto", "切换权限模式 (default|acceptEdits|plan|auto|bypassPermissions)"),
             ("effort", "切换努力等级 (minimal|low|medium|high|max)"),
-            ("engine", "切换 Agent 引擎 (legacy|langgraph|plan_execute|debate|pipeline)"),
+            ("engine", "切换 Agent 引擎 (legacy|langgraph|plan_execute|debate|pipeline|auto)"),
             ("compact", "压缩上下文窗口"),
             ("checkpoint list", "列出所有检查点"),
             ("checkpoint restore <n>", "恢复到指定检查点"),
+            ("files [run_id]", "查看/回滚文件变更（同 F7 面板）"),
             ("recover", "恢复崩溃的会话"),
             ("history", "查看会话历史"),
             ("close", "关闭当前会话"),
@@ -1088,6 +1174,83 @@ class IwanTuiApp(App[None]):
         except Exception:
             pass  # PermissionSelect 不存在或操作失败时静默忽略
 
+    # Esc 取消当前运行中的任务（由 BINDINGS 中的 escape 触发）
+    async def action_cancel_run(self) -> None:
+        """
+        取消当前会话正在运行的 run（run.cancel）
+
+        【学习要点】
+        1. 取消走 RPC 而不是本地"假装停止"：daemon 才是任务的所有者，
+           TUI 本地清状态会造成两端不一致——用户以为停了，工具还在跑。
+        2. 发完 cancel 后 UI 不改 _busy：真正的"回到 ready"由
+           session.waiting_for_input 事件驱动（runner 收尾后必然发出），
+           watchdog 兜底。这让"取消成功"与"自然结束"共用同一条恢复路径。
+        3. accepted=False 只说明 run 已经结束，不是错误——显示提示即可。
+        """
+        # 无活跃 run 时 Esc 是空操作（不打扰用户，也不误伤输入框）
+        if self._client is None or not self._busy or not self._active_run_id:
+            return
+        run_id = self._active_run_id
+        self._append(Static(f"[yellow]⏹ cancelling run {run_id[:8]}...[/yellow]", classes="log-line"))
+        try:
+            result = await self._client.send_command("run.cancel", {"run_id": run_id})
+            if not result.get("accepted", False):
+                self._append(Static(
+                    "[dim]run already finished — nothing to cancel[/dim]", classes="log-line",
+                ))
+        except (IpcError, RuntimeError, OSError) as e:
+            self._append(Static(f"[red]cancel failed: {e}[/red]", classes="log-line"))
+
+    # Shift+Tab 循环五态权限模式（busy 时同样可用——现场放行的逃生门）
+    def action_cycle_permission_mode(self) -> None:
+        """
+        沿 _PERMISSION_MODE_CYCLE 切到下一档权限模式
+
+        【设计】空 mode 传进 _do_set_permission_mode 即"取下一档"；这里只
+        负责把按键变成一次带互斥名的后台 worker，键不吞连接检查（未连接时
+        worker 内立即返回）。
+        """
+        if self._client is None or self._session_id is None:
+            return
+        self.run_worker(self._do_set_permission_mode(""),
+                        name="permission_mode", exclusive=False)
+
+    # 向运行中的任务发送修正评论（run.steer），回合边界生效
+    async def _do_steer(self, content: str) -> None:
+        """
+        发送 run.steer：把用户运行中输入的文本注入当前 run 的修正队列
+
+        【学习要点】
+        1. steer RPC 是"投递即返回"：消息进 daemon 内存队列，等引擎在
+           下一次 LLM 调用前消费。所以这里 await 很快，不需要 worker 超时。
+        2. accepted=False 说明 run 在输入期间刚好结束了——消息没进任何队列、
+           等于丢失，必须降级为普通 send_message，否则用户的话石沉大海。
+        """
+        if self._client is None or self._session_id is None:
+            return
+        run_id = self._active_run_id
+        try:
+            result = await self._client.send_command(
+                "run.steer", {"run_id": run_id, "message": content},
+            )
+        except (IpcError, RuntimeError, OSError) as e:
+            self._append(Static(f"[red]steer failed: {e}[/red]", classes="log-line"))
+            return
+        if result.get("accepted", False):
+            queued = result.get("queued", 0)
+            self._append(Static(
+                f"[dim]⇢ steering queued (第 {queued} 条)，将在下一次模型调用时生效[/dim]",
+                classes="log-line",
+            ))
+            return
+        # run 已结束：降级为普通消息重新提交（不丢用户的输入）
+        self._append(Static(
+            "[yellow]run 已结束，改为新消息发送[/yellow]", classes="log-line",
+        ))
+        self._busy = True
+        self._update_header("running")
+        await self._do_send_message(content)
+
     async def action_quit(self) -> None:
         """
         退出程序（Ctrl+Q 触发）
@@ -1156,6 +1319,62 @@ class IwanTuiApp(App[None]):
             return
         # 在 worker 中执行检查点列表操作
         self.run_worker(self._do_checkpoint("list", ""), name="checkpoint", exclusive=False)
+
+    async def action_file_changes(self) -> None:
+        """
+        打开文件变更回滚面板（F7 触发，S9 Part C2）
+
+        busy 时拒绝：还原是往盘上回写旧内容，agent 正在跑就意味着和它的
+        写入互相踩——面板读的是账本、动的是文件，两头都得安静时操作。
+        """
+        if self._client is None or self._session_id is None:
+            self._append(Static("[yellow]agent busy or disconnected[/yellow]", classes="log-line"))
+            return
+        if self._busy:
+            self._append(Static("[yellow]agent 正在运行——等它停下再回滚文件[/yellow]", classes="log-line"))
+            return
+        self.run_worker(self._do_file_changes(""), name="file_changes", exclusive=False)
+
+    # 拉取本会话（可选指定 run）的文件变更账，挂载/刷新回滚面板
+    async def _do_file_changes(self, run_id: str) -> None:
+        """
+        查询 files.changes 并呈现面板：无账可回时只留一行提示
+
+        run_id 传空 = daemon 侧按"最新一个有账本的 run"解析；面板随后
+        持有返回的具体 run_id，还原请求打回同一个 run，不会错锚。
+        """
+        if self._client is None or self._session_id is None:
+            return
+        try:
+            result = await self._client.send_command(
+                "files.changes",
+                {"session_id": self._session_id, "run_id": run_id},
+            )
+        except (IpcError, RuntimeError, OSError) as e:
+            self._append(Static(f"[red]files.changes error: {e}[/red]", classes="log-line"))
+            return
+        changes = result.get("changes", [])
+        rid = str(result.get("run_id", "")) or run_id
+        if not changes:
+            self._append(Static(
+                # \\[ \\] 转义：Textual markup 会把 [sandbox] 当标签解析（同 invocation 的教训）
+                "[dim]无可回滚的文件变更（该 run 未用写文件工具，或 \\[sandbox\\] "
+                "shadow_enabled=false）[/dim]", classes="log-line"))
+            # 旧面板若还挂着且已无账可回，一并撤掉
+            if self._files_panel is not None:
+                self._files_panel.remove()
+                self._files_panel = None
+            return
+        if self._files_panel is None:
+            self._files_panel = FileChangesSelect(rid, changes)
+            try:
+                self.mount(self._files_panel, before="#prompt")
+            except Exception:
+                log.exception("failed to mount FileChangesSelect run=%s", rid)
+                self._files_panel = None
+        else:
+            self._files_panel.set_changes(rid, changes)
+            self._files_panel.focus()
 
     async def action_new_session(self) -> None:
         """
@@ -1236,6 +1455,7 @@ class IwanTuiApp(App[None]):
             if state is not None:
                 # 从响应中获取初始配置值
                 state.auto_mode = str(result.get("auto_mode", "off"))
+                state.permission_mode = str(result.get("permission_mode", "default"))
                 state.effort_level = str(result.get("effort_level", "medium"))
                 state.model_preset = str(result.get("model_preset", "balanced"))
 
@@ -1266,7 +1486,7 @@ class IwanTuiApp(App[None]):
         - /compact: 压缩上下文窗口
         - /checkpoint list|restore: 检查点管理
         - /help: 显示帮助信息
-        - /auto [mode]: 切换自动模式
+        - /auto [mode]: 切换五态权限模式（等价 Shift+Tab 循环）
         - /effort [level]: 切换努力等级
         - /model [preset]: 切换模型预设
         - /name <title>: 重命名会话
@@ -1314,21 +1534,38 @@ class IwanTuiApp(App[None]):
                     self._append(Static("[yellow]usage: /checkpoint list | /checkpoint restore <id>[/yellow]", classes="log-line"))
             return
 
+        # /files [run_id] 文件变更回滚面板（S9 Part C2）
+        # 与 /checkpoint 刻意分工：那个回对话状态，这个回盘上文件——
+        # 两个操作各自显式触发，永远不互相连带
+        if content.startswith("/files"):
+            event.text_area.text = ""  # 清空输入框
+            if self._client is not None and self._session_id is not None and not self._busy:
+                parts = content.split()  # 分割命令与参数
+                rid = parts[1] if len(parts) >= 2 else ""  # 可选指定历史 run
+                self.run_worker(self._do_file_changes(rid), name="file_changes", exclusive=False)
+            else:
+                self._append(Static("[yellow]agent busy or disconnected[/yellow]", classes="log-line"))
+            return
+
         # /help 显示帮助
         if content == "/help":
             event.text_area.text = ""  # 清空输入框
             self._show_help()
             return
 
-        # /auto 切换自动模式
+        # /auto 切换权限模式（五态；参数接受 default/acceptEdits/plan/auto/
+        # bypassPermissions，也认 legacy 别名 off/read_only/on）
         if content.startswith("/auto"):
             event.text_area.text = ""  # 清空输入框
             parts = content.split(None, 1)  # 分割命令和参数
             mode = parts[1].strip() if len(parts) > 1 else ""  # 提取模式参数
-            if self._client is not None and self._session_id is not None and not self._busy:
-                self.run_worker(self._do_set_auto_mode(mode), name="auto_mode", exclusive=False)
+            # 【设计】去掉 not self._busy 守卫：模式切换是 P2 头号 UX 目的——
+            # 跑偏时现场放行。它是控制面指令不是对话输入，不该被 busy 挡住
+            if self._client is not None and self._session_id is not None:
+                self.run_worker(self._do_set_permission_mode(mode),
+                                name="permission_mode", exclusive=False)
             else:
-                self._append(Static("[yellow]agent busy or disconnected[/yellow]", classes="log-line"))
+                self._append(Static("[yellow]not connected[/yellow]", classes="log-line"))
             return
 
         # /effort 切换努力等级
@@ -1404,17 +1641,32 @@ class IwanTuiApp(App[None]):
         # ========== 普通消息处理 ==========
 
         # 检查连接和忙碌状态
-        if self._client is None or self._session_id is None or self._busy:
+        if self._client is None or self._session_id is None:
             self._append(Static("[yellow]agent busy or disconnected[/yellow]", classes="log-line"))
+            return
+        # 运行中提交 = 修正评论（steering），而不是新任务
+        if self._busy:
+            prompt = event.text_area
+            if not self._active_run_id or content.startswith("/"):
+                # 无活跃 run（如 skill 待确认窗口期）或斜杠命令：拒绝而不是误 steer
+                self._append(Static("[yellow]agent busy — 请等待本轮结束[/yellow]", classes="log-line"))
+                return
+            prompt.text = ""
+            # 【设计】echo 用 ⇢ steer 前缀而非 > user 前缀：重读日志时能区分
+            # "初始指令"和"运行中改向"，两者在会话历史里也是不同角色
+            self._append(Static(f"[bold magenta]⇢ steer[/] {content}", classes="user-turn"))
+            self.run_worker(self._do_steer(content), name="steer", exclusive=False)
             return
         # 设置忙碌状态
         self._busy = True
         # 获取输入框引用并设置工作状态
         prompt = event.text_area
         prompt.text = ""  # 清空输入框
-        prompt.disabled = True  # 禁用输入框
-        prompt.read_only = False  # 保持可聚焦
-        prompt.border_title = "agent is working..."  # 更新边框标题
+        # 【设计】运行中不禁用输入框：保持可输入，Enter 走 steer 分支（上方）。
+        # 这与 Claude Code 的"运行中直接打字改向"体验一致；用边框标题提示模式。
+        prompt.disabled = False
+        prompt.read_only = False
+        prompt.border_title = "agent working… Enter=steer / Esc=cancel"
         # 将用户消息显示在日志视图中
         self._append(Static(f"[bold]>[/bold] {content}", classes="user-turn"))
         # 将非命令消息保存到搜索历史
@@ -1471,55 +1723,62 @@ class IwanTuiApp(App[None]):
             # 压缩失败时显示错误
             self._append(Static(f"[red]compact error: {e}[/red]", classes="log-line"))
 
-    async def _do_set_auto_mode(self, mode: str) -> None:
+    # 切换当前会话的五态权限模式（Shift+Tab 与 /auto 的共同后端）
+    async def _do_set_permission_mode(self, mode: str) -> None:
         """
-        执行自动模式切换命令
-
-        自动模式控制 Agent 的自主程度，影响工具调用是否需要用户确认。
+        执行权限模式切换：解析目标档 → 发 RPC → 本地同步显示
 
         参数：
-            mode: str - 目标模式
-                - "off"：每步需要用户确认（默认）
-                - "read_only"：自动执行只读操作
-                - "on"：完全自主执行所有操作
-                - 空字符串：循环切换三种模式
+            mode: str - 目标模式，五态之一（default/acceptEdits/plan/auto/
+                bypassPermissions），也接受 legacy 别名 off/read_only/on；
+                空字符串 = 沿 _PERMISSION_MODE_CYCLE 循环到下一档
 
         设计说明：
-            - 空 mode 时自动循环切换：off → read_only → on → off
-            - 通过 IPC 发送命令到 core 服务，服务端保存状态
-            - 成功后更新本地状态并刷新状态栏
+            - 循环/别名解析全在客户端完成，daemon 只认五态——单一翻译点
+            - 本地立即更新 _permission_mode + _auto_mode（旧字段留一版给
+              仍读它的测试/逻辑），不等事件回来，保证连按 Shift+Tab 手感即时
         """
         # 连接检查
         if self._client is None or self._session_id is None:
             return
 
-        # 未指定模式时循环切换
+        # 空档沿五态循环取下一档
         if not mode:
-            cycle = {"off": "read_only", "read_only": "on", "on": "off"}
-            mode = cycle.get(self._auto_mode, "off")
+            cur = self._permission_mode
+            try:
+                idx = _PERMISSION_MODE_CYCLE.index(cur)
+            except ValueError:
+                idx = -1
+            mode = _PERMISSION_MODE_CYCLE[(idx + 1) % len(_PERMISSION_MODE_CYCLE)]
+        else:
+            # legacy 别名折成五态；已是五态之一则原样保留
+            mode = _AUTO_ALIAS_TO_MODE.get(mode, mode)
 
         # 验证模式有效性
-        if mode not in ("off", "read_only", "on"):
-            self._append(Static(f"[yellow]usage: /auto [off|read_only|on], got {mode!r}[/yellow]", classes="log-line"))
+        if mode not in _PERMISSION_MODE_CYCLE:
+            self._append(Static(
+                f"[yellow]usage: /auto [{'|'.join(_PERMISSION_MODE_CYCLE)}]"
+                f", got {mode!r}[/yellow]",
+                classes="log-line",
+            ))
             return
 
         try:
-            # 发送设置命令到 core 服务
             result = await self._client.send_command(
-                "session.set_auto_mode",
+                "session.set_permission_mode",
                 {"session_id": self._session_id, "mode": mode},
             )
-            # 从响应中更新本地状态
-            self._auto_mode = result.get("mode", mode)
-            # 显示模式切换结果
+            effective = str(result.get("mode", mode))
+            self._permission_mode = effective
+            # 旧字段同步为反推的三态显示值，喂给仍读 _auto_mode 的分支
+            self._auto_mode = _MODE_TO_AUTO_DISPLAY.get(effective, "off")
             self._append(Static(
-                f"[bold cyan]⚡ Auto mode[/bold cyan]  [dim]{self._auto_mode}[/dim]",
+                f"[bold cyan]⚡ Permission mode[/bold cyan]  [dim]{effective}[/dim]",
                 classes="log-line",
             ))
-            # 更新状态栏
             self._update_header("ready")
         except (IpcError, RuntimeError, OSError) as e:
-            self._append(Static(f"[red]auto mode error: {e}[/red]", classes="log-line"))
+            self._append(Static(f"[red]permission mode error: {e}[/red]", classes="log-line"))
 
     async def _do_set_effort_level(self, level: str) -> None:
         """
@@ -1639,7 +1898,8 @@ class IwanTuiApp(App[None]):
             return
 
         # 未指定引擎时循环切换
-        valid_engines = ["legacy", "langgraph", "plan_execute", "debate", "pipeline"]
+        # "auto" = 由引擎选择器按任务复杂度逐轮自动挑（与 daemon 的 valid_engines 同步）
+        valid_engines = ["legacy", "langgraph", "plan_execute", "debate", "pipeline", "auto"]
         if not engine:
             current = self._engine_type if self._engine_type in valid_engines else "legacy"
             idx = valid_engines.index(current)
@@ -1854,18 +2114,21 @@ class IwanTuiApp(App[None]):
         self._append(Static("[bold]快捷键：[/bold]", classes="log-line"))
         self._append(Static("  [cyan]Ctrl+Q[/cyan]  退出程序", classes="log-line"))
         self._append(Static("  [cyan]F6[/cyan]       列出检查点", classes="log-line"))
+        self._append(Static("  [cyan]F7[/cyan]       文件变更/回滚面板", classes="log-line"))
         self._append(Static("  [cyan]Ctrl+P[/cyan]  系统命令面板（Textual 默认）", classes="log-line"))
+        self._append(Static("  [cyan]Shift+Tab[/cyan] 循环切换五态权限模式（运行中也可切）", classes="log-line"))
         self._append(Static("", classes="log-line"))
         # 斜杠命令部分
         self._append(Static("[bold]斜杠命令（输入 / 查看）：[/bold]", classes="log-line"))
         self._append(Static("  [cyan]/help[/cyan]            显示此帮助信息", classes="log-line"))
-        self._append(Static("  [cyan]/auto [off|read_only|on][/cyan]  切换自动模式", classes="log-line"))
+        self._append(Static("  [cyan]/auto [default|acceptEdits|plan|auto|bypassPermissions][/cyan]  切换权限模式", classes="log-line"))
         self._append(Static("  [cyan]/effort [minimal|low|medium|high|max][/cyan]  切换努力等级", classes="log-line"))
         self._append(Static("  [cyan]/model [fast|balanced|powerful][/cyan]  切换模型预设", classes="log-line"))
-        self._append(Static("  [cyan]/engine [legacy|langgraph|plan_execute|debate|pipeline][/cyan]  切换 Agent 引擎", classes="log-line"))
+        self._append(Static("  [cyan]/engine [legacy|langgraph|plan_execute|debate|pipeline|auto][/cyan]  切换 Agent 引擎（auto=按任务自动选择）", classes="log-line"))
         self._append(Static("  [cyan]/compact[/cyan]         压缩上下文窗口", classes="log-line"))
         self._append(Static("  [cyan]/checkpoint list[/cyan]  列出所有检查点", classes="log-line"))
         self._append(Static("  [cyan]/checkpoint restore <n>[/cyan]  恢复到指定检查点", classes="log-line"))
+        self._append(Static("  [cyan]/files [run_id][/cyan]    查看/回滚文件变更（同 F7 面板）", classes="log-line"))
         self._append(Static("  [cyan]/history[/cyan]         查看会话历史", classes="log-line"))
         self._append(Static("  [cyan]/close[/cyan]           关闭当前会话", classes="log-line"))
         self._append(Static("  [cyan]/recover[/cyan]         恢复崩溃的会话", classes="log-line"))
@@ -2105,10 +2368,14 @@ class IwanTuiApp(App[None]):
                     prompt.read_only = False
                     prompt.border_title = "type a message — enter to send, ⌘/⇧/⌥+enter for newline"
                 self._update_header("ready")
+            else:
+                # 记录活跃 run_id：Esc 取消与运行中 steer 都靠它定位
+                self._active_run_id = run_id
 
         except (IpcError, RuntimeError, OSError) as e:
             # 发送失败时重置 UI 状态
             self._busy = False
+            self._active_run_id = ""
             prompt = self._prompt()
             if prompt is not None:
                 prompt.disabled = False
@@ -2169,6 +2436,105 @@ class IwanTuiApp(App[None]):
                     p.focus()
         except Exception:
             log.exception("on_permission_select_decided failed tool_use_id=%s", tool_use_id)
+
+    # 处理用户的信任答复：dismiss 只收控件，allow/deny 落 trust.respond（持久决定）
+    async def on_trust_select_decided(self, msg: TrustSelect.Decided) -> None:
+        """
+        处理信任询问决策（S9 Part A：Layer 0 信任门）
+
+        与权限审批不同：这里没有任何东西被阻塞，dismiss 就是单纯的"先不答"，
+        会话照常可用；allow/deny 写入 daemon 的 trust.toml 影响后续会话。
+        """
+        log.info("trust decided session=%s cwd=%s decision=%s", msg.session_id, msg.cwd, msg.decision)
+        try:
+            msg.widget.remove()
+            if msg.decision == "dismiss":
+                return
+            if self._client is not None:
+                try:
+                    await self._client.send_command(
+                        "trust.respond",
+                        {
+                            "session_id": msg.session_id,
+                            "cwd": msg.cwd,
+                            "decision": msg.decision,
+                            "persistent": True,
+                        },
+                    )
+                except (IpcError, RuntimeError, OSError):
+                    pass  # 发送失败静默忽略：daemon 里该目录仍是 ask，下次会话还会问
+        except Exception:
+            log.exception("on_trust_select_decided failed cwd=%s", msg.cwd)
+
+    # 处理回滚面板的还原请求：发 files.restore、逐行汇报结果、刷新面板（S9 C2）
+    async def on_file_changes_select_restore_requested(
+        self, msg: FileChangesSelect.RestoreRequested,
+    ) -> None:
+        """
+        执行文件还原并呈现逐项结果
+
+        还原后重查 files.changes：账本可能因反向快照改变视图；全部还原完
+        （列表清空）就撤面板，否则原位刷新让人继续挑——一轮 r 键不应逼用户
+        重新 F7。冲突/未拍全的行按 ShadowStore 的裁决显示 skipped/failed。
+        """
+        log.info("files restore requested run=%s paths=%d force=%s",
+                 msg.run_id, len(msg.paths), msg.force)
+        if self._client is None or self._session_id is None:
+            return
+        try:
+            result = await self._client.send_command(
+                "files.restore",
+                {
+                    "session_id": self._session_id,
+                    "run_id": msg.run_id,
+                    "paths": msg.paths,
+                    "force": msg.force,
+                },
+            )
+        except (IpcError, RuntimeError, OSError) as e:
+            self._append(Static(f"[red]files.restore error: {e}[/red]", classes="log-line"))
+            return
+        for it in result.get("results", []):
+            status = str(it.get("status", ""))
+            detail = str(it.get("detail", ""))
+            suffix = f"  [dim]{detail}[/dim]" if detail else ""
+            icon = ("[green]✓ restored[/green]" if status == "restored"
+                    else "[yellow]⏭ skipped[/yellow]" if status == "skipped"
+                    else "[red]✗ failed[/red]")
+            self._append(Static(
+                f"  {icon}  [cyan]{it.get('path', '')}[/cyan]{suffix}",
+                classes="log-line",
+            ))
+        # 刷新面板到还原后的新账视图（空了就撤）
+        try:
+            refreshed = await self._client.send_command(
+                "files.changes",
+                {"session_id": self._session_id, "run_id": msg.run_id},
+            )
+        except (IpcError, RuntimeError, OSError):
+            return
+        changes = refreshed.get("changes", [])
+        panel = self._files_panel
+        if panel is None:
+            return
+        if not changes:
+            panel.remove()
+            self._files_panel = None
+            p = self._prompt()
+            if p is not None:
+                p.focus()
+        else:
+            panel.set_changes(str(refreshed.get("run_id", msg.run_id)), changes)
+
+    # 面板 esc 关闭：撤控件并把键盘还给输入框
+    async def on_file_changes_select_dismissed(self, msg: FileChangesSelect.Dismissed) -> None:
+        """用户主动收起回滚面板：只清 UI，不产生任何文件操作"""
+        if self._files_panel is msg.widget:
+            self._files_panel = None
+        msg.widget.remove()
+        p = self._prompt()
+        if p is not None:
+            p.focus()
 
     async def on_skill_confirm_decided(self, msg: SkillConfirm.Decided) -> None:
         """
@@ -2362,13 +2728,16 @@ class IwanTuiApp(App[None]):
         # 条件：_busy=True（还在工作） + header 是 running + 超过 60 秒
         # 说明 waiting_for_input 事件可能丢了，强制恢复
         if self._busy and state == "running" and self._run_start_ts is not None:
-            elapsed = _t.perf_counter() - self._run_start_ts
-            if elapsed > 60:
+            # 【修】判活基准从"run 开始时间"改为"最后一次事件时间"：
+            # 原逻辑 elapsed>60 会把任何正常运行超过 60 秒的任务误判为卡死
+            idle = _t.monotonic() - self._last_activity_ts
+            if idle > 60:
                 logging.getLogger(__name__).warning(
-                    "watchdog: force-unstick after %.0s (still busy, no waiting_for_input)",
-                    elapsed,
+                    "watchdog: force-unstick after %.0fs silent (still busy, no events)",
+                    idle,
                 )
                 self._busy = False
+                self._active_run_id = ""  # 判死之后 run_id 不再可信，清掉防止误 steer
                 prompt = self._prompt()
                 if prompt is not None:
                     prompt.disabled = False
@@ -2377,7 +2746,7 @@ class IwanTuiApp(App[None]):
                     prompt.focus()
                 self._update_header("ready")
                 self._append(Static(
-                    f"[bold yellow]⚠ agent unresponsive after {elapsed:.0f}s[/bold yellow]  "
+                    f"[bold yellow]⚠ agent unresponsive — no events for {idle:.0f}s[/bold yellow]  "
                     f"[dim]try /compact or send a new message[/dim]",
                     classes="log-line",
                 ))
@@ -2432,9 +2801,12 @@ class IwanTuiApp(App[None]):
         # 检查点后端信息（非 legacy 引擎且非 none 时显示）
         if self._engine_type != "legacy" and self._checkpoint_backend != "none":
             engine_info += f"  [dim]({self._checkpoint_backend})[/dim]"
-        # 自动模式显示（带颜色编码）
-        auto_color = {"off": "dim", "read_only": "yellow", "on": "magenta"}.get(self._auto_mode, "dim")
-        auto_info = f"  [{auto_color}]auto:{self._auto_mode}[/{auto_color}]"
+        # 权限模式显示（五态；bypassPermissions 红色警示——它拆的是弹窗不是地板）
+        mode_color = {
+            "default": "dim", "acceptEdits": "yellow", "plan": "cyan",
+            "auto": "magenta", "bypassPermissions": "bold red",
+        }.get(self._permission_mode, "dim")
+        auto_info = f"  [{mode_color}]mode:{self._permission_mode}[/{mode_color}]"
         # 努力等级显示
         effort_color = {"minimal": "dim", "low": "cyan", "medium": "green", "high": "yellow", "max": "red"}.get(self._effort_level, "green")
         effort_info = f"  [{effort_color}]effort:{self._effort_level}[/{effort_color}]"
@@ -2552,6 +2924,7 @@ class IwanTuiApp(App[None]):
                         "llm.usage",
                         "log.*",
                         "permission.*",
+                        "trust.*",
                         "context.*",
                         "subagent.*",
                         "skill.*",
@@ -2578,9 +2951,16 @@ class IwanTuiApp(App[None]):
                 state = self._sessions.get(sid)
                 if state is not None:
                     state.auto_mode = str(created.get("auto_mode", "off"))
+                    # daemon 回传新会话生效的权限模式（含 [permission] mode 默认值）
+                    state.permission_mode = str(created.get("permission_mode", "default"))
                     state.effort_level = str(created.get("effort_level", "medium"))
                     state.model_preset = str(created.get("model_preset", "balanced"))
-                log.info("session created session_id=%s auto_mode=%s effort_level=%s model_preset=%s", sid, self._auto_mode, self._effort_level, self._model_preset)
+                    # Layer 0 信任档：ask 时 daemon 已广播 trust.requested，这里只同步显示态
+                    state.trust = str(created.get("trust", "ask"))
+                log.info(
+                    "session created session_id=%s permission_mode=%s effort_level=%s model_preset=%s",
+                    sid, self._permission_mode, self._effort_level, self._model_preset,
+                )
 
                 # 获取引擎信息
                 engine_info = await client.send_command("session.engine_info", {})
@@ -2673,7 +3053,8 @@ class IwanTuiApp(App[None]):
         - session.waiting_for_input: 会话等待输入，恢复输入框
         - session.closed: 会话关闭，更新状态
         - session.renamed: 会话重命名，更新标题
-        - session.auto_mode_changed: 自动模式变更
+        - session.auto_mode_changed: 自动模式变更（legacy 三态广播）
+        - session.permission_mode_changed: 五态权限模式变更（多端一致刷新）
         - session.effort_level_changed: 努力等级变更
         - session.model_changed: 模型预设变更
         - session.engine_changed: Agent 引擎变更
@@ -2700,6 +3081,11 @@ class IwanTuiApp(App[None]):
         """
         t = event.get("type", "")
 
+        # 活动心跳：任何真实事件都刷新"最后一次事件"时间戳（watchdog 判活基准）。
+        # 排除 _watchdog_tick 自身，否则它自己会把自己喂活。
+        if t and t != "_watchdog_tick":
+            self._last_activity_ts = time.monotonic()
+
         # 【日志埋点】关键事件流转追踪（帮助排查卡死/状态不一致问题）
         # 只追踪关键事件，避免日志过于膨胀
         if t in ("run.started", "run.finished", "session.waiting_for_input",
@@ -2720,10 +3106,23 @@ class IwanTuiApp(App[None]):
             state = self._sessions[event_sid]
             if t == "run.started":
                 state.busy = True
+                # 后台会话同样记录 run_id：切回该标签页后 Esc/steer 才能定位
+                state.active_run_id = event.get("run_id", "")
                 self._refresh_tabbar()
             elif t in ("run.finished", "session.waiting_for_input", "session.closed"):
                 state.busy = False
+                state.active_run_id = ""
                 self._refresh_tabbar()
+            elif t == "session.permission_mode_changed":
+                # 后台标签页的模式也要记：切回该会话时 _update_header 读的是
+                # 它自己的 state——不记就会显示过期模式（模式是 per-session 的）
+                state.permission_mode = str(event.get("mode", "default"))
+                state.auto_mode = _MODE_TO_AUTO_DISPLAY.get(state.permission_mode, "off")
+            elif t == "session.auto_mode_changed":
+                m = str(event.get("mode", "off"))
+                state.auto_mode = m
+                if m in _AUTO_ALIAS_TO_MODE:
+                    state.permission_mode = _AUTO_ALIAS_TO_MODE[m]
             return  # 后台会话事件处理完毕，不渲染 UI
 
         # ========== LLM Token 事件（优先处理，不打断流式输出） ==========
@@ -2746,6 +3145,7 @@ class IwanTuiApp(App[None]):
         # session.waiting_for_input：Agent 等待用户输入
         if t == "session.waiting_for_input":
             self._busy = False  # 重置忙碌状态
+            self._active_run_id = ""  # run 收尾，取消/steer 目标失效
             prompt = self._prompt()
             if prompt is not None:
                 prompt.disabled = False  # 启用输入框
@@ -2774,9 +3174,20 @@ class IwanTuiApp(App[None]):
             self._update_header("ready")
 
         elif t == "session.auto_mode_changed":
-            # 自动模式变更
+            # legacy 三态变更（旧客户端走 session.set_auto_mode 时广播）
             mode = event.get("mode", "off")
             self._auto_mode = mode
+            # 折成五态刷新显示：五态才是状态栏口径，否则另一端用旧口令
+            # 切换后本端状态栏停在过期模式上
+            if mode in _AUTO_ALIAS_TO_MODE:
+                self._permission_mode = _AUTO_ALIAS_TO_MODE[mode]
+            self._update_header("ready")
+
+        elif t == "session.permission_mode_changed":
+            # 五态权限模式变更：同步新字段与 legacy 显示值，多端一致刷新
+            mode = str(event.get("mode", "default"))
+            self._permission_mode = mode
+            self._auto_mode = _MODE_TO_AUTO_DISPLAY.get(mode, "off")
             self._update_header("ready")
 
         elif t == "session.effort_level_changed":
@@ -2803,6 +3214,10 @@ class IwanTuiApp(App[None]):
             # 运行开始：显示运行头部信息
             run_id = event.get("run_id", "")
             goal = event.get("goal", "")
+            # 【设计】不只信任 send_message 响应里的 run_id：重连回放等场景下
+            # 客户端没发过这条消息，也必须知道"当前活着的 run 是谁"才能取消
+            if run_id:
+                self._active_run_id = run_id
             self._append(Static(
                 f"[dim]run[/dim]  [cyan]{run_id}[/cyan]  [dim]{_preview(goal, 96)}[/dim]",
                 classes="run-header",
@@ -2944,16 +3359,18 @@ class IwanTuiApp(App[None]):
         # 说明事件可能丢失了（Agent 端异常退出、事件总线问题等），
         # 此时强制恢复 _busy=False，避免用户永远卡在"running"状态。
         elif t == "_watchdog_tick":
-            import time as _t
             if self._busy and self._run_start_ts is not None:
-                elapsed = _t.perf_counter() - self._run_start_ts
-                # 只有当状态是 running 且超过 30 秒还没恢复时才介入
+                # 【修】run.finished 到达会刷新活动时钟，所以"距最后一次事件 30 秒"
+                # 恰好等价于原本想要的"finished 后 30 秒没等到 waiting_for_input"；
+                # 同时也不再误伤还没发 finished 的正常长任务
+                idle = time.monotonic() - self._last_activity_ts
                 state = getattr(self, "_header_state", "")
-                if state == "running" and elapsed > 30:
+                if state == "running" and idle > 30:
                     logging.getLogger(__name__).warning(
-                        "watchdog: force-unstick after %.0fs (no waiting_for_input event)", elapsed,
+                        "watchdog: force-unstick after %.0fs silent (no waiting_for_input event)", idle,
                     )
                     self._busy = False
+                    self._active_run_id = ""  # 强制恢复后 run_id 已不可信
                     prompt = self._prompt()
                     if prompt is not None:
                         prompt.disabled = False
@@ -2962,7 +3379,7 @@ class IwanTuiApp(App[None]):
                         prompt.focus()
                     self._update_header("ready")
                     self._append(Static(
-                        f"[bold yellow]⚠ agent unresponsive after {elapsed:.0f}s[/bold yellow]  "
+                        f"[bold yellow]⚠ agent unresponsive — no events for {idle:.0f}s[/bold yellow]  "
                         f"[dim]try /compact or send a new message[/dim]",
                         classes="log-line",
                     ))
@@ -3088,6 +3505,31 @@ class IwanTuiApp(App[None]):
                         p.read_only = False
                         p.border_title = "type a message — enter to send, ⌘/⇧/⌥+enter for newline"
                         p.focus()
+
+        # ========== 信任门事件（S9 Part A / Layer 0）==========
+
+        elif t == "trust.requested":
+            # 新会话的 cwd 信任未决：挂载内联询问控件，但不禁用输入框、不抢焦点。
+            # 信任是"目录能不能碰"的上游裁决，ask 语义 = 维持现状（写操作逐次审批），
+            # 所以这里绝不能像 permission 那样把用户输入锁死——否则信任层反而制造阻塞
+            session_id = str(event.get("session_id", ""))
+            cwd = str(event.get("cwd", ""))
+            has_instr = bool(event.get("has_instruction_files", False))
+            trust_select = TrustSelect(session_id, cwd, has_instruction_files=has_instr)
+            try:
+                self.mount(trust_select, before="#prompt")
+            except Exception:
+                log.exception("failed to mount TrustSelect cwd=%s", cwd)
+
+        elif t == "trust.changed":
+            # 信任决定被设定/撤销：显示一行状态，供多端一致性观察（本端刚答过也照显）
+            decision = str(event.get("decision", ""))
+            cwd = str(event.get("cwd", ""))
+            icon = "✅" if decision == "allow" else ("⛔" if decision == "deny" else "↩")
+            self._append(Static(
+                f"[dim]{icon} trust {decision}[/dim]  [cyan]{cwd}[/cyan]",
+                classes="log-line",
+            ))
 
         # ========== 日志行事件 ==========
 

@@ -13,6 +13,7 @@
 - 事件订阅：EventSubscribeCommand
 - 会话管理：SessionCreateCommand, SessionSendMessageCommand, SessionGetHistoryCommand, SessionCloseCommand
 - 权限响应：PermissionRespondCommand
+- 模式设置：SessionSetAutoModeCommand（legacy 三态）, SessionSetPermissionModeCommand（五态）
 - 上下文压缩：SessionCompactCommand
 - 检查点管理：SessionCheckpointListCommand, SessionCheckpointRestoreCommand
 
@@ -145,6 +146,8 @@ class SessionCreateCommand(BaseModel):
     - mode: SessionMode - 会话模式（默认 "chat"）
     - title: str - 会话标题（默认空字符串）
     - cwd: str - 会话绑定的工作目录（沙箱根），实现多项目隔离
+    - trust_decision: str - 客户端对信任询问的先行答复（"allow"/"deny"/"ask"，
+      ""=未表态走服务端流程）。CLI 信任对话框答复后重连创建会话时携带
 
     【cwd 的作用】
     每个会话可绑定独立的项目目录（类似 VS Code 的 workspace），
@@ -163,6 +166,7 @@ class SessionCreateCommand(BaseModel):
     mode: SessionMode = "chat"
     title: str = ""
     cwd: str = ""
+    trust_decision: str = ""
 
 
 class SessionCreateResult(BaseModel):
@@ -172,9 +176,11 @@ class SessionCreateResult(BaseModel):
     【字段说明】
     - session_id: str - 会话 ID
     - status: SessionStatus - 会话状态
-    - auto_mode: str - 当前自动模式（"off" / "read_only" / "on"）
+    - auto_mode: str - 当前自动模式（"off" / "read_only" / "on"，legacy 三态）
+    - permission_mode: str - 当前权限模式（五态），新客户端应以此为准
     - effort_level: str - 当前努力等级（"minimal" / "low" / "medium" / "high" / "max"）
     - model_preset: str - 当前模型预设（"fast" / "balanced" / "powerful"）
+    - trust: str - 该会话 cwd 生效的信任档（"allow"/"deny"/"ask"）
 
     【设计目的】
     返回会话 ID、状态和当前配置，用于客户端管理会话。
@@ -182,8 +188,10 @@ class SessionCreateResult(BaseModel):
     session_id: str
     status: SessionStatus
     auto_mode: str = "off"
+    permission_mode: str = "default"
     effort_level: str = "medium"
     model_preset: str = "balanced"
+    trust: str = "ask"
 
 
 class SessionSendMessageCommand(BaseModel):
@@ -335,6 +343,188 @@ class PermissionRespondResult(BaseModel):
     ok: bool = True
 
 
+class TrustRespondCommand(BaseModel):
+    """
+    信任响应命令 - 客户端答复信任询问（或主动变更某目录的信任档）
+
+    【字段说明】
+    - type: Literal["trust.respond"] - 命令类型
+    - session_id: str - 触发询问的会话 ID（立即对该会话生效）
+    - cwd: str - 被决定的目录；空字符串 = 用该会话的 cwd
+    - decision: str - "allow" | "deny" | "ask"（ask=撤销持久决定回到未决态）
+    - persistent: bool - 是否写入 trust.toml（False=仅本次会话的临时决定）
+
+    【设计目的】
+    与 permission.respond 的关键差异：信任询问不阻塞执行，
+    本命令随时可发、去抖不发也无妨——它改的是"以后的规则"，
+    不是"这一次的放行"。
+    """
+    type: Literal["trust.respond"] = "trust.respond"
+    session_id: str
+    cwd: str = ""
+    decision: str
+    persistent: bool = True
+
+
+class TrustRespondResult(BaseModel):
+    """
+    信任响应结果 - 服务器返回的生效信任档
+
+    【字段说明】
+    - ok: bool - 是否成功处理（decision 非法时为 False）
+    - trust: str - 该会话现在的生效信任档（"allow"/"deny"/"ask"）
+    """
+    ok: bool = True
+    trust: str = "ask"
+
+
+class TrustListCommand(BaseModel):
+    """
+    信任列表命令 - 客户端查询全部持久信任条目
+
+    【字段说明】
+    - type: Literal["trust.list"] - 命令类型
+
+    【响应】
+    TrustListResult - 归一化目录键 → 决定 的映射
+    """
+    type: Literal["trust.list"] = "trust.list"
+
+
+class TrustListResult(BaseModel):
+    """
+    信任列表结果
+
+    【字段说明】
+    - entries: dict[str, str] - 归一化目录键 → "allow"/"deny"
+    """
+    entries: dict[str, str] = {}
+
+
+class TrustRevokeCommand(BaseModel):
+    """
+    信任撤销命令 - 删除某目录的持久信任决定（回到未决态）
+
+    【字段说明】
+    - type: Literal["trust.revoke"] - 命令类型
+    - cwd: str - 目标目录（与 trust.toml 键做同样的归一化后再比对）
+
+    【响应】
+    TrustRevokeResult - ok=是否确实删掉了条目
+    """
+    type: Literal["trust.revoke"] = "trust.revoke"
+    cwd: str
+
+
+class TrustRevokeResult(BaseModel):
+    """
+    信任撤销结果
+
+    【字段说明】
+    - ok: bool - 是否删掉了既有条目（目录本就无记录时 False）
+    """
+    ok: bool = True
+
+
+class FileChangesListCommand(BaseModel):
+    """
+    文件变更清单命令 - 查询某次 run 被影子快照记录的文件变更（S9 Part C）
+
+    【字段说明】
+    - type: Literal["files.changes"] - 命令类型
+    - session_id: str - 会话 ID
+    - run_id: str - 目标 run；空字符串 = 该会话最近一次有变更账本的 run
+
+    【响应】
+    FileChangesListResult - 每个文件一行：工具/时间/是否新建/是否拍全/外部改动冲突
+    """
+    type: Literal["files.changes"] = "files.changes"
+    session_id: str
+    run_id: str = ""
+
+
+class FileChangeInfo(BaseModel):
+    """
+    单文件变更条目 - files.changes 结果里的行模型
+
+    【字段说明】
+    - path: str - 工具当时使用的路径原样
+    - tool: str - 产生变更的工具名
+    - ts: str - 变更前捕获时间（ISO 8601）
+    - was_new: bool - 写前不存在（还原 = 删除）
+    - captured: bool - 快照是否拍全（False=超限/读不了，无法还原）
+    - conflict: bool - 盘上当前内容 != 我们写完时的样子（被外部改过）
+    """
+    path: str
+    tool: str = ""
+    ts: str = ""
+    was_new: bool = False
+    captured: bool = True
+    conflict: bool = False
+
+
+class FileChangesListResult(BaseModel):
+    """
+    文件变更清单结果
+
+    【字段说明】
+    - run_id: str - 实际列出的是哪次 run 的账本（请求空 run_id 时由服务端选定）
+    - changes: list[FileChangeInfo] - 按文件归并后的最近状态
+    """
+    run_id: str = ""
+    changes: list[FileChangeInfo] = []
+
+
+class FileRestoreCommand(BaseModel):
+    """
+    文件还原命令 - 把选中文件回滚到该 run 变更前状态（S9 Part C）
+
+    【字段说明】
+    - type: Literal["files.restore"] - 命令类型
+    - session_id: str - 会话 ID
+    - run_id: str - 目标 run；空 = 最近一次有账本的 run（与 files.changes 同规则）
+    - paths: list[str] - 要还原的文件（["*"] = 全部）
+    - force: bool - 冲突文件（还原后又被外部改过）是否强还原；默认跳过
+
+    【设计目的】
+    还原前先给"当前内容"记一次反向快照（tool="restore"），还原本身可撤销——
+    与对话回溯是两个独立操作，用户明确选择要回滚哪个（避免 undo 语义模糊）。
+    """
+    type: Literal["files.restore"] = "files.restore"
+    session_id: str
+    run_id: str = ""
+    paths: list[str] = ["*"]
+    force: bool = False
+
+
+class FileRestoreItem(BaseModel):
+    """
+    单文件还原结果行
+
+    【字段说明】
+    - path: str - 文件路径
+    - status: str - "restored" | "skipped"（冲突未 force） | "failed"（没快照/写盘错误）
+    - detail: str - 跳过/失败原因
+    """
+    path: str
+    status: str
+    detail: str = ""
+
+
+class FileRestoreResult(BaseModel):
+    """
+    文件还原结果
+
+    【字段说明】
+    - ok: bool - 是否全部成功（有 skipped/failed 即 False）
+    - run_id: str - 实际作用的 run
+    - results: list[FileRestoreItem] - 逐文件结果
+    """
+    ok: bool = True
+    run_id: str = ""
+    results: list[FileRestoreItem] = []
+
+
 class SessionSetAutoModeCommand(BaseModel):
     """
     设置自动模式命令 - 客户端请求设置会话的自动模式
@@ -366,6 +556,44 @@ class SessionSetAutoModeResult(BaseModel):
     返回设置后的自动模式，用于客户端同步状态。
     """
     mode: str
+
+
+class SessionSetPermissionModeCommand(BaseModel):
+    """
+    设置权限模式命令 - 客户端请求切换某会话的五态权限模式
+
+    【字段说明】
+    - type: Literal["session.set_permission_mode"] - 命令类型
+    - session_id: str - 会话 ID
+    - mode: str - 权限模式（default/acceptEdits/plan/auto/bypassPermissions）
+
+    【设计目的】
+    对齐 Claude Code 的 Shift+Tab 模式循环：模式是 per-session 的策略档，
+    取代旧的三态 auto_mode（后者保留一版兼容映射）。切换只改写审批链的
+    Tier3~6，deny 地板/强制 ASK/hook 永远不受模式影响。
+
+    【响应】
+    SessionSetPermissionModeResult - 包含切换前后两个模式，便于客户端回显
+    """
+    type: Literal["session.set_permission_mode"] = "session.set_permission_mode"
+    session_id: str
+    mode: str
+
+
+class SessionSetPermissionModeResult(BaseModel):
+    """
+    设置权限模式响应 - 服务器返回的切换结果
+
+    【字段说明】
+    - mode: str - 切换后的生效模式
+    - previous_mode: str - 切换前的模式（供客户端展示"从哪来"）
+
+    【设计目的】
+    返回前后两个值而非只返回新值：多端连接同一会话时，发起端需要知道
+    previous 才能正确回滚 UI 状态（另一台机器已经抢先切过模式的情况）。
+    """
+    mode: str
+    previous_mode: str
 
 
 class SessionSetEffortLevelCommand(BaseModel):
@@ -443,7 +671,7 @@ class SessionSetEngineCommand(BaseModel):
     【字段说明】
     - type: Literal["session.set_engine"] - 命令类型
     - session_id: str - 会话 ID
-    - engine: str - 引擎名称（legacy / langgraph / plan_execute / debate / pipeline）
+    - engine: str - 引擎名称（legacy / langgraph / plan_execute / debate / pipeline / auto）
 
     【设计目的】
     允许客户端在运行时动态切换 Agent 引擎，无需重启 core。
@@ -466,6 +694,72 @@ class SessionSetEngineResult(BaseModel):
     - engine: str - 当前引擎名称
     """
     engine: str
+
+
+class RunCancelCommand(BaseModel):
+    """
+    运行取消命令 - 客户端请求中断一个正在执行的 run
+
+    【字段说明】
+    - type: Literal["run.cancel"] - 命令类型
+    - run_id: str - 要取消的运行 ID
+
+    【设计目的】
+    Claude Code 里对应"Esc 中断当前 turn"。daemon 端按 run_id 找到运行任务并
+    取消：工具执行/LLM 流式输出被打断，已产生的消息仍会写入会话历史，
+    RunFinishedEvent 以 status=failed / reason=cancelled 收尾。
+    取消是幂等的：run 已结束或不存在时 accepted=False，不报错。
+
+    【响应】
+    RunCancelResult - accepted 表示是否命中了一个活跃 run
+    """
+    type: Literal["run.cancel"] = "run.cancel"
+    run_id: str
+
+
+class RunCancelResult(BaseModel):
+    """
+    取消响应 - accepted 表示取消请求是否命中活跃 run
+
+    【字段说明】
+    - accepted: bool - 是否找到并取消了该 run（False=已结束/不存在）
+    """
+    accepted: bool
+
+
+class RunSteerCommand(BaseModel):
+    """
+    运行中修正命令 - 用户在 run 执行期间注入一条修正意见
+
+    【字段说明】
+    - type: Literal["run.steer"] - 命令类型
+    - run_id: str - 目标运行 ID
+    - message: str - 修正内容（如"方向错了，改用 asyncio"）
+
+    【设计目的】
+    Claude Code 里对应"运行中直接打字改向"（in-flight steering）。
+    daemon 端把消息排进该 run 的 steering 队列，Agent 在下一次调用 LLM 前
+    把它作为 user 消息注入对话，模型即刻看到并调整方向。
+    不中断当前正在执行的工具调用——队列消费发生在回合边界。
+
+    【响应】
+    RunSteerResult - accepted 表示是否命中活跃 run；未命中时客户端应改发 send_message
+    """
+    type: Literal["run.steer"] = "run.steer"
+    run_id: str
+    message: str
+
+
+class RunSteerResult(BaseModel):
+    """
+    修正入队响应 - accepted 表示消息是否成功排进活跃 run 队列
+
+    【字段说明】
+    - accepted: bool - 是否命中活跃 run
+    - queued: int - 该 run 当前积压的修正消息数（含本条）
+    """
+    accepted: bool
+    queued: int = 0
 
 
 class SessionListCommand(BaseModel):
@@ -621,6 +915,7 @@ class CheckpointInfo(BaseModel):
     - timestamp: str - 时间戳
     - summary: str - 检查点摘要
     - node: str | None - 节点名称（可选）
+    - run_id: str - 该检查点所属运行 ID（checkpoint↔run 交叉索引；旧数据为空串）
 
     【设计目的】
     封装单个检查点的详细信息，用于客户端显示。
@@ -630,6 +925,7 @@ class CheckpointInfo(BaseModel):
     timestamp: str
     summary: str
     node: str | None = None
+    run_id: str = ""
 
 
 class SessionCheckpointListResult(BaseModel):
@@ -698,12 +994,21 @@ Command = Annotated[
     | SessionCloseCommand
     | PermissionRespondCommand
     | SessionSetAutoModeCommand
+    | SessionSetPermissionModeCommand
     | SessionSetEffortLevelCommand
     | SessionSetModelCommand
+    | SessionSetEngineCommand
+    | RunCancelCommand
+    | RunSteerCommand
     | SessionListCommand
     | SessionRenameCommand
     | SessionCompactCommand
     | SessionCheckpointListCommand
-    | SessionCheckpointRestoreCommand,
+    | SessionCheckpointRestoreCommand
+    | TrustRespondCommand
+    | TrustListCommand
+    | TrustRevokeCommand
+    | FileChangesListCommand
+    | FileRestoreCommand,
     Discriminator("type"),
 ]

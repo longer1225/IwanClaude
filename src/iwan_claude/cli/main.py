@@ -19,6 +19,9 @@ iwan [全局选项] <子命令> [子命令选项]
   run             运行单个 agent 任务
   core start/stop/status  管理核心服务
   trace           查看系统追踪日志
+  cancel <run_id>          取消运行中的任务
+  steer <run_id> <message> 向运行中的任务注入修正评论
+  trust list|grant|deny|revoke <dir>  管理项目目录信任（Layer 0）
 """
 from __future__ import annotations
 
@@ -36,7 +39,9 @@ from iwan_claude.cli.commands.core import (                  # 核心服务管�
 )
 from iwan_claude.cli.commands.ping import cmd_ping           # 连接测试命令
 from iwan_claude.cli.commands.run import cmd_run             # 任务执行命令
+from iwan_claude.cli.commands.runctl import cmd_cancel, cmd_steer  # 运行中取消/修正命令
 from iwan_claude.cli.commands.trace import cmd_trace         # 日志追踪命令
+from iwan_claude.cli.commands.trust import cmd_trust         # 项目信任管理命令（Layer 0）
 from iwan_claude.cli.commands.version import cmd_version     # 版本显示命令
 
 # 导入懒启动 daemon 守护模块
@@ -86,6 +91,28 @@ def main() -> None:
     trace_parser.add_argument("--raw", action="store_true", help="Output raw NDJSON")
     # --follow/-f：带短选项的开关参数
     trace_parser.add_argument("--follow", "-f", action="store_true", help="Follow new records")
+
+    # ===== cancel 子命令（按 run_id 取消运行中任务）=====
+    cancel_parser = subparsers.add_parser("cancel", help="Cancel a running task by run ID")
+    cancel_parser.add_argument("run_id", help="ID of the run to cancel")
+
+    # ===== steer 子命令（向运行中任务注入修正评论）=====
+    steer_parser = subparsers.add_parser("steer", help="Send a mid-run correction to a running task")
+    steer_parser.add_argument("run_id", help="ID of the target run")
+    steer_parser.add_argument("message", help="Correction text")
+
+    # ===== trust 子命令（Layer 0 项目信任管理，S9 Part A）=====
+    trust_parser = subparsers.add_parser("trust", help="Manage project trust (Layer 0)")
+    trust_sub = trust_parser.add_subparsers(dest="trust_command")
+    trust_sub.add_parser("list", help="List persisted trust entries")
+    # grant/deny/revoke 都需要目标目录参数
+    for _verb, _help in (
+        ("grant", "Persistently trust a folder (allow writes & exec)"),
+        ("deny", "Persistently deny a folder (block file writes & exec)"),
+        ("revoke", "Remove a folder's persistent decision (back to ask)"),
+    ):
+        _tp = trust_sub.add_parser(_verb, help=_help)
+        _tp.add_argument("dir", help="Target directory")
 
     # 解析命令行参数，结果存储在 args 对象中
     args = parser.parse_args()
@@ -137,6 +164,20 @@ def main() -> None:
             raw=args.raw,
             follow=args.follow,
         )
+    elif args.command == "cancel":
+        cmd_cancel(args.run_id, config)
+    elif args.command == "steer":
+        cmd_steer(args.run_id, args.message, config)
+    elif args.command == "trust":
+        # 懒启动 daemon：信任条目住在 daemon 的 trust.toml，查询/变更都走 RPC
+        if not ensure_daemon(config):
+            print("error: daemon not ready, try `iwan core start` manually", file=sys.stderr)
+            sys.exit(1)
+        if args.trust_command in (None, ""):
+            trust_parser.print_help()
+            sys.exit(1)
+        # list 无目录参数，getattr 兜底空串
+        cmd_trust(args.trust_command, getattr(args, "dir", "") or "", config)
     else:
         # 未提供命令，显示帮助并退出
         parser.print_help()

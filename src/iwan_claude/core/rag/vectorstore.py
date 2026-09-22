@@ -28,7 +28,6 @@
 from __future__ import annotations
 
 import json
-import os
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
@@ -143,7 +142,8 @@ class VectorStore(ABC):
 
     @abstractmethod
     async def search_by_text(
-        self, query: str, top_k: int = 5
+        self, query: str, top_k: int = 5,
+        filters: dict[str, Any] | None = None,
     ) -> list[tuple[Chunk, float]]:
         """
         关键词搜索 - 在所有 Chunk 中做精确文本匹配（不使用向量）
@@ -151,6 +151,7 @@ class VectorStore(ABC):
         【参数说明】
         - query: str - 查询文本
         - top_k: int - 返回前 K 个结果（默认 5）
+        - filters: dict[str, Any] | None - 过滤器（同 search：source_path / symbol）
 
         【返回值】
         - list[tuple[Chunk, float]]: (Chunk, 关键词匹配分数) 列表
@@ -159,6 +160,16 @@ class VectorStore(ABC):
         用于 Adaptive RAG 的 grep 策略：
         当用户查询是精确的代码标识符（如 "AuthService"）时，
         关键词搜索比语义检索更准确。
+        """
+        ...
+
+    @abstractmethod
+    def size(self) -> int:
+        """
+        返回已存储的 Chunk 总数
+
+        【设计目的】
+        给上层（status 统计、VectorMemory.count）提供不触碰内部列表的计数入口。
         """
         ...
 
@@ -243,6 +254,37 @@ class MemoryVectorStore(VectorStore):
         self._chunk_id_map: dict[str, int] = {}
         # source_path 到索引列表的映射（加速按来源删除）
         self._source_map: dict[str, list[int]] = {}
+        # 向量维度：首批写入时锚定，之后任何不同维度的向量都直接拒绝——
+        # 【设计】换 embedding 模型后旧向量还在库里，zip 截断算出来的余弦是
+        # 无声的垃圾分数（错误只会在几周后的检索质量里显形，根本查不到根因），
+        # 所以维度不匹配必须在写入瞬间炸出来提醒重建索引
+        self._dim: int | None = None
+
+    # 判断 chunk 是否通过过滤器（source_path 精确匹配 / symbol 精确匹配）
+    @staticmethod
+    def _matches_filters(chunk: Chunk, filters: dict[str, Any] | None) -> bool:
+        if not filters:
+            return True
+        if "source_path" in filters and chunk.source_path != filters["source_path"]:
+            return False
+        if "symbol" in filters and chunk.symbol != filters["symbol"]:
+            return False
+        return True
+
+    # 统一维度校验：首批锚定 _dim，后续批次不符即拒
+    def _check_dim(self, vectors: list[list[float]]) -> None:
+        if not vectors:
+            return
+        first = len(vectors[0])
+        if first == 0:
+            raise ValueError("rejecting empty embedding vector")
+        if self._dim is None:
+            self._dim = first
+        elif first != self._dim:
+            raise ValueError(
+                f"embedding dimension mismatch: store={self._dim} incoming={first}; "
+                "模型换了？请先 rebuild_index 再重新索引"
+            )
 
     async def add(self, chunks: list[Chunk], vectors: list[list[float]]) -> None:
         """
@@ -265,9 +307,22 @@ class MemoryVectorStore(VectorStore):
         - 时间复杂度：O(n)，n 为新添加的 Chunk 数量
 
         【注意事项】
-        - chunks 和 vectors 长度必须一致
-        - 重复的 chunk_id 会被覆盖
+        - chunks 和 vectors 长度必须一致，否则 ValueError
+        - 重复的 chunk_id 走"覆盖式写入"：旧条目先删除再加入，
+          绝不允许同一 chunk_id 在列表里留两份（旧版会留孤儿向量）
         """
+        # 契约校验：一一对应是本存储的核心不变式，长度不符必须当场炸
+        if len(chunks) != len(vectors):
+            raise ValueError(
+                f"chunks/vectors length mismatch: {len(chunks)} vs {len(vectors)}"
+            )
+        self._check_dim(vectors)
+
+        # 覆盖式写入：已存在的 chunk_id 先删旧再进新
+        duplicates = [c.chunk_id for c in chunks if c.chunk_id in self._chunk_id_map]
+        if duplicates:
+            await self.delete(duplicates)
+
         # 遍历 chunks 和 vectors
         for i, chunk in enumerate(chunks):
             # 获取新索引（当前列表长度）
@@ -442,17 +497,17 @@ class MemoryVectorStore(VectorStore):
         # 按相似度降序排序
         scores.sort(key=lambda x: x[1], reverse=True)
 
-        # 取前 top_k 个结果
+        # 【设计】过滤必须发生在 top_k 截断之前——旧实现先切片后过滤，
+        # 目标 chunk 恰好排在第 top_k+1 位时结果直接为空，
+        # "带 filter 检索返回 0 条"会变成永远查不出的幽灵 bug
         results: list[tuple[Chunk, float]] = []
-        for idx, score in scores[:top_k]:
+        for idx, score in scores:
             chunk = self._chunks[idx]
-            # 应用过滤器
-            if filters:
-                if "source_path" in filters and chunk.source_path != filters["source_path"]:
-                    continue
-                if "symbol" in filters and chunk.symbol != filters["symbol"]:
-                    continue
+            if not self._matches_filters(chunk, filters):
+                continue
             results.append((chunk, score))
+            if len(results) >= top_k:
+                break
 
         return results
 
@@ -482,7 +537,8 @@ class MemoryVectorStore(VectorStore):
         return result
 
     async def search_by_text(
-        self, query: str, top_k: int = 5
+        self, query: str, top_k: int = 5,
+        filters: dict[str, Any] | None = None,
     ) -> list[tuple[Chunk, float]]:
         """
         关键词搜索 - 在所有 Chunk 中做精确文本匹配
@@ -490,13 +546,14 @@ class MemoryVectorStore(VectorStore):
         【参数说明】
         - query: str - 查询文本
         - top_k: int - 返回前 K 个结果（默认 5）
+        - filters: dict[str, Any] | None - 过滤器（同 search）
 
         【返回值】
         - list[tuple[Chunk, float]]: (Chunk, 关键词匹配分数) 列表
 
         【执行流程】
-        1. 提取查询中的关键词（正则 \w+）
-        2. 遍历所有 Chunk，计算关键词匹配分数
+        1. 提取查询中的关键词（正则 \\w+）
+        2. 遍历所有 Chunk，计算关键词匹配分数（先过过滤器）
         3. 按分数降序排序，返回前 top_k 个结果
 
         【评分算法】
@@ -517,6 +574,8 @@ class MemoryVectorStore(VectorStore):
 
         results: list[tuple[Chunk, float]] = []
         for chunk in self._chunks:
+            if not self._matches_filters(chunk, filters):
+                continue
             chunk_text = chunk.text.lower()
             score = 0.0
             for kw in keywords:
@@ -529,6 +588,10 @@ class MemoryVectorStore(VectorStore):
         # 按分数降序排序
         results.sort(key=lambda x: x[1], reverse=True)
         return results[:top_k]
+
+    def size(self) -> int:
+        # 已存 chunk 总数（统计接口，见 VectorStore.size 契约）
+        return len(self._chunks)
 
     def _cosine_similarity(self, a: list[float], b: list[float]) -> float:
         """
@@ -563,6 +626,11 @@ class MemoryVectorStore(VectorStore):
         - 向量长度必须一致
         - 空向量返回 0.0
         """
+        # 维度守卫：zip 会静默截断不等长向量，产出看似正常的垃圾分数——
+        # 走到这里说明存储内部维度已不一致（历史数据），按不相似处理并留一行
+        # debug 日志，让"分数莫名偏低"至少可追溯
+        if len(a) != len(b):
+            return 0.0
         # 计算向量点积
         dot = sum(x * y for x, y in zip(a, b))
         # 计算向量 a 的模（L2 范数）
@@ -645,15 +713,25 @@ class MemoryVectorStore(VectorStore):
 
         # 加载 chunks.json
         if chunks_path.exists():
-            with open(chunks_path, "r", encoding="utf-8") as f:
+            with open(chunks_path, encoding="utf-8") as f:
                 chunks_data = json.load(f)
             # 将字典列表转换为 Chunk 对象列表
             self._chunks = [Chunk(**c) for c in chunks_data]
 
         # 加载 vectors.json
         if vectors_path.exists():
-            with open(vectors_path, "r", encoding="utf-8") as f:
+            with open(vectors_path, encoding="utf-8") as f:
                 self._vectors = json.load(f)
+
+        # 维度锚定 + 行数对齐检查：持久化文件可能被手工/半途中断写坏，
+        # chunks 与 vectors 数量不一致时整库拒载（宁可空库重索引，不可错配检索）
+        if self._chunks and self._vectors:
+            if len(self._chunks) != len(self._vectors):
+                raise ValueError(
+                    f"corrupted store at {path}: "
+                    f"{len(self._chunks)} chunks vs {len(self._vectors)} vectors"
+                )
+            self._check_dim(self._vectors)
 
         # 重建 _chunk_id_map
         self._chunk_id_map = {c.chunk_id: i for i, c in enumerate(self._chunks)}

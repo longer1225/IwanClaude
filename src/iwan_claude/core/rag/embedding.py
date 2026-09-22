@@ -32,10 +32,8 @@
 """
 from __future__ import annotations
 
-import json
 import logging
 import os
-from hashlib import md5
 
 import httpx
 
@@ -71,6 +69,7 @@ class EmbeddingProvider:
         api_key_env: str = "DEEPSEEK_API_KEY",
         *,
         http_client: httpx.AsyncClient | None = None,
+        timeout_s: float | None = None,
     ) -> None:
         """
         初始化嵌入服务提供者
@@ -80,6 +79,7 @@ class EmbeddingProvider:
         - base_url: str - API 基础地址（如 "https://api.deepseek.com/v1"）
         - api_key_env: str - API 密钥环境变量名称（默认 "DEEPSEEK_API_KEY"）
         - http_client: httpx.AsyncClient | None - 自定义 HTTP 客户端（可选）
+        - timeout_s: float | None - 总超时秒数（None 用默认 120s，连接超时取其 1/6）
 
         【环境变量读取顺序（按优先级从高到低）】
         1. api_key_env 显式指定的环境变量（如 DASHSCOPE_API_KEY）
@@ -135,8 +135,11 @@ class EmbeddingProvider:
         # 验证 API 密钥是否存在
         if not api_key:
             tried = ", ".join(e for e in fallback_list if e)
+            # 【设计】报错点名 base_url——"没找到 key"和"endpoint 配错了"经常
+            # 是同一张诊断单：用户以为设了 key，实际把 DeepSeek 端点和千问 key 配反了
             raise ValueError(
-                f"Embedding API key not found. Tried environment variables: {tried}"
+                f"Embedding API key not found. Tried environment variables: {tried}. "
+                f"(target endpoint: {base_url.rstrip('/')})"
             )
 
         # 日志记录：只打印读取的环境变量名，**绝不打印 Key 本身**（安全红线）
@@ -155,7 +158,12 @@ class EmbeddingProvider:
         # 存储模型名称
         self._model = model
         # 初始化 HTTP 客户端（或使用传入的客户端）
-        self._http = http_client or httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=20.0))
+        # 超时接 [llm] embedding_timeout_s 配置——此前是硬编码 120s 死值，
+        # 配置键形同虚设；连接超时取总超时的 1/6（下限 5s），网络半死时快速失败
+        total_timeout = timeout_s if timeout_s else 120.0
+        self._http = http_client or httpx.AsyncClient(
+            timeout=httpx.Timeout(total_timeout, connect=min(20.0, max(5.0, total_timeout / 6)))
+        )
 
     async def embed(self, texts: list[str], batch_size: int = 32) -> list[list[float]]:
         """
@@ -263,21 +271,49 @@ class EmbeddingProvider:
 
         # 解析响应 JSON
         data = resp.json()
-        embeddings = []
-        # 提取嵌入向量
-        for item in data.get("data", []):
-            embeddings.append(item.get("embedding", []))
+        items = data.get("data", [])
+        # 【设计】OpenAI 协议明文 data[] 顺序不作保证（按 index 字段回填才是契约），
+        # 部分兼容端点确实乱序——直接按返回序取会让"向量和文本错位"静默入库，
+        # 之后所有检索都在错误数据上打分且无从排查。缺 index 字段时保持原序兜底。
+        ordered = sorted(
+            enumerate(items),
+            key=lambda pair: pair[1].get("index", pair[0]),
+        )
+        embeddings = [item.get("embedding", []) for _, item in ordered]
+
+        # 数量校验：返回条数与请求条数不符必须炸——
+        # 宁可索引一个文件失败，也不能让 chunks[i] 配到 vectors[j]
+        if len(embeddings) != len(texts):
+            raise ValueError(
+                f"embedding count mismatch: requested {len(texts)}, "
+                f"got {len(embeddings)} from {url}"
+            )
+        # 维度抽查（第一维为 0 视为端点异常返回）
+        if embeddings and not embeddings[0]:
+            raise ValueError(f"embedding response contains empty vectors from {url}")
 
         return embeddings
 
+    # 关闭内部 HTTP 客户端；注入的外部客户端不归我们关
+    async def aclose(self) -> None:
+        await self._http.aclose()
 
-def get_embedding_provider(config: RagConfig, llm_base_url: str) -> EmbeddingProvider:
+
+def get_embedding_provider(
+    config: RagConfig,
+    llm_base_url: str,
+    *,
+    timeout_s: float | None = None,
+) -> EmbeddingProvider:
     """
     创建嵌入服务提供者
 
     【参数说明】
-    - config: RagConfig - RAG 配置（包含 embedding_model / embedding_base_url / embedding_api_key_env）
+    - config: RagConfig - RAG 配置
+        （含 embedding_model / embedding_base_url / embedding_api_key_env）
     - llm_base_url: str - LLM API 基础地址（保留用于兼容旧 fallback 逻辑）
+    - timeout_s: float | None - Embedding 请求总超时
+        （来自 [llm] embedding_timeout_s，None 用默认 120s）
 
     【返回值】
     - EmbeddingProvider: 嵌入服务提供者
@@ -326,4 +362,5 @@ def get_embedding_provider(config: RagConfig, llm_base_url: str) -> EmbeddingPro
         model=config.embedding_model,
         base_url=base_url,
         api_key_env=preferred_env,
+        timeout_s=timeout_s,
     )

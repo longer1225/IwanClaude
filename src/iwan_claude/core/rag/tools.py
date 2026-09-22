@@ -143,11 +143,17 @@ class SearchKnowledgeTool(BaseTool):
             },
             "filters": {
                 "type": "object",
-                "description": "Optional filters to narrow results (e.g., {source_path: 'src/main.py'}).",
+                "description": (
+                    "Optional filters to narrow results "
+                    "(e.g., {source_path: 'src/main.py'})."
+                ),
             },
             "hybrid": {
                 "type": "boolean",
-                "description": "Use hybrid search combining semantic and keyword matching (default: true).",
+                "description": (
+                    "Use hybrid search combining semantic and keyword matching "
+                    "(default: true)."
+                ),
                 "default": True,
             },
         },
@@ -215,7 +221,11 @@ class SearchKnowledgeTool(BaseTool):
 
         # 如果有 AdaptiveRetriever，使用自适应检索全流程
         if self._adaptive_retriever:
-            result = await self._adaptive_retriever.retrieve(p.query, p.top_k)
+            # filters 必须透传：工具 schema 向模型承诺了过滤能力，
+            # 旧实现进 adaptive 分支后直接丢弃，用户拿到的是全库结果
+            result = await self._adaptive_retriever.retrieve(
+                p.query, p.top_k, filters=p.filters
+            )
 
             # direct 策略：不需要检索
             if result.strategy == "direct":
@@ -287,7 +297,9 @@ class SearchKnowledgeTool(BaseTool):
             return ToolResult(content="No results found in knowledge base.")
 
         # 格式化检索结果
-        lines: list[str] = []
+        # 【设计】adaptive 分支已在同一函数里标注过 lines: list[str]，
+        # 这里重复带注解会被 mypy 判 no-redef；类型已定，直接赋值即可
+        lines = []
         for i, (chunk, score) in enumerate(results, 1):
             # 结果标题（包含分数）
             header = f"--- Result {i} (score: {score:.4f}) ---"
@@ -360,7 +372,7 @@ class IndexKnowledgeTool(BaseTool):
 
     【返回格式】
     ```
-    Indexed 2 path(s). Added: 10 chunks, Updated: 0 chunks, Deleted: 0 chunks.
+    Indexed 2 path(s). Added: 10 chunks, Updated: 0 files, Deleted: 0 chunks.
     ```
 
     【设计目的】
@@ -429,37 +441,55 @@ class IndexKnowledgeTool(BaseTool):
 
         【路径处理】
         - 目录：递归索引目录中的所有文件
-        - 文件：索引单个文件
+        - 文件：索引单个文件（统计真实 chunk 数）
+        - 不存在的路径：跳过并在结果中注明（模型给的幻觉路径不该炸掉整次调用）
 
         【注意事项】
-        - result 变量只保存最后一个路径的索引结果
+        - 多路径统计跨全部路径聚合（旧实现只报最后一个路径，且空列表 NameError）
         """
         # 使用 Pydantic 验证参数
         p = IndexKnowledgeParams.model_validate(params)
 
+        # 空路径列表直接返回：旧实现循环零次后引用未赋值的 result → NameError
+        if not p.paths:
+            return ToolResult(content="No paths given.")
+
+        # 跨路径聚合统计：旧实现变量被循环覆写，多路径时只报最后一条
+        total = IndexResult()
+        notes: list[str] = []
         # 遍历路径列表
         for path_str in p.paths:
             # 转换为 Path 对象
             path = Path(path_str)
             if path.is_dir():
                 # 如果是目录，调用 index_directory
-                result = await self._index_manager.index_directory(str(path))
+                res = await self._index_manager.index_directory(str(path))
+            elif path.is_file():
+                # 如果是文件，调用 index_file——用返回的真实 chunk 数，
+                # 旧实现恒写 added_chunks=1（大文件几十个 chunk 也报 1）
+                count = await self._index_manager.index_file(path)
+                res = IndexResult(added_chunks=count)
             else:
-                # 如果是文件，调用 index_file
-                await self._index_manager.index_file(path)
-                # 创建索引结果（假设添加了 1 个 Chunk）
-                result = IndexResult(added_chunks=1)
+                # 不存在的路径：记一笔继续，不中断其余路径
+                notes.append(f"skipped (not found): {path_str}")
+                continue
+            total.added_chunks += res.added_chunks
+            total.updated_chunks += res.updated_chunks
+            total.deleted_chunks += res.deleted_chunks
 
         # 保存索引到磁盘
         self._index_manager.save()
 
         # 返回工具执行结果
-        return ToolResult(
-            content=f"Indexed {len(p.paths)} path(s). "
-            f"Added: {result.added_chunks} chunks, "
-            f"Updated: {result.updated_chunks} chunks, "
-            f"Deleted: {result.deleted_chunks} chunks."
+        content = (
+            f"Indexed {len(p.paths)} path(s). "
+            f"Added: {total.added_chunks} chunks, "
+            f"Updated: {total.updated_chunks} files, "
+            f"Deleted: {total.deleted_chunks} chunks."
         )
+        if notes:
+            content += "\n" + "\n".join(notes)
+        return ToolResult(content=content)
 
 
 class ForgetKnowledgeParams(BaseModel):

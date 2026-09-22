@@ -48,6 +48,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from iwan_claude.core.sandbox import validate_path
 from iwan_claude.core.tools.base import BaseTool, ToolResult
 
 # 兜底输出最大字节数，防止大输出导致内存问题
@@ -75,6 +76,32 @@ def _timeout_s() -> int:
 
 # 检测是否为 Windows 平台，用于跨平台兼容
 IS_WINDOWS = sys.platform == "win32"
+
+
+# 沙箱校验并把仓库路径解析为绝对 Path；越界时返回 (None, 错误 ToolResult)
+def _sandbox_resolve(path_str: str, operation: str) -> tuple[Path | None, ToolResult | None]:
+    try:
+        # validate_path 在沙箱禁用时直接返回解析后的绝对路径，启用时越界抛 PermissionError
+        return validate_path(path_str, operation), None
+    except PermissionError as exc:
+        return None, ToolResult(content=str(exc), is_error=True, error_type="sandbox_violation")
+
+
+# 拒绝以 '-' 开头的参数值：这类值会被 git 解析为选项（--output / --git-dir= / --work-tree= 等），
+# 使只读子命令获得任意文件写能力；allowlist 思路下所有合法路径/ref 名都不以 '-' 开头
+def _reject_option_like(value: str, param_name: str) -> ToolResult | None:
+    stripped = value.strip()
+    if stripped.startswith("-"):
+        return ToolResult(
+            content=(
+                f"git tool rejected parameter {param_name}={value!r}: "
+                f"values starting with '-' are treated as git options "
+                f"(e.g. --output/--git-dir/--work-tree) and are not allowed"
+            ),
+            is_error=True,
+            error_type="permission_denied",
+        )
+    return None
 
 
 class GitStatusParams(BaseModel):
@@ -145,7 +172,11 @@ class GitStatusTool(BaseTool):
         """
         # 验证参数并获取仓库路径
         p = GitStatusParams.model_validate(params)
-        repo_path = Path(p.path).resolve()
+        # 沙箱校验：仓库路径必须位于会话沙箱内（相对路径按沙箱根解析）
+        repo_path, err = _sandbox_resolve(p.path, "read")
+        if err is not None:
+            return err
+        assert repo_path is not None  # 无错误时 repo_path 必为解析后的 Path
 
         try:
             # 创建子进程执行 git status 命令
@@ -167,7 +198,9 @@ class GitStatusTool(BaseTool):
         except TimeoutError:
             return ToolResult(content="[timeout]", is_error=True, error_type="timeout")
         except FileNotFoundError:
-            return ToolResult(content="git command not found", is_error=True, error_type="runtime_error")
+            return ToolResult(
+                content="git command not found", is_error=True, error_type="runtime_error"
+            )
         except Exception as exc:
             return ToolResult(content=str(exc), is_error=True, error_type="runtime_error")
 
@@ -176,8 +209,16 @@ class GitStatusTool(BaseTool):
             err_msg = stderr.decode("utf-8", errors="replace")
             # 特殊处理：非 git 仓库
             if "not a git repository" in err_msg:
-                return ToolResult(content=f"Not a git repository: {repo_path}", is_error=True, error_type="runtime_error")
-            return ToolResult(content=f"[exit {proc.returncode}]\n{err_msg}", is_error=True, error_type="runtime_error")
+                return ToolResult(
+                    content=f"Not a git repository: {repo_path}",
+                    is_error=True,
+                    error_type="runtime_error",
+                )
+            return ToolResult(
+                content=f"[exit {proc.returncode}]\n{err_msg}",
+                is_error=True,
+                error_type="runtime_error",
+            )
 
         # 解码输出
         output = stdout.decode("utf-8", errors="replace")
@@ -256,7 +297,10 @@ class GitLogTool(BaseTool):
         """
         # 验证参数并获取仓库路径和限制数量
         p = GitLogParams.model_validate(params)
-        repo_path = Path(p.path).resolve()
+        repo_path, err = _sandbox_resolve(p.path, "read")
+        if err is not None:
+            return err
+        assert repo_path is not None  # 沙箱校验通过后必为解析后的绝对路径
 
         try:
             # 创建子进程执行 git log 命令
@@ -281,14 +325,20 @@ class GitLogTool(BaseTool):
         except TimeoutError:
             return ToolResult(content="[timeout]", is_error=True, error_type="timeout")
         except FileNotFoundError:
-            return ToolResult(content="git command not found", is_error=True, error_type="runtime_error")
+            return ToolResult(
+                content="git command not found", is_error=True, error_type="runtime_error"
+            )
         except Exception as exc:
             return ToolResult(content=str(exc), is_error=True, error_type="runtime_error")
 
         # 检查命令返回码
         if proc.returncode != 0:
             err_msg = stderr.decode("utf-8", errors="replace")
-            return ToolResult(content=f"[exit {proc.returncode}]\n{err_msg}", is_error=True, error_type="runtime_error")
+            return ToolResult(
+                content=f"[exit {proc.returncode}]\n{err_msg}",
+                is_error=True,
+                error_type="runtime_error",
+            )
 
         # 解码输出
         output = stdout.decode("utf-8", errors="replace")
@@ -379,7 +429,10 @@ class GitDiffTool(BaseTool):
         """
         # 验证参数并获取仓库路径、staged 标志和文件
         p = GitDiffParams.model_validate(params)
-        repo_path = Path(p.path).resolve()
+        repo_path, err = _sandbox_resolve(p.path, "read")
+        if err is not None:
+            return err
+        assert repo_path is not None  # 沙箱校验通过后必为解析后的绝对路径
 
         # 构建命令参数
         args = ["-C", str(repo_path), "diff"]
@@ -388,6 +441,14 @@ class GitDiffTool(BaseTool):
             args.append("--cached")
         # 如果指定了文件，添加文件名参数
         if p.file:
+            # file 不能以 '-' 开头（拒绝 --output=... / --git-dir=... 等选项注入），
+            # 且必须解析到沙箱内（拒绝写向/读取沙箱外路径）
+            reject = _reject_option_like(p.file, "file")
+            if reject is not None:
+                return reject
+            _, ferr = _sandbox_resolve(p.file, "read")
+            if ferr is not None:
+                return ferr
             args.append(p.file)
 
         try:
@@ -403,14 +464,20 @@ class GitDiffTool(BaseTool):
         except TimeoutError:
             return ToolResult(content="[timeout]", is_error=True, error_type="timeout")
         except FileNotFoundError:
-            return ToolResult(content="git command not found", is_error=True, error_type="runtime_error")
+            return ToolResult(
+                content="git command not found", is_error=True, error_type="runtime_error"
+            )
         except Exception as exc:
             return ToolResult(content=str(exc), is_error=True, error_type="runtime_error")
 
         # 检查命令返回码
         if proc.returncode != 0:
             err_msg = stderr.decode("utf-8", errors="replace")
-            return ToolResult(content=f"[exit {proc.returncode}]\n{err_msg}", is_error=True, error_type="runtime_error")
+            return ToolResult(
+                content=f"[exit {proc.returncode}]\n{err_msg}",
+                is_error=True,
+                error_type="runtime_error",
+            )
 
         # 解码输出
         output = stdout.decode("utf-8", errors="replace")
@@ -508,7 +575,11 @@ class GitCommitTool(BaseTool):
         """
         # 验证参数并获取仓库路径、提交消息和 all 标志
         p = GitCommitParams.model_validate(params)
-        repo_path = Path(p.path).resolve()
+        # 沙箱校验：commit 修改工作区，仓库路径必须在沙箱内
+        repo_path, err = _sandbox_resolve(p.path, "write")
+        if err is not None:
+            return err
+        assert repo_path is not None  # 沙箱校验通过后必为解析后的绝对路径
 
         # 如果 all=True，先执行 git add -A 暂存所有更改
         if p.all:
@@ -553,7 +624,9 @@ class GitCommitTool(BaseTool):
         except TimeoutError:
             return ToolResult(content="[timeout]", is_error=True, error_type="timeout")
         except FileNotFoundError:
-            return ToolResult(content="git command not found", is_error=True, error_type="runtime_error")
+            return ToolResult(
+                content="git command not found", is_error=True, error_type="runtime_error"
+            )
         except Exception as exc:
             return ToolResult(content=str(exc), is_error=True, error_type="runtime_error")
 
@@ -562,8 +635,16 @@ class GitCommitTool(BaseTool):
             err_msg = stderr.decode("utf-8", errors="replace")
             # 特殊处理：无内容可提交
             if "nothing to commit" in err_msg:
-                return ToolResult(content="Nothing to commit (working tree clean)", is_error=True, error_type="runtime_error")
-            return ToolResult(content=f"[exit {proc.returncode}]\n{err_msg}", is_error=True, error_type="runtime_error")
+                return ToolResult(
+                    content="Nothing to commit (working tree clean)",
+                    is_error=True,
+                    error_type="runtime_error",
+                )
+            return ToolResult(
+                content=f"[exit {proc.returncode}]\n{err_msg}",
+                is_error=True,
+                error_type="runtime_error",
+            )
 
         # 解码输出并返回
         output = stdout.decode("utf-8", errors="replace")
@@ -644,7 +725,21 @@ class GitCheckoutTool(BaseTool):
         """
         # 验证参数并获取仓库路径和目标
         p = GitCheckoutParams.model_validate(params)
-        repo_path = Path(p.path).resolve()
+        # 沙箱校验：checkout 重写工作区文件，仓库路径必须在沙箱内
+        repo_path, err = _sandbox_resolve(p.path, "write")
+        if err is not None:
+            return err
+        assert repo_path is not None  # 沙箱校验通过后必为解析后的绝对路径
+
+        # target 不能以 '-' 开头（否则被解析为 git 选项），且不允许路径遍历越出沙箱
+        reject = _reject_option_like(p.target, "target")
+        if reject is not None:
+            return reject
+        # 相对形式的 ref（少见但防御性检查）：确保解析后仍在沙箱内
+        if not Path(p.target).is_absolute() and "/" in p.target:
+            target_path, terr = _sandbox_resolve(p.target, "read")
+            if terr is not None:
+                return terr
 
         try:
             # 创建子进程执行 git checkout 命令
@@ -662,14 +757,20 @@ class GitCheckoutTool(BaseTool):
         except TimeoutError:
             return ToolResult(content="[timeout]", is_error=True, error_type="timeout")
         except FileNotFoundError:
-            return ToolResult(content="git command not found", is_error=True, error_type="runtime_error")
+            return ToolResult(
+                content="git command not found", is_error=True, error_type="runtime_error"
+            )
         except Exception as exc:
             return ToolResult(content=str(exc), is_error=True, error_type="runtime_error")
 
         # 检查命令返回码
         if proc.returncode != 0:
             err_msg = stderr.decode("utf-8", errors="replace")
-            return ToolResult(content=f"[exit {proc.returncode}]\n{err_msg}", is_error=True, error_type="runtime_error")
+            return ToolResult(
+                content=f"[exit {proc.returncode}]\n{err_msg}",
+                is_error=True,
+                error_type="runtime_error",
+            )
 
         # 解码输出
         output = stdout.decode("utf-8", errors="replace")

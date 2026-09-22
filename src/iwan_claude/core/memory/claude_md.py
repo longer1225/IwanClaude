@@ -18,8 +18,8 @@ CLAUDE.md 配置解析器
 from __future__ import annotations
 
 import re
-from pathlib import Path
 from dataclasses import dataclass, field
+from pathlib import Path
 
 
 @dataclass

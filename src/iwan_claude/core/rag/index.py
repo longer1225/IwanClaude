@@ -31,9 +31,13 @@
 """
 from __future__ import annotations
 
+import fnmatch
 import json
+import logging
 import os
+import re
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +45,8 @@ from iwan_claude.core.rag.chunker import Chunk, DocumentChunker
 from iwan_claude.core.rag.embedding import EmbeddingProvider
 from iwan_claude.core.rag.llm_client import LLMClient
 from iwan_claude.core.rag.vectorstore import VectorStore
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -50,7 +56,7 @@ class IndexResult:
 
     【字段说明】
     - added_chunks: int - 新增的 Chunk 数量
-    - updated_chunks: int - 更新的 Chunk 数量
+    - updated_chunks: int - 重索引的文件数（目录级操作的粗粒度统计）
     - deleted_chunks: int - 删除的 Chunk 数量
     - total_tokens: int - 总 token 数量（当前未使用）
 
@@ -201,8 +207,10 @@ class KnowledgeIndexManager:
         保存索引的元数据，用于增量索引判断。
         """
         if self._meta_path.exists():
-            with open(self._meta_path, "r", encoding="utf-8") as f:
+            with open(self._meta_path, encoding="utf-8") as f:
                 self._meta = json.load(f)
+            # 防御半成品 meta 文件缺 "sources" 键（旧版本/手改坏），避免 KeyError
+            self._meta.setdefault("sources", {})
         else:
             # 初始化空元数据
             self._meta = {"sources": {}}
@@ -257,8 +265,8 @@ class KnowledgeIndexManager:
         - 如果文件已修改或未索引，重新索引
 
         【文件过滤规则】
-        - include: 使用 glob 模式匹配
-        - exclude: 使用 match 方法匹配相对路径
+        - include: 使用 glob 模式匹配（多模式命中同一文件时去重）
+        - exclude: "dir/**" 形态按顶层目录名排除任意深度；其余模式 fnmatch 匹配相对路径或文件名
 
         【设计目的】
         批量索引目录中的文件，支持增量索引提高效率。
@@ -273,18 +281,31 @@ class KnowledgeIndexManager:
         root_path = Path(root).resolve()
 
         # 根据 include 模式查找所有文件
+        # 去重：多个 include 模式（如 "**/*.py" 与 "**/test_*.py"）会命中同一文件，
+        # 重复索引 = 重复的付费 embedding 调用
+        seen: set[Path] = set()
         all_files: list[Path] = []
         for pattern in include:
-            all_files.extend(root_path.glob(pattern))
-
-        # 转换排除模式为 Path 对象
-        excluded_patterns = [Path(p) for p in exclude]
+            for f in root_path.glob(pattern):
+                if f.is_file() and f not in seen:
+                    seen.add(f)
+                    all_files.append(f)
 
         # 判断文件是否应被排除
+        # 【设计】Python 3.12 的 Path.match() 不支持 ** 递归（3.13 才加），
+        # 旧实现 ".git/**" 实际只挡得住一层——.git/hooks/x.py 照样入库，
+        # 每个漏网文件都是一次外发的付费 embedding 调用。
+        # 改逐段判断："dir/**" 形态按顶层目录名精确比对，其余模式用 fnmatch 兜底。
         def is_excluded(file_path: Path) -> bool:
-            rel_path = file_path.relative_to(root_path)
-            for pattern in excluded_patterns:
-                if rel_path.match(str(pattern)):
+            rel = file_path.relative_to(root_path)
+            rel_str = str(rel).replace("\\", "/")
+            for pattern in exclude:
+                norm = str(pattern).replace("\\", "/")
+                if norm.endswith("/**"):
+                    head = norm[: -len("/**")]
+                    if head and rel.parts and rel.parts[0] == head:
+                        return True
+                elif fnmatch.fnmatch(rel_str, norm) or fnmatch.fnmatch(rel.name, norm):
                     return True
             return False
 
@@ -293,45 +314,60 @@ class KnowledgeIndexManager:
 
         # 遍历文件并索引
         for file_path in files_to_index:
-            # 获取相对路径
-            rel_path = str(file_path.relative_to(root_path))
+            # 【设计】meta key 统一用绝对路径字符串——旧实现 index_directory 写
+            # 相对 key、remove_file 查 str(path)（通常绝对），两把钥匙永不相交，
+            # 删除过的文件 meta 永远清不掉，增量判断还会对着幽灵记录跳错分支
+            key = str(file_path)
+            # mtime 无条件先取：旧实现只在 incremental 分支内赋值、分支外使用，
+            # incremental=False 首个文件直接 UnboundLocalError
+            mtime = os.path.getmtime(file_path)
 
-            # 增量索引：检查文件是否已修改
-            if incremental:
-                # 获取文件修改时间
-                mtime = os.path.getmtime(file_path)
-                # 检查文件是否已在索引中
-                if rel_path in self._meta["sources"]:
-                    # 获取上次索引时间
-                    last_mtime = self._meta["sources"][rel_path].get("mtime", 0)
-                    # 如果文件未修改，跳过
-                    if mtime <= last_mtime:
-                        continue
+            # 增量索引：未修改的文件跳过
+            if incremental and key in self._meta["sources"]:
+                if mtime <= self._meta["sources"][key].get("mtime", 0):
+                    continue
 
-            # 索引文件
-            await self.index_file(file_path)
-            # 更新元数据
-            self._meta["sources"][rel_path] = {
+            # 单文件失败只跳过不中断：索引是批量动作，
+            # 一个损坏文件不该让前面几百个文件的成果连同 meta 一起作废
+            try:
+                chunk_count = await self.index_file(file_path)
+            except Exception as exc:
+                logger.warning("rag: skip %s (%s)", file_path, exc)
+                continue
+
+            # 更新元数据（真实 chunk 数；旧实现恒写 0）
+            updated = key in self._meta["sources"]
+            self._meta["sources"][key] = {
                 "mtime": mtime,
-                "chunk_count": 0,
+                "chunk_count": chunk_count,
             }
-            # 增加新增 Chunk 计数
-            result.added_chunks += 1
+            # 统计：added 记新增 chunk 数，updated 记重索引的文件数
+            result.added_chunks += chunk_count
+            if updated:
+                result.updated_chunks += 1
+
+        # 记录本次索引时间（status() 的 last_indexed_at 此前从未被写入）
+        if files_to_index:
+            self._meta["last_indexed_at"] = datetime.now(UTC).isoformat()
 
         # 保存元数据
         self._save_meta()
         return result
 
-    async def index_file(self, path: Path) -> None:
+    async def index_file(self, path: Path) -> int:
         """
         索引单个文件
 
         【参数说明】
         - path: Path - 文件路径
 
+        【返回值】
+        - int: 写入的 Chunk 数量（0 表示空文件/无可分块内容）
+
         【执行流程】
-        1. 使用分块器将文件分割为 Chunk
-        2. 如果没有 Chunk，直接返回
+        1. 解析为绝对路径后分块（Chunk 的 source_path 随之为绝对路径，
+           与 index_directory/remove_file 的 meta key 处于同一坐标空间）
+        2. 如果没有 Chunk，返回 0
         3. Contextual Retrieval：如果有 LLM 客户端，给每个 Chunk 生成上下文摘要
         4. 提取文本用于 embedding（有 context 时拼接到 text 前面）
         5. 调用嵌入服务将文本转换为向量
@@ -353,11 +389,15 @@ class KnowledgeIndexManager:
         【设计目的】
         将单个文件转换为向量索引，便于后续检索。
         """
+        # 解析为绝对路径：ensure chunk.source_path 与 meta key / delete_by_source
+        # 三处使用同一坐标空间（相对路径下 delete_by_source 会静默删不中旧向量）
+        abs_path = Path(path).resolve()
         # 使用分块器将文件分割为 Chunk
-        chunks = self._chunker.chunk_file(path)
-        # 如果没有 Chunk，直接返回
+        chunks = self._chunker.chunk_file(abs_path)
+        # 空文件也要走清理：旧实现直接 return 会留下上一版的陈旧向量继续参与检索
         if not chunks:
-            return
+            await self._vector_store.delete_by_source(str(abs_path))
+            return 0
 
         # Contextual Retrieval：如果有 LLM 客户端，给每个 Chunk 生成上下文摘要
         if self._llm_client:
@@ -380,9 +420,11 @@ class KnowledgeIndexManager:
         vectors = await self._embedding_provider.embed(texts)
 
         # 删除该文件之前的所有索引（避免重复）
-        await self._vector_store.delete_by_source(str(path))
+        await self._vector_store.delete_by_source(str(abs_path))
         # 添加新的 Chunk 和向量到向量存储
         await self._vector_store.add(chunks, vectors)
+        # 返回真实 chunk 数，供 index_directory 写 meta 与统计
+        return len(chunks)
 
     async def remove_file(self, path: Path) -> None:
         """
@@ -402,13 +444,15 @@ class KnowledgeIndexManager:
         【注意事项】
         - 如果文件不在索引中，操作无效果
         """
+        # 解析为绝对路径：meta key 与 chunk.source_path 都是绝对坐标，
+        # 用调用方原样传入的相对路径去查会永远查不中
+        abs_path = Path(path).resolve()
         # 从向量存储中移除该文件的所有 Chunk
-        await self._vector_store.delete_by_source(str(path))
-        # 获取文件路径字符串
-        rel_path = str(path)
+        await self._vector_store.delete_by_source(str(abs_path))
         # 从元数据中移除该文件的记录
-        if rel_path in self._meta["sources"]:
-            del self._meta["sources"][rel_path]
+        key = str(abs_path)
+        if key in self._meta["sources"]:
+            del self._meta["sources"][key]
             # 保存元数据
             self._save_meta()
 
@@ -429,13 +473,11 @@ class KnowledgeIndexManager:
         提供索引的统计信息，便于用户了解索引规模。
 
         【注意事项】
-        - total_chunks 当前未正确计算（始终为 0）
+        - total_chunks 取自向量存储的实时条数
         - index_size_bytes 计算索引目录下所有文件的大小
         """
-        import time
-
-        # 总 Chunk 数量（当前未正确计算）
-        total_chunks = 0
+        # 总 Chunk 数量：向存储要真实条数（旧实现恒返回 0，装饰性字段）
+        total_chunks = self._vector_store.size()
         # 总来源文件数量
         total_sources = len(self._meta["sources"])
         # 最后索引时间
@@ -509,12 +551,13 @@ class KnowledgeIndexManager:
         - list[tuple[Chunk, float]]: (Chunk, 综合分数) 列表
 
         【执行流程】
-        1. 查询重写：生成同义词查询列表
+        1. 查询重写：生成同义词查询列表（一次批量 embedding）
         2. 语义检索：对每个重写后的查询执行语义检索
         3. 合并结果：取每个 Chunk 的最高语义分数
-        4. 关键词检索：对候选 Chunk 执行关键词检索
+        4. 关键词检索：对"语义候选 ∪ 全库文本命中"的并集打分（关键词可引入新候选）
         5. 综合评分：semantic_score * semantic_weight + keyword_score * keyword_weight
         6. 排序返回：按综合分数降序排序，返回前 top_k 个结果
+           （返回的 chunk.metadata["semantic_score"] 携带原始语义分，供 CRAG 评估用）
 
         【查询重写机制】
         - 使用同义词表替换查询中的关键词
@@ -545,14 +588,16 @@ class KnowledgeIndexManager:
         all_results: dict[str, tuple[Chunk, float]] = {}
 
         # 对每个重写后的查询执行语义检索
-        for q in rewritten_queries:
-            # 将查询转换为向量
-            query_vector = await self._embedding_provider.embed([q])
+        # 【设计】旧实现逐条 embed（每次一个 HTTP 往返）；同义词重写常产出
+        # 5~10 个变体，合并成一次批量请求（provider 内部按 batch_size 分批）
+        # 省掉 N-1 次往返，也降低被限流的概率
+        vectors = await self._embedding_provider.embed(rewritten_queries)
+        for query_vector in vectors:
             # 如果向量为空，跳过
-            if not query_vector or not query_vector[0]:
+            if not query_vector:
                 continue
             # 执行语义检索（返回 top_k * 2 个结果）
-            results = await self._vector_store.search(query_vector[0], top_k * 2, filters)
+            results = await self._vector_store.search(query_vector, top_k * 2, filters)
             # 合并结果，取最高分数
             for chunk, score in results:
                 if chunk.chunk_id in all_results:
@@ -562,8 +607,20 @@ class KnowledgeIndexManager:
                 else:
                     all_results[chunk.chunk_id] = (chunk, score)
 
-        # 对候选 Chunk 执行关键词检索
-        keyword_results = self._keyword_search(query, list(all_results.values()), top_k)
+        # 关键词腿：全库文本匹配取候选
+        # 【设计】旧实现只在语义候选池内部做关键词打分——关键词只能"加分"、
+        # 永远无法"引入"语义腿漏掉的结果，混合检索实际退化成语义重排序。
+        # 精确标识符查询（函数名、报错串）正是关键词的强项，让它独立产出候选
+        # 并与语义结果并集；没有语义分的候选语义分记 0，纯靠关键词竞争排名
+        text_hits = await self._vector_store.search_by_text(query, top_k * 2, filters)
+        candidates: list[tuple[Chunk, float]] = list(all_results.values())
+        for chunk, _ in text_hits:
+            if chunk.chunk_id not in all_results:
+                all_results[chunk.chunk_id] = (chunk, 0.0)
+                candidates.append((chunk, 0.0))
+
+        # 对候选池执行关键词评分
+        keyword_results = self._keyword_search(query, candidates, top_k)
 
         # 计算综合分数
         scored_results: list[tuple[Chunk, float]] = []
@@ -578,6 +635,12 @@ class KnowledgeIndexManager:
         scored_results.sort(key=lambda x: x[1], reverse=True)
         # 取前 top_k 个结果
         top_results = scored_results[:top_k]
+        # 把原始语义分写进返回 chunk 的 metadata
+        # 【设计】adaptive 的 CRAG 质量评估（correct≥0.6/ambiguous≥0.3）语义上
+        # 应对照纯语义相似度，此前误用混合分——keyword 加分会虚高置信度，
+        # 把"实际没找到"误判为"回答可靠"直接放行。这里带出原始分供下游取用
+        for chunk, _ in top_results:
+            chunk.metadata["semantic_score"] = all_results[chunk.chunk_id][1]
         # Parent-Child：为有 parent_id 的 chunk 附带父级上下文
         # 检索到子 chunk（如方法）后，返回其父级 chunk（如类）的文本，提供更完整的上下文
         await self._enrich_with_parent_context(top_results)
@@ -635,13 +698,19 @@ class KnowledgeIndexManager:
         }
 
         # 遍历同义词表，生成变体查询
+        # 【设计】旧实现用"子串包含"判断命中、str.replace 替换首次出现——
+        # "profile" 会命中关键词 "file"、"default" 会命中 "def"，污染变体还
+        # 可能切进单词内部；每个变体都是一次真金白银的 embedding 调用。
+        # 改为词边界正则：整词命中才生成，整词替换不误伤
+        lowered = query.lower()
         for word, syns in synonyms.items():
-            # 检查同义词是否出现在查询中（不区分大小写）
-            if word.lower() in query.lower():
+            pattern = re.compile(rf"\b{re.escape(word)}\b")
+            # 检查该词是否以独立单词形式出现在查询中（不区分大小写）
+            if pattern.search(lowered):
                 # 对每个同义词生成变体查询
                 for syn in syns:
-                    # 替换第一个出现的同义词
-                    new_query = query.replace(word, syn, 1)
+                    # 替换第一个出现的整词（count=1，与旧行为一致）
+                    new_query = pattern.sub(syn, query, count=1)
                     # 避免重复查询
                     if new_query not in queries:
                         queries.append(new_query)
@@ -663,7 +732,7 @@ class KnowledgeIndexManager:
         - dict[str, float]: chunk_id -> 关键词分数
 
         【关键词提取】
-        - 使用正则表达式 \w+ 提取单词
+        - 使用正则表达式 \\w+ 提取单词
         - 转换为小写
         - 过滤空关键词
 
@@ -688,8 +757,6 @@ class KnowledgeIndexManager:
         - 关键词匹配是子字符串匹配
         - 分数上限为 1.0
         """
-        import re
-
         # 提取查询中的关键词（使用正则表达式）
         keywords = re.findall(r"\w+", query.lower())
         # 存储关键词检索结果（chunk_id -> score）
@@ -715,6 +782,21 @@ class KnowledgeIndexManager:
                 results[chunk.chunk_id] = min(score / len(keywords), 1.0)
 
         return results
+
+    async def keyword_search(
+        self, query: str, top_k: int = 5, filters: dict[str, Any] | None = None
+    ) -> list[tuple[Chunk, float]]:
+        """纯关键词检索（不走 embedding）——供 AdaptiveRetriever 的 grep 路由使用。
+
+        【设计】此前 adaptive.py 直接伸手调 _index_manager._vector_store，
+        私有成员被跨模块依赖；开公开口收编，同时拿到 filters 透传能力。"""
+        return await self._vector_store.search_by_text(query, top_k, filters)
+
+    async def enrich_with_parent_context(
+        self, results: list[tuple[Chunk, float]]
+    ) -> None:
+        """Parent-Child 父级上下文富化的公开入口（供 adaptive 层调用，语义见 _enrich 私有实现）。"""
+        await self._enrich_with_parent_context(results)
 
     async def _enrich_with_parent_context(
         self, results: list[tuple[Chunk, float]]
@@ -836,10 +918,13 @@ class KnowledgeIndexManager:
         # 如果索引目录存在，复制到备份目录
         if self._index_path.exists():
             shutil.copytree(self._index_path, backup, dirs_exist_ok=True)
-        # 确保元数据目录存在
-        self._meta_path.parent.mkdir(parents=True, exist_ok=True)
-        # 复制元数据文件到备份目录（保留文件元数据）
-        shutil.copy2(self._meta_path, backup / "index_meta.json")
+        # 元数据文件存在才复制：copytree 已带上目录内文件时这里是重复动作，
+        # 而索引目录尚不存在（首次 save 前）时旧的无条件 copy2 会 FileNotFoundError
+        if self._meta_path.exists():
+            # 确保备份目录存在
+            backup.mkdir(parents=True, exist_ok=True)
+            # 复制元数据文件到备份目录（保留文件元数据）
+            shutil.copy2(self._meta_path, backup / "index_meta.json")
 
     def save(self) -> None:
         """

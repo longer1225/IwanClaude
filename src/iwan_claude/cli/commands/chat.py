@@ -23,6 +23,7 @@ from __future__ import annotations
 # sys：系统相关操作，如退出程序、输出到 stderr
 # typing：类型提示
 import asyncio
+import os
 import sys
 from typing import Any
 
@@ -67,6 +68,9 @@ class ChatPrinter:
         # pending_permission_id：待审批的权限请求 ID
         # 如果有值，说明正在等待用户审批工具调用权限
         self.pending_permission_id: str | None = None
+        # pending_trust：待答复的信任询问 (session_id, cwd)
+        # 信任不阻塞执行——有值时只是"下一条输入先拿去答复它"的软挂起
+        self.pending_trust: tuple[str, str] | None = None
 
     # 若当前 LLM token 尚未换行，则补一个换行
     def _ensure_newline(self) -> None:
@@ -123,6 +127,23 @@ class ChatPrinter:
             self._ensure_newline()
             self.pending_permission_id = None  # 清除待审批的权限请求
             print("[waiting for input]")
+
+        # ===== 信任询问（Layer 0，S9 Part A）=====
+        elif t == "trust.requested":
+            self._ensure_newline()
+            session_id = str(event.get("session_id", ""))
+            cwd = str(event.get("cwd", ""))
+            warn = ""
+            if event.get("has_instruction_files"):
+                # 目录里的 CLAUDE.md/AGENTS.md 会被自动读进系统提示，答复前该知道
+                warn = "  (contains CLAUDE.md/AGENTS.md - auto-loaded into prompt)"
+            print(f"[trust] work in {cwd}?{warn}")
+            print("  y=trust (writes & exec allowed)  n=deny (writes & exec blocked)  其他=先不答")
+            self.pending_trust = (session_id, cwd)
+
+        elif t == "trust.changed":
+            self._ensure_newline()
+            print(f"[trust] {event.get('decision', '')} -> {event.get('cwd', '')}")
         
         # ===== 会话关闭 =====
         elif t == "session.closed":
@@ -197,14 +218,18 @@ async def _chat_async(config: IwanConfig) -> int:
         await client.send_command(
             "event.subscribe",
             {
-                "topics": ["session.*", "run.*", "tool.*", "llm.token", "permission.*"],
+                "topics": ["session.*", "run.*", "tool.*", "llm.token", "permission.*", "trust.*"],
                 "scope": "global",  # 全局订阅，接收所有会话的事件
             },
         )
         
         # ===== 创建聊天会话 =====
         # 请求服务端创建一个 chat 模式的会话
-        created = await client.send_command("session.create", {"mode": "chat"})
+        # 带上自己的 cwd：会话沙箱根/信任判定对准用户实际所在的目录，
+        # 而不是 daemon 启动时的目录（与 TUI 的做法一致）
+        created = await client.send_command(
+            "session.create", {"mode": "chat", "cwd": os.getcwd()}
+        )
         session_id = str(created["session_id"])
         print(f"[session: {session_id}]")
 
@@ -246,6 +271,28 @@ async def _chat_async(config: IwanConfig) -> int:
                 )
                 continue
 
+            # ===== 信任询问优先处理（Layer 0，S9 Part A）=====
+            # 与权限审批的形态一致（下一条输入被解释为答复），但语义相反：
+            # 这里没有任何东西在等待——不答就继续正常发消息，ask 现状照旧
+            if printer.pending_trust:
+                trust_session_id, trust_cwd = printer.pending_trust
+                printer.pending_trust = None
+                ans = content.lower()
+                if ans in ("y", "n"):
+                    decision = "allow" if ans == "y" else "deny"
+                    await client.send_command(
+                        "trust.respond",
+                        {
+                            "session_id": trust_session_id,
+                            "cwd": trust_cwd,
+                            "decision": decision,
+                            "persistent": True,
+                        },
+                    )
+                    print(f"  trust {decision} -> {trust_cwd}")
+                    continue
+                # 其他输入 = "先不答"：控件作废，这条消息照常往下发
+
             # ===== Checkpoint 命令处理 =====
             # 支持 /checkpoint list 和 /checkpoint restore <index_or_id>
             if content.startswith("/checkpoint"):
@@ -270,7 +317,7 @@ async def _chat_async(config: IwanConfig) -> int:
                             summary = cp.get("summary", "")
                             node = cp.get("node", "")
                             print(f"  [{i}] step={cp['step']}  {ts}  {summary}")
-                            print(f"     id: {cp['checkpoint_id']}")
+                            print(f"     id: {cp['checkpoint_id']}  run: {cp.get('run_id') or '-'}")
                     print()
                     continue
                 
@@ -317,6 +364,52 @@ async def _chat_async(config: IwanConfig) -> int:
                 # 命令格式错误
                 else:
                     print("  usage: /checkpoint list | /checkpoint restore <index_or_id>")
+                    continue
+
+            # ===== 文件回滚命令（S9 Part C）=====
+            # /files list [run_id] | /files restore [path...] [--force]
+            # 与 /checkpoint 刻意分离：回对话 ≠ 回文件，两个操作各自显式确认
+            if content.startswith("/files"):
+                parts = content.split()
+                sub = parts[1] if len(parts) >= 2 else "list"
+                if sub == "list":
+                    run_id = parts[2] if len(parts) >= 3 else ""
+                    result = await client.send_command(
+                        "files.changes", {"session_id": session_id, "run_id": run_id},
+                    )
+                    changes = result.get("changes", [])
+                    print(f"\n文件变更 (run {result.get('run_id') or '-'}):")
+                    if not changes:
+                        print("  (无记录——该 run 未用写文件工具，或 [sandbox] shadow_enabled=false)")
+                    for ch in changes:
+                        flags = []
+                        if ch.get("was_new"):
+                            flags.append("新建")
+                        if not ch.get("captured"):
+                            flags.append("未拍全")
+                        if ch.get("conflict"):
+                            flags.append("外部改动")
+                        flag_s = f"  [{','.join(flags)}]" if flags else ""
+                        print(f"  {ch['path']}  ({ch.get('tool', '')}){flag_s}")
+                    print()
+                    continue
+                elif sub == "restore":
+                    args = parts[2:]
+                    force = "--force" in args
+                    paths = [a for a in args if not a.startswith("--")] or ["*"]
+                    result = await client.send_command(
+                        "files.restore",
+                        {"session_id": session_id, "paths": paths, "force": force},
+                    )
+                    for it in result.get("results", []):
+                        detail = f"  ({it['detail']})" if it.get("detail") else ""
+                        print(f"  {it['status']:8} {it['path']}{detail}")
+                    if not result.get("ok"):
+                        print("  有文件未还原——冲突文件加 --force 可强制")
+                    print()
+                    continue
+                else:
+                    print("  usage: /files list [run_id] | /files restore [path...] [--force]")
                     continue
 
             # ===== 发送聊天消息 =====

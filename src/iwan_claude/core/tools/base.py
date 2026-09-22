@@ -33,6 +33,8 @@ class ToolResult:
       - "timeout": 执行超时
       - "schema_error": 参数校验失败
       - "permission_denied": 权限被拒绝
+      - "server_offline": 外部服务连接已断（MCP 工具；重试无意义）
+      - "tool_error": 外部工具执行失败（MCP 工具；可修正入参重试）
 
     【使用示例】
     ```python

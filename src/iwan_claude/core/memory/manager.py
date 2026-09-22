@@ -43,8 +43,6 @@ manager.remember("用户偏好用 pytest", type="preference", tags=["pytest"])
 
 from __future__ import annotations
 
-from typing import Any
-
 from iwan_claude.core.memory.long_term import LongTermMemory, MemoryEntry
 from iwan_claude.core.memory.vector_memory import VectorMemory
 

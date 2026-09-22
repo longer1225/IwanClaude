@@ -36,6 +36,42 @@ class _Runner:
         return RunOutcome(status="success", result="done", reason=None)
 
 
+class _RestoreRunner(_Runner):
+    # 模拟 AgentRunner 的 checkpoint 读取/关闭接口，restore 返回固定旧状态
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def restore_checkpoint(self, thread_id: str, checkpoint_id: str) -> dict:
+        return {
+            "messages": [{"role": "user", "content": "restored"}],
+            "step": 1,
+            "status": "success",
+            "_tool_calls": [],
+            "_stop_reason": "",
+        }
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+# 功能：restore_checkpoint 重写 thread 消息但绝不按 step 截断 run_ids（step 是图步数非 run 序号）
+# 设计：预置 2 条 run_ids、restore 返回 step=1——旧代码 run_ids[:1] 会误删 "r2"，
+#      断言完整保留即回归锁；同时验证 restore 的临时 runner 被 close（不关共享资源在另一文件锁）
+async def test_restore_checkpoint_keeps_run_ids(tmp_path: Path) -> None:
+    store = SessionStore(tmp_path)
+    fake = _RestoreRunner()
+    manager = SessionManager(store, lambda: fake, EventBus())  # type: ignore[arg-type]
+    session = await manager.create("chat")
+    session.run_ids = ["r1", "r2"]
+
+    out = await manager.restore_checkpoint(session.id, "cp1")
+
+    assert out is not None and out["step"] == 1
+    assert session.run_ids == ["r1", "r2"]
+    assert store.read_messages(session.id) == [{"role": "user", "content": "restored"}]
+    assert fake.closed is True
+
+
 # 功能：验证 create 会创建 active session、写入 meta 并发布 session.created 事件
 # 设计：用真实 SessionStore + EventBus 收集事件，覆盖 manager 与 store/bus 的协作边界
 async def test_create_session_writes_meta_and_event(tmp_path: Path) -> None:

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -12,9 +11,18 @@ from iwan_claude.core.permissions.storage import load_policy_file
 
 
 @pytest.fixture(autouse=True)
-def reset_sandbox() -> None:
+def reset_sandbox() -> Any:
+    # 功能：每个测试重置沙箱全局与 contextvar，保证权限评估从"无沙箱"基线出发
+    # 设计：sandbox_forces_ask/Tier 2.5 依赖 get_sandbox()，若其他文件同步调用过
+    #       set_sandbox_root 会经 contextvar 泄漏进来，必须一并清掉
     import iwan_claude.core.sandbox as sb_module
     sb_module._sandbox_manager = None
+    token = sb_module._active_sandbox.set(None)
+    sb_module._sandbox_by_session.clear()
+    yield
+    sb_module._active_sandbox.reset(token)
+    sb_module._sandbox_manager = None
+    sb_module._sandbox_by_session.clear()
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -115,8 +123,10 @@ async def test_check_and_wait_deny_once_returns_false() -> None:
 
 # ── always_allow cache ────────────────────────────────────────────────────────
 
-# 功能：验证 respond("always_allow") 后同 session 同工具下次不再发事件
-# 设计：第二次调用 check_and_wait 命中 always 缓存，直接返回 (True, "auto_allow")，emitted 仍为 1 条
+# 功能：验证 always_allow 缓存按"工具+参数指纹"命中——相同命令放行，不同命令仍需 ASK
+# 设计：第二次调用用完全相同的 command 命中指纹缓存（emitted 保持 1）；
+#       第三次用不同 command，指纹不同，缓存不命中，必须再发一个 permission.requested。
+#       这正是一刀切缓存修复后的核心语义：批准不扩散到同工具的其他参数
 async def test_always_allow_skips_future_ask() -> None:
     mgr = _make_manager()
     emitted, emitter = await _collect_emitted()
@@ -135,16 +145,32 @@ async def test_always_allow_skips_future_ask() -> None:
     await task
     assert r1 is True
 
-    # Second call: should hit cache, no new event
+    # Second call: same command → same fingerprint → cache hit, no new event
     r2, d2 = await mgr.check_and_wait(
         tool_use_id="t5", tool_name="bash",
-        params={"command": "ls"}, session_id="s1",
+        params={"command": "echo hi"}, session_id="s1",
         event_emitter=emitter,
     )
 
     assert r2 is True
     assert d2 == "auto_allow"
     assert len(emitted) == 1  # only the first call emitted an event
+
+    # Third call: different command → different fingerprint → must ASK again
+    async def _auto_allow_third() -> None:
+        await asyncio.sleep(0)
+        mgr.respond("t5b", "allow_once")
+
+    task3 = asyncio.create_task(_auto_allow_third())
+    r3, d3 = await mgr.check_and_wait(
+        tool_use_id="t5b", tool_name="bash",
+        params={"command": "ls"}, session_id="s1",
+        event_emitter=emitter,
+    )
+    await task3
+    assert r3 is True
+    assert d3 == "allow_once"
+    assert len(emitted) == 2  # 不同参数不再被 always_allow 缓存覆盖
 
 
 # 功能：验证 always_allow 在同一 manager 实例内对所有 session 生效（persistent_always 共享）
@@ -181,8 +207,9 @@ async def test_always_allow_not_shared_across_sessions() -> None:
 
 # ── always_deny cache ─────────────────────────────────────────────────────────
 
-# 功能：验证 respond("always_deny") 后同 session 同工具下次直接返回 (False, "auto_deny")
-# 设计：用户选择 always deny 后不应继续骚扰，下次调用静默拒绝
+# 功能：验证 always_deny 缓存按"工具+参数指纹"命中——相同命令静默拒绝，不同命令重新 ASK
+# 设计：第二次用相同 command 命中指纹缓存返回 (False, "auto_deny") 且不发事件；
+#       第三次换 command，必须重新询问（用户拒的是那条命令，不是整个工具）
 async def test_always_deny_skips_future_ask() -> None:
     mgr = _make_manager()
     emitted, emitter = await _collect_emitted()
@@ -200,15 +227,31 @@ async def test_always_deny_skips_future_ask() -> None:
     await task
     assert r1 is False
 
-    # Second call: cache hit → no event, return (False, "auto_deny")
+    # Second call: same command → cache hit → no event, return (False, "auto_deny")
     r2, d2 = await mgr.check_and_wait(
         tool_use_id="t9", tool_name="bash",
-        params={"command": "ls"}, session_id="s1",
+        params={"command": "echo"}, session_id="s1",
         event_emitter=emitter,
     )
     assert r2 is False
     assert d2 == "auto_deny"
     assert len(emitted) == 1
+
+    # Third call: different command → fingerprint miss → ASK again
+    async def _auto_allow_third() -> None:
+        await asyncio.sleep(0)
+        mgr.respond("t9b", "allow_once")
+
+    task3 = asyncio.create_task(_auto_allow_third())
+    r3, d3 = await mgr.check_and_wait(
+        tool_use_id="t9b", tool_name="bash",
+        params={"command": "ls"}, session_id="s1",
+        event_emitter=emitter,
+    )
+    await task3
+    assert r3 is True
+    assert d3 == "allow_once"
+    assert len(emitted) == 2
 
 
 # ── cancel_session ────────────────────────────────────────────────────────────
@@ -336,10 +379,13 @@ async def test_always_allow_does_not_bypass_outside_cwd() -> None:
 
 # ── 持久化 always 写文件 ──────────────────────────────────────────────────────
 
-# 功能：验证 always_allow 决策写入 policy_file，新 PermissionManager 加载后自动放行
-# 设计：用 tmp_path 作为 policy_file，断言文件存在且内容正确；
-#       再新建 manager 加载文件，同工具无需 ASK 直接返回 auto_allow
+# 功能：验证 always_allow 决策以"工具|参数指纹"键写入 policy_file，新 manager 同参数自动放行
+# 设计：用 tmp_path 作 policy_file；断言持久化键含指纹（而非旧的裸工具名一刀切键）；
+#       新 manager 用相同 command 命中 persistent 缓存无需 ASK；换 command 则仍要 ASK，
+#       证明指纹粒度贯穿"写文件→重载"全链路
 async def test_persistent_always_written_and_reloaded(tmp_path: pytest.TempPathFixture) -> None:
+    from iwan_claude.core.permissions.policy import param_fingerprint
+
     policy_file = tmp_path / "policy.toml"
     mgr = PermissionManager(policy_file=policy_file)
     emitted, emitter = await _collect_emitted()
@@ -358,20 +404,38 @@ async def test_persistent_always_written_and_reloaded(tmp_path: pytest.TempPathF
     assert allowed is True
     assert policy_file.exists()
 
+    fp = param_fingerprint("bash", {"command": "echo"})
     loaded = load_policy_file(policy_file)
-    assert loaded.get("bash") == "allow"
+    assert loaded.get(f"bash|{fp}") == "allow"
+    assert loaded.get("bash") is None  # 不再是裸工具名的一刀切键
 
-    # 新 manager 加载同一文件，bash 应直接 auto_allow（无 OUTSIDE_CWD）
+    # 新 manager 加载同一文件，相同 command 应直接 auto_allow（无 OUTSIDE_CWD）
     mgr2 = PermissionManager(policy_file=policy_file)
     emitted2, emitter2 = await _collect_emitted()
     allowed2, decision2 = await mgr2.check_and_wait(
         tool_use_id="tp2", tool_name="bash",
-        params={"command": "echo new"}, session_id="s2",
+        params={"command": "echo"}, session_id="s2",
         event_emitter=emitter2,
     )
     assert allowed2 is True
     assert decision2 == "auto_allow"
     assert emitted2 == []  # 无需 ASK
+
+    # 新 manager 换 command：指纹不同 → persistent 不命中 → 重新 ASK
+    async def _auto_allow_other() -> None:
+        await asyncio.sleep(0)
+        mgr2.respond("tp3", "allow_once")
+
+    t3 = asyncio.create_task(_auto_allow_other())
+    allowed3, decision3 = await mgr2.check_and_wait(
+        tool_use_id="tp3", tool_name="bash",
+        params={"command": "echo new"}, session_id="s2",
+        event_emitter=emitter2,
+    )
+    await t3
+    assert allowed3 is True
+    assert decision3 == "allow_once"
+    assert len(emitted2) == 1
 
 
 # ── 审批超时 ──────────────────────────────────────────────────────────────────

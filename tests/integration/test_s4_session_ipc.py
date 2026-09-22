@@ -111,6 +111,62 @@ async def test_session_auto_mode_over_ipc(
     await writer.wait_closed()
 
 
+# 功能：验证 session.set_permission_mode 五态切换的 IPC round-trip 与 session.create 初始回传
+# 设计：断言 result 含 mode+previous_mode 双字段（多端回滚依据），且非法 mode 返回 JSON-RPC
+#       error 而非静默——与 set_auto_mode 非法值同构，证明校验在 daemon 端而非客户端
+async def test_session_permission_mode_over_ipc(
+    running_daemon: subprocess.Popen[bytes],
+    free_port: int,
+) -> None:
+    reader, writer = await asyncio.open_connection("127.0.0.1", free_port)
+
+    created = await _send_recv(
+        reader, writer, "session.create",
+        {"mode": "chat", "title": "permission mode test"}, req_id="create",
+    )
+    session_id = created["result"]["session_id"]
+    assert created["result"].get("permission_mode", "default") == "default"
+
+    set_plan = await _send_recv(
+        reader, writer, "session.set_permission_mode",
+        {"session_id": session_id, "mode": "plan"}, req_id="pm_plan",
+    )
+    assert set_plan["result"]["mode"] == "plan"
+    assert set_plan["result"]["previous_mode"] == "default"
+
+    set_bypass = await _send_recv(
+        reader, writer, "session.set_permission_mode",
+        {"session_id": session_id, "mode": "bypassPermissions"}, req_id="pm_bypass",
+    )
+    assert set_bypass["result"]["previous_mode"] == "plan"  # 链式回显上一步
+
+    invalid = await _send_recv(
+        reader, writer, "session.set_permission_mode",
+        {"session_id": session_id, "mode": "yolo"}, req_id="pm_bad",
+    )
+    assert "error" in invalid
+
+    writer.close()
+    await writer.wait_closed()
+
+
+# 功能：验证 session.create 的 auto_mode（legacy 三态）默认 off，与五态默认并存不冲突
+# 设计：保留旧断言的独立副本——旧 RPC 契约要留一版，新字段不能把它挤掉
+async def test_session_create_still_reports_auto_mode(
+    running_daemon: subprocess.Popen[bytes],
+    free_port: int,
+) -> None:
+    reader, writer = await asyncio.open_connection("127.0.0.1", free_port)
+    created = await _send_recv(
+        reader, writer, "session.create",
+        {"mode": "chat", "title": "legacy compat"}, req_id="create",
+    )
+    assert created["result"].get("auto_mode", "off") == "off"
+    assert "permission_mode" in created["result"]
+    writer.close()
+    await writer.wait_closed()
+
+
 # 功能：验证 daemon 暴露 session.set_effort_level 命令，且 session.create 返回当前 effort_level
 # 设计：创建会话后读取 effort_level，切换为 high 和 max，断言每次返回的等级正确；非法值应返回 error
 async def test_session_effort_level_over_ipc(

@@ -255,8 +255,13 @@ class LongTermMemory:
 
         【返回值】
         - list[MemoryEntry]: 所有记忆条目（按时间倒序，最新的在前）
+
+        【设计】timestamp 相同（同一微秒内连续 add）时，用插入序号做次级键，
+        否则稳定排序会让"先进的那条"反而排在前，与"最新在前"的语义矛盾。
         """
-        return sorted(self._entries, key=lambda e: e.timestamp, reverse=True)
+        indexed = list(enumerate(self._entries))
+        indexed.sort(key=lambda pair: (pair[1].timestamp, pair[0]), reverse=True)
+        return [e for _, e in indexed]
 
     def get(self, memory_id: str) -> MemoryEntry | None:
         """

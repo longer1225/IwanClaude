@@ -19,7 +19,7 @@ MCP Server 配置来自 config.yaml 的 mcp.servers 字段
 
 【启动流程】
 1. 读取配置列表
-2. 依次连接每个 MCP Server
+2. 并行连接所有 MCP Server（单个失败只影响自己）
 3. 发现工具（调用 tools/list）
 4. 将工具包装为 McpTool
 5. 注册到 ToolRegistry
@@ -31,6 +31,7 @@ MCP Server 配置来自 config.yaml 的 mcp.servers 字段
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from iwan_claude.core.config import McpServerConfig
@@ -94,12 +95,9 @@ class McpServerManager:
         - servers: list[McpServerConfig] - MCP Server 配置列表（来自 config.yaml）
 
         【执行流程】
-        1. 遍历配置列表
-        2. 为每个配置建立连接（stdio 或 TCP）
-        3. 发现工具（调用 tools/list）
-        4. 将每个工具包装为 McpTool
-        5. 缓存 Client 和工具
-        6. 记录日志
+        1. 对配置列表并行发起启动（_start_one）
+        2. 每个 Server：建连 → tools/list → 包装 McpTool → 缓存
+        3. 失败者就地回收已建立的连接后跳过
 
         【容错设计】
         - 单个 MCP Server 启动失败不影响其他 Server
@@ -123,26 +121,57 @@ class McpServerManager:
               port: 8080
         ```
         """
-        # 遍历配置列表
-        for cfg in servers:
-            try:
-                # 建立连接（stdio 或 TCP）
-                client = await self._connect(cfg)
-                # 发现工具（调用 tools/list）
-                tool_defs = await client.list_tools()
-                # 将每个工具包装为 McpTool（使 ToolRegistry 可透明调用）
-                for tool_def in tool_defs:
-                    self._tools.append(McpTool(client, cfg.name, tool_def))
-                # 缓存 Client（用于后续工具调用）
-                self._clients[cfg.name] = client
-                # 记录日志
-                log.info(
-                    "mcp: server '%s' connected, %d tool(s) discovered",
-                    cfg.name, len(tool_defs),
+        # 并行启动所有 Server：单个死配置最坏拖满自己的超时，
+        # 串行会让 daemon 启动时间 = Σ超时，一个坏 server 卡全体
+        results = await asyncio.gather(
+            *(self._start_one(cfg) for cfg in servers),
+            return_exceptions=True,
+        )
+        # gather 已兜住异常，这里只处理 _start_one 自身意外炸掉的情况（留痕不抛出）
+        for cfg, res in zip(servers, results, strict=True):
+            if isinstance(res, BaseException):  # pragma: no cover - 防御分支
+                log.exception(
+                    "mcp: server '%s' startup raised unexpectedly",
+                    cfg.name, exc_info=res,
                 )
+
+    # 启动单个 Server：任何一步失败都要回收已建立的连接（子进程/TCP socket 泄漏点）
+    async def _start_one(self, cfg: McpServerConfig) -> None:
+        client: McpClient | None = None
+        try:
+            # 建立连接（stdio 或 TCP）
+            client = await self._connect(cfg)
+            # 发现工具（调用 tools/list）
+            tool_defs = await client.list_tools()
+        except Exception:
+            # 单个 MCP Server 启动失败不影响其他 Server
+            log.exception("mcp: server '%s' failed to start, skipping", cfg.name)
+            if client is not None:
+                # connect 成功但 list_tools 失败时 client 尚未进 _clients，
+                # 不在这里 close 的话 stdio 子进程永远无人回收
+                try:
+                    await client.close()
+                except Exception:
+                    log.warning("mcp: error closing half-started server '%s'", cfg.name)
+            return
+        if cfg.name in self._clients:
+            # 重名防御（配置层已拦截，走到这里说明有旁路）：保留先连的，丢弃后者
+            log.error("mcp: duplicate server name '%s', dropping the later one", cfg.name)
+            try:
+                await client.close()
             except Exception:
-                # 单个 MCP Server 启动失败不影响其他 Server
-                log.exception("mcp: server '%s' failed to start, skipping", cfg.name)
+                pass
+            return
+        # 将每个工具包装为 McpTool（使 ToolRegistry 可透明调用）
+        for tool_def in tool_defs:
+            self._tools.append(McpTool(client, cfg.name, tool_def))
+        # 缓存 Client（用于后续工具调用）
+        self._clients[cfg.name] = client
+        # 记录日志
+        log.info(
+            "mcp: server '%s' connected, %d tool(s) discovered",
+            cfg.name, len(tool_defs),
+        )
 
     def register_tools(self, registry: ToolRegistry) -> None:
         """
@@ -160,7 +189,7 @@ class McpServerManager:
 
         【注意事项】
         - 必须在 start_all() 之后调用
-        - 每个工具的名称格式为 {server_name}__{tool_name}
+        - 每个工具的名称格式为 mcp__{server_name}__{tool_name}
         """
         # 遍历所有已发现的 MCP 工具
         for tool in self._tools:
@@ -215,10 +244,12 @@ class McpServerManager:
                 # 记录日志
                 log.info("mcp: server '%s' closed", name)
             except Exception:
-                # 单个 Client 关闭失败不影响其他 Client
-                log.warning("mcp: error closing server '%s'", name)
-        # 清空缓存
+                # 单个 Client 关闭失败不影响其他 Client（带堆栈，便于排查僵尸子进程）
+                log.warning("mcp: error closing server '%s'", name, exc_info=True)
+        # 清空缓存：_tools 必须一并清掉——只清 client 的话，
+        # stop 之后 get_tools() 仍会吐出一批指向已关闭连接的死工具
         self._clients.clear()
+        self._tools.clear()
 
     async def _connect(self, cfg: McpServerConfig) -> McpClient:
         """
@@ -247,8 +278,8 @@ class McpServerManager:
         【异常处理】
         - ValueError: 配置不完整或传输类型未知
         """
-        # 创建 MCP 客户端
-        client = McpClient()
+        # 创建 MCP 客户端（读超时来自该 server 的配置项 timeout_sec）
+        client = McpClient(read_timeout_sec=cfg.timeout_sec)
         
         # 根据传输类型选择连接方式
         if cfg.transport == "stdio":

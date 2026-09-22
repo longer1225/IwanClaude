@@ -47,6 +47,19 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 
+# 读文件并解码：UTF-8 → GBK → replace 兜底。
+# 【设计】索引是批量操作，单个编码怪异的历史文件不该炸掉整批任务——
+# 前两级尽量还原真实文本，最后 replace 保证"有垃圾字符也比没索引强"。
+def read_text_safely(path: Path) -> str:
+    data = path.read_bytes()
+    for enc in ("utf-8", "gbk"):
+        try:
+            return data.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("utf-8", errors="replace")
+
+
 class Chunk(BaseModel):
     """
     分块数据模型 - 表示文档中的一个文本块
@@ -230,11 +243,14 @@ class DocumentChunker:
         - 行号从 1 开始
         """
         # 读取文件内容
-        content = path.read_text(encoding="utf-8")
-        # 解析为 AST（抽象语法树）
-        tree = ast.parse(content)
-        # 按行分割（保留换行符）
+        content = read_text_safely(path)
+        # 按行分割（保留换行符）——回退路径也要用，提前解析
         lines = content.splitlines(keepends=True)
+        # 解析为 AST（抽象语法树）；语法错误（半损坏的 .py）回退滑动窗口
+        try:
+            tree = ast.parse(content)
+        except SyntaxError:
+            return self._chunk_plaintext_lines(lines, str(path))
         chunks: list[Chunk] = []
 
         # 获取符号名称（函数名或类名）
@@ -249,11 +265,15 @@ class DocumentChunker:
 
         # 递归遍历 AST 节点
         # parent_chunk_id 参数用于 Parent-Child 关系：方法的 parent_id 指向所属类的 chunk_id
+        # parent_symbols 用 None 而非 []：可变默认参数是所有调用共享的，
+        # 这里只靠 + 拼接侥幸没出事，但按规范必须挡住这个坑
         def visit_node(
             node: ast.AST,
-            parent_symbols: list[str] = [],
+            parent_symbols: list[str] | None = None,
             parent_chunk_id: str | None = None,
         ) -> None:
+            if parent_symbols is None:
+                parent_symbols = []
             # 如果是函数或类定义
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 # 获取起始行号和结束行号
@@ -280,7 +300,8 @@ class DocumentChunker:
                     )
                     chunks.append(chunk)
                     # 子节点的父级 ID 为当前 Chunk 的 ID
-                    child_parent_id = chunk.chunk_id
+                    # 显式标注 str | None：另一分支会把可空的 parent_chunk_id 赋给同名变量
+                    child_parent_id: str | None = chunk.chunk_id
                 else:
                     # 没有文本时，子节点继承当前父级 ID
                     child_parent_id = parent_chunk_id
@@ -319,7 +340,7 @@ class DocumentChunker:
         按标题层级进行分块，保持文档结构完整性。
 
         【标题匹配规则】
-        正则表达式: ^(#+)\s+(.*)$
+        正则表达式: ^(#+)\\s+(.*)$
         - 捕获组 1: 标题级别（# 的数量）
         - 捕获组 2: 标题文本
 
@@ -347,7 +368,7 @@ class DocumentChunker:
         - 没有任何标题的文件作为一个块
         """
         # 读取文件内容
-        content = path.read_text(encoding="utf-8")
+        content = read_text_safely(path)
         # 按行分割（保留换行符）
         lines = content.splitlines(keepends=True)
         chunks: list[Chunk] = []
@@ -374,7 +395,11 @@ class DocumentChunker:
                     if chunk_text.strip():
                         # parent_id 为上级章节的 chunk_id（Parent-Child：子章节→父章节）
                         section_depth = len(current_section)
-                        parent_id = section_chunk_ids.get(section_depth - 1) if section_depth > 0 else None
+                        parent_id = (
+                            section_chunk_ids.get(section_depth - 1)
+                            if section_depth > 0
+                            else None
+                        )
                         chunk = Chunk(
                             text=chunk_text,
                             source_path=str(path),
@@ -444,7 +469,7 @@ class DocumentChunker:
         作为兜底策略，处理所有未识别的文件格式。
         """
         # 读取文件内容
-        content = path.read_text(encoding="utf-8")
+        content = read_text_safely(path)
         # 按行分割（保留换行符）
         lines = content.splitlines(keepends=True)
         # 调用滑动窗口分块方法
@@ -557,7 +582,7 @@ class DocumentChunker:
         import json
 
         # 读取文件内容
-        content = path.read_text(encoding="utf-8")
+        content = read_text_safely(path)
         # 按行分割（保留换行符）
         lines = content.splitlines(keepends=True)
 
@@ -629,7 +654,9 @@ class DocumentChunker:
                 current_key = f"{parent_key}.{key}" if parent_key else key
                 # 如果值是嵌套结构，递归处理
                 if isinstance(value, (dict, list)):
-                    chunks.extend(self._chunk_json_data(value, source_path, lines, current_key, depth + 1))
+                    chunks.extend(
+                        self._chunk_json_data(value, source_path, lines, current_key, depth + 1)
+                    )
                 else:
                     # 如果值是基本类型，创建 Chunk
                     chunk_text = f"{current_key}: {json.dumps(value, ensure_ascii=False)}"
@@ -649,7 +676,9 @@ class DocumentChunker:
                 current_key = f"{parent_key}[{i}]"
                 # 如果元素是嵌套结构，递归处理
                 if isinstance(item, (dict, list)):
-                    chunks.extend(self._chunk_json_data(item, source_path, lines, current_key, depth + 1))
+                    chunks.extend(
+                        self._chunk_json_data(item, source_path, lines, current_key, depth + 1)
+                    )
                 else:
                     # 如果元素是基本类型，创建 Chunk
                     chunk_text = f"{current_key}: {json.dumps(item, ensure_ascii=False)}"
@@ -666,21 +695,20 @@ class DocumentChunker:
         return chunks
 
     def _chunk_yaml(self, path: Path) -> list[Chunk]:
-        content = path.read_text(encoding="utf-8")
+        content = read_text_safely(path)
         lines = content.splitlines(keepends=True)
 
         try:
             import yaml
 
             data = yaml.safe_load(content)
-            import json
 
             return self._chunk_json_data(data, str(path), lines)
         except Exception:
             return self._chunk_plaintext_lines(lines, str(path))
 
     def _chunk_xml(self, path: Path) -> list[Chunk]:
-        content = path.read_text(encoding="utf-8")
+        content = read_text_safely(path)
         lines = content.splitlines(keepends=True)
 
         try:
@@ -717,7 +745,9 @@ class DocumentChunker:
             ))
 
         for child in elem:
-            chunks.extend(self._chunk_xml_element(child, source_path, lines, current_path, depth + 1))
+            chunks.extend(
+                self._chunk_xml_element(child, source_path, lines, current_path, depth + 1)
+            )
 
         for attr_name, attr_value in elem.attrib.items():
             chunk_text = f"{current_path}[{attr_name}=\"{attr_value}\"]"
@@ -734,7 +764,7 @@ class DocumentChunker:
     def _chunk_csv(self, path: Path) -> list[Chunk]:
         import csv
 
-        content = path.read_text(encoding="utf-8")
+        content = read_text_safely(path)
         lines = content.splitlines(keepends=True)
 
         try:

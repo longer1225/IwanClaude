@@ -50,6 +50,7 @@ from iwan_claude.core.bus.events import (
     SkillInvokedEvent,
 )
 from iwan_claude.core.events.bus import EventBus
+from iwan_claude.core.run_registry import cancel_requested, register_run, unregister_run
 from iwan_claude.core.runs import new_run_id
 from iwan_claude.core.session.model import Session, SessionMode
 from iwan_claude.core.snapshot import format_recovery_context, read_snapshot
@@ -455,20 +456,50 @@ class SessionManager:
 
             # 创建 AgentRunner 实例
             runner = self._runner_factory()
-            # 执行运行并捕获结果
-            outcome = await runner.run_and_capture(
-                goal,
-                run_id=run_id,
-                session=session,
-                store=self._store,
-                system_prompt_override=system_prompt_override,
-                tool_whitelist=tool_whitelist,
-                recovery_context=recovery_context,
+            # ==================== 以独立 task 执行并登记到 run 注册表 ====================
+            # 【设计】不直接 await run_and_capture 协程，而是包成 asyncio.Task：
+            # 1) run.cancel 才能按 run_id 定位到正在运行的任务并注入 CancelledError；
+            # 2) runner 内部捕获取消后照常保存轨迹、发布 RunFinishedEvent(cancelled)，
+            #    最后重抛 CancelledError——外层在这里优雅收尾，会话状态不会卡在 running。
+            run_task = asyncio.create_task(
+                runner.run_and_capture(
+                    goal,
+                    run_id=run_id,
+                    session=session,
+                    store=self._store,
+                    system_prompt_override=system_prompt_override,
+                    tool_whitelist=tool_whitelist,
+                    recovery_context=recovery_context,
+                )
             )
+            register_run(run_id, sid, run_task)
+            cancelled_by_user = False
+            outcome: Any = None
+            try:
+                outcome = await run_task
+            except asyncio.CancelledError:
+                if cancel_requested(run_id):
+                    # 主动取消（run.cancel）：run_task 已按上述路径完成收尾
+                    cancelled_by_user = True
+                else:
+                    # 外层取消（典型是客户端断线连带 handler 任务被取消）：
+                    # 同步回收 run_task，避免孤儿任务继续烧 token，然后把取消向上传递
+                    run_task.cancel()
+                    session.status = "waiting_for_input"
+                    self._store.write_meta(session)
+                    raise
+            finally:
+                unregister_run(run_id)
 
             # 存储对话到跨会话记忆（供后续会话语义检索）
             # 用原始用户消息 content（而非 skill 展开后的 goal）作为查询锚点
-            if self._memory_manager is not None and outcome.result:
+            # 取消的运行结果不完整，跳过记忆存储避免污染长期记忆
+            if (
+                self._memory_manager is not None
+                and outcome is not None
+                and outcome.result
+                and not cancelled_by_user
+            ):
                 try:
                     await self._memory_manager.remember_conversation(
                         user_msg=content,
@@ -810,8 +841,9 @@ class SessionManager:
             # 10. 将消息写入 thread.jsonl（覆盖原文件）
             self._store.write_messages(sid, messages)
 
-            # 11. 更新会话运行列表（截断到恢复的步骤）
-            session.run_ids = session.run_ids[:step] if session.run_ids else []
+            # 11. 不截断 run_ids：checkpoint 的 step 是单 run 内的图步数，
+            # 与"第几个 run"无关（run_ids[:step] 会随机误删 run 记录）；
+            # 且 LangGraph 不持久化我们注入的 run_id，无法反查该 checkpoint 属于哪个 run
             # 12. 更新会话时间戳
             session.updated_at = _now()
             # 13. 写入会话元数据

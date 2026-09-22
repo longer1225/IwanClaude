@@ -29,8 +29,8 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from iwan_claude.core.tools.base import BaseTool, ToolResult
 from iwan_claude.core.sandbox import get_sandbox, scrub_env
+from iwan_claude.core.tools.base import BaseTool, ToolResult
 
 # 兜底最大输出字节数：64 KB，防止返回过多内容
 _FALLBACK_OUTPUT_MAX_BYTES = 64 * 1024
@@ -63,8 +63,10 @@ logger = logging.getLogger(__name__)
 
 # Windows 绝对路径正则：匹配 C:\xxx 或 D:/xxx 等形式
 # 提取完整的绝对路径（盘符 + 路径部分）
+# 前置负向断言：盘符前不能是单词字符——避免把 URL scheme（http:// 中的 "p:"）、
+# PowerShell 变量（$env:PATH 中的 "v:"）误判成盘符路径而误拦截
 _WIN_ABS_PATH_RE = re.compile(
-    r'([A-Za-z]):[\\/]([^\s"\'|&;()\[\]{}<>,`]*)'
+    r'(?<![A-Za-z0-9_])([A-Za-z]):[\\/]([^\s"\'|&;()\[\]{}<>,`]*)'
 )
 # Unix 绝对路径正则：匹配 /etc/xxx 或 /usr/local 等形式
 _UNIX_ABS_PATH_RE = re.compile(
@@ -201,7 +203,8 @@ class BashTool(BaseTool):
             },
             "timeout": {
                 "type": "integer",
-                "description": "Maximum seconds to wait (default from tools.bash_timeout_s, max 120).",
+                "description": "Maximum seconds to wait "
+                               "(default from tools.bash_timeout_s, max 120).",
             },
         },
         "required": ["command"],
@@ -312,6 +315,17 @@ class BashTool(BaseTool):
         # 沙箱未启用时不脱敏（child_env=None 表示继承父进程 env）
         child_env = scrub_env(dict(os.environ)) if sandbox.enabled else None
 
+        # ===== Windows Job Object：把子进程树纳入受控组 =====
+        # KILL_ON_JOB_CLOSE：daemon 被杀（句柄被 OS 回收）或本函数 close_job 时，
+        # powershell.exe 及其派生的所有子孙进程一并终止，不留孤儿。
+        # 非 Windows 平台 create_process_job 返回 None，全流程优雅降级。
+        from iwan_claude.core.tools.job_object import (
+            assign_process_to_job,
+            close_job,
+            create_process_job,
+        )
+        job = create_process_job()
+
         try:
             if IS_WINDOWS:
                 # Windows：使用 PowerShell 执行命令
@@ -331,6 +345,8 @@ class BashTool(BaseTool):
                     cwd=cwd,  # 沙箱根目录作为工作目录
                     env=child_env,  # 脱敏后的环境变量（沙箱启用时）
                 )
+                # 进程已创建，立即加入 Job（刚 spawn，逃逸窗口最小）
+                assign_process_to_job(job, proc.pid)
             else:
                 # Linux / macOS：使用默认 shell 执行命令
                 proc = await asyncio.create_subprocess_shell(
@@ -359,6 +375,10 @@ class BashTool(BaseTool):
         except Exception as exc:
             # 其他异常（如命令不存在、权限不足等）
             return ToolResult(content=str(exc), is_error=True, error_type="runtime_error")
+        finally:
+            # 关闭 Job 句柄：正常结束时进程已退出（no-op）；
+            # 超时/异常路径若有残余进程树，KILL_ON_JOB_CLOSE 在此兜底清杀
+            close_job(job)
 
         # 3. 处理输出
         output = stdout_bytes.decode("utf-8", errors="replace")

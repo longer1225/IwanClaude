@@ -12,13 +12,19 @@
 - PermissionManager: 权限管理器主类
 - _PendingRequest: 待审批请求数据类
 
-【权限检查流程】
-Tier 1: deny_patterns（bash only，不可被缓存绕过）→ DENY
-Tier 2: OUTSIDE_CWD_HEURISTICS（bash only，强制 ASK，不可被任何缓存绕过）
-Tier 3: session always 缓存（session 内存，重启丢失）
-Tier 4: persistent always（跨 session，从 policy_file 加载）
-Tier 5: allow_patterns（bash only）→ ALLOW
-Tier 6: tool default → 默认决策
+【权限检查流程】（实现收敛在 policy.evaluate_pre_cache / evaluate_post_cache，
+与静态评估共享同一函数——审批链与评估结果永不漂移）
+Tier 0: PreToolUse hook（外部裁判，先于一切评估）——DENY 即地板（"hook_deny"）、
+        ASK 并入强制档、ALLOW 在缓存全数未否决后终结链为"hook_allow"
+Tier 1: deny 类地板——legacy deny_patterns + sandbox command_blacklist
+        + 规则引擎 deny（bash 逐段求值）→ DENY（任何缓存/模式不可翻）
+Tier 2: 强制 ASK 类——规则引擎显式 ask + OUTSIDE_CWD_HEURISTICS
+        + 沙箱检查（路径越界 / run_python 动态写路径）→ 弹问，跳过缓存
+Tier 3: session always 缓存（按 工具+参数指纹 键控，重启丢失）
+Tier 4: persistent always（跨 session，键为 "tool|参数指纹"）
+Tier 5: allow 类——规则引擎 allow（全段覆盖）+ legacy allow_patterns
+        （仅单段命令）→ ALLOW
+Tier 6: 工具默认策略；ASK 时检查 auto 模式（规则来源的 ASK 不豁免）
 ASK 路径: 向客户端发送事件，等待响应
 
 【审批决策类型】
@@ -36,7 +42,6 @@ from __future__ import annotations
 import asyncio
 import datetime
 import logging
-import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC
@@ -48,14 +53,28 @@ from iwan_claude.core.permissions.policy import (
     AUTO_MODE_WRITE_ALLOW_TOOLS,
     DEFAULT_POLICIES,
     PermissionDecision,
+    TRUST_DENY_FORBIDDEN_TOOLS,
     ToolPolicy,
-    matches_outside_cwd,
+    evaluate_post_cache,
+    evaluate_pre_cache,
+    param_fingerprint,
     param_preview,
 )
 from iwan_claude.core.permissions.storage import load_policy_file, save_policy_file
 
-# 合法的自动模式值
+# 合法的自动模式值（legacy 三态；经 AUTO_TO_MODE 映射进五态模型，保留一版兼容）
 AUTO_MODES = ("off", "read_only", "on")
+
+# 权限模式五态（对齐 Claude Code，语义矩阵见 docs/design/permission-modes.md）
+PERMISSION_MODES = ("default", "acceptEdits", "plan", "auto", "bypassPermissions")
+
+# legacy auto_mode → 新 mode 映射：off=什么都不自动放，read_only=只读自动放(=auto)，
+# on=读+白名单写自动放(=acceptEdits)
+AUTO_TO_MODE: dict[str, str] = {
+    "off": "default",
+    "read_only": "auto",
+    "on": "acceptEdits",
+}
 
 # 合法的努力等级值
 EFFORT_LEVELS = ("minimal", "low", "medium", "high", "max")
@@ -127,8 +146,8 @@ class PermissionManager:
     【核心字段】
     - _policies: dict[str, ToolPolicy] - 工具策略映射
     - _pending: dict[str, _PendingRequest] - 待审批请求映射
-    - _session_always: dict[tuple[str, str], str] - session 级缓存
-    - _persistent_always: dict[str, str] - 持久化缓存
+    - _session_always: dict[tuple[str, str, str], str] - session 级缓存（键含参数指纹）
+    - _persistent_always: dict[str, str] - 持久化缓存（键为 "tool|参数指纹"）
     - _policy_file: Path | None - 策略文件路径
     - _timeout_s: float - 审批超时时间（秒）
 
@@ -144,6 +163,9 @@ class PermissionManager:
         *,
         policy_file: Path | None = None,
         timeout_s: float = 60.0,
+        rules: Any = None,  # PermissionRules（声明式 deny/ask/allow 规则）
+        hooks: Any = None,  # HookRegistry（PreToolUse/PostToolUse 外部裁判）
+        default_mode: str = "default",  # 权限模式五态的会话默认值
     ) -> None:
         """
         初始化权限管理器
@@ -152,6 +174,10 @@ class PermissionManager:
         - policies: dict[str, ToolPolicy] | None - 工具策略映射（默认使用 DEFAULT_POLICIES）
         - policy_file: Path | None - 策略文件路径（用于持久化缓存）
         - timeout_s: float - 审批超时时间（秒，0 表示不超时，默认 60.0）
+        - rules: PermissionRules | None - 声明式 deny/ask/allow 规则引擎输入
+          （None 或空 = 关闭规则引擎，只走 legacy 评估链，保证旧配置零感知升级）
+        - hooks: HookRegistry | None - 生命周期钩子注册表（None/空 = PreToolUse
+          闸与 PostToolUse 广播都跳过，行为与 hook 上线前逐字节一致）
 
         【初始化流程】
         1. 初始化工具策略映射
@@ -176,48 +202,141 @@ class PermissionManager:
         self._policies: dict[str, ToolPolicy] = policies or dict(DEFAULT_POLICIES)
         # 待审批请求映射（tool_use_id → _PendingRequest）
         self._pending: dict[str, _PendingRequest] = {}
-        # session 级缓存（(session_id, tool_name) → "allow" | "deny"，重启丢失）
-        self._session_always: dict[tuple[str, str], str] = {}
+        # session 级缓存（(session_id, tool_name, 参数指纹) → "allow" | "deny"，重启丢失）
+        # 键含参数指纹：always_allow 只覆盖"同一工具+同一命令/路径"，不再一刀切放行整个工具
+        self._session_always: dict[tuple[str, str, str], str] = {}
         # 策略文件路径（用于持久化缓存）
         self._policy_file = policy_file
-        # 持久化缓存（tool_name → "allow" | "deny"，从 policy_file 加载，跨 session）
-        self._persistent_always: dict[str, str] = (
-            load_policy_file(policy_file) if policy_file is not None else {}
-        )
+        # 持久化缓存（"tool_name|参数指纹" → "allow" | "deny"，从 policy_file 加载，跨 session）
+        loaded_always = load_policy_file(policy_file) if policy_file is not None else {}
+        # 旧格式（仅工具名、无指纹后缀）的一刀切条目不再信任：加载时丢弃并提示重新审批
+        self._persistent_always: dict[str, str] = {
+            k: v for k, v in loaded_always.items() if "|" in k
+        }
+        dropped = len(loaded_always) - len(self._persistent_always)
+        if dropped:
+            logger.warning(
+                "permission: dropped %d legacy blanket policy entries in %s "
+                "(cache key now requires a param fingerprint)",
+                dropped, policy_file,
+            )
         # 审批超时时间（秒，0 表示不超时）
         self._timeout_s = timeout_s
-        # 自动模式：off / read_only / on
-        self._auto_mode: str = "off"
+        # 权限模式：会话默认值（五态；PERMISSION_MODES）+ per-session 覆盖表
+        if default_mode not in PERMISSION_MODES:
+            raise ValueError(
+                f"default_mode must be one of {PERMISSION_MODES}, got {default_mode!r}")
+        self._default_mode: str = default_mode
+        self._modes: dict[str, str] = {}  # session_id → mode（显式切换过的会话）
         # 努力等级：minimal / low / medium / high / max
         self._effort_level: str = "medium"
         # 模型预设：fast / balanced / powerful
         self._model_preset: str = "balanced"
+        # 声明式规则引擎（PermissionRules 或 None；见 permissions/rules.py）
+        self._rules = rules
+        # 生命周期钩子注册表（HookRegistry 或 None；见 core/hooks/registry.py）
+        self._hooks = hooks
+        # Layer 0 项目信任（session_id → "allow"/"deny"/"ask"）：
+        # 未登记的会话按 "allow" 处理——ask 的"每次写走审批"由既有默认策略
+        # （未知工具兜底 ASK）天然承担，无需在此层重复强制
+        self._trust: dict[str, str] = {}
 
-    # 设置当前自动模式
+    # 暴露 hook 注册表给工具执行路径（invocation 在成功执行后调 PostToolUse）
+    @property
+    def hooks(self) -> Any:
+        return self._hooks
+
+    # PostToolUse 钩子直通：无注册表/无匹配时返回空串（调用方据此不改动 tool 输出）
+    async def run_post_tool_use_hooks(
+        self, tool_name: str, params: dict[str, Any], tool_output: str,
+        session_id: str = "", run_id: str = "",
+    ) -> str:
+        """
+        工具成功执行后的 hook 广播；返回应追加进 tool 结果、回灌给模型的警告文本
+        """
+        if self._hooks is None or self._hooks.is_empty():
+            return ""
+        warn: str = await self._hooks.run_post_tool_use(
+            tool_name, params, tool_output, session_id=session_id, run_id=run_id)
+        return warn
+
+    # legacy 三态 auto_mode 的显示映射（五态 → 最接近的旧值）
+    _MODE_TO_AUTO: dict[str, str] = {
+        "default": "off", "auto": "read_only", "acceptEdits": "on",
+        "plan": "off", "bypassPermissions": "on",
+    }
+
+    # 设置当前自动模式（legacy 兼容入口：映射进五态后改写全局默认，无 per-session 覆盖时生效）
     def set_auto_mode(self, mode: str) -> None:
         """
-        设置当前自动模式
+        设置全局默认权限模式（经 AUTO_TO_MODE 兼容映射 off/read_only/on）
 
         【参数说明】
-        - mode: str - 自动模式，必须是 "off" / "read_only" / "on" 之一
+        - mode: str - 旧三态值 "off" / "read_only" / "on"
 
-        【设计目的】
-        允许运行时动态切换自动模式，无需重启守护进程。
+        【设计】新代码请直接用 set_permission_mode；本方法保留一个版本是为了
+        不碎旧 RPC/脚本——off→default、read_only→auto、on→acceptEdits。
         """
         if mode not in AUTO_MODES:
             raise ValueError(f"auto_mode must be one of {AUTO_MODES}, got {mode!r}")
-        self._auto_mode = mode
-        logger.info("permission: auto_mode set to %s", mode)
+        self._default_mode = AUTO_TO_MODE[mode]
+        logger.info("permission: auto_mode %s -> default mode %s", mode, self._default_mode)
 
-    # 获取当前自动模式
+    # 获取当前自动模式（由全局默认 mode 反推旧三态显示值）
     def get_auto_mode(self) -> str:
         """
-        获取当前自动模式
-
-        【返回值】
-        - str: 当前自动模式（"off" / "read_only" / "on"）
+        返回与当前默认权限模式最接近的 legacy 三态值（供旧客户端展示）
         """
-        return self._auto_mode
+        return self._MODE_TO_AUTO.get(self._default_mode, "off")
+
+    # 切换指定会话（session_id=None 时改全局默认）的权限模式
+    def set_permission_mode(self, mode: str, session_id: str | None = None) -> str:
+        """
+        设置五态权限模式；返回切换前的值（供事件广播 previous_mode）
+
+        【参数说明】
+        - mode: PERMISSION_MODES 之一
+        - session_id: 目标会话；None 表示改"未显式切换过"的会话共用的默认值
+
+        【设计】per-session 存储：一个会话进 plan 不会把其他会话的
+        acceptEdits 一起降级——全局开关是当年 auto_mode 最大的误伤面。
+        """
+        if mode not in PERMISSION_MODES:
+            raise ValueError(f"mode must be one of {PERMISSION_MODES}, got {mode!r}")
+        if session_id is None:
+            previous, self._default_mode = self._default_mode, mode
+        else:
+            previous = self.get_permission_mode(session_id)
+            self._modes[session_id] = mode
+        logger.info(
+            "permission: mode %s -> %s (session=%s)", previous, mode, session_id or "<default>")
+        return previous
+
+    # 读取指定会话的生效权限模式
+    def get_permission_mode(self, session_id: str) -> str:
+        """
+        返回该会话的生效模式：显式设置过用设置值，否则用全局默认
+        """
+        return self._modes.get(session_id, self._default_mode)
+
+    # Layer 0：为会话登记项目信任决定（"allow"/"deny"/"ask"；来自 TrustStore 或弹窗）
+    def set_trust(self, session_id: str, decision: str) -> None:
+        """
+        设定该会话的信任档；与权限模式正交——信任是"这个目录可否被 iwan 触碰"，
+        模式是"每次触碰要不要问"，两者取更严的一侧生效
+        """
+        if decision not in ("allow", "deny", "ask"):
+            raise ValueError(f"trust decision must be allow/deny/ask, got {decision!r}")
+        self._trust[session_id] = decision
+        logger.info("permission: trust=%s for session=%s", decision, session_id)
+
+    # 读取会话的信任档（未登记返回 "allow"：ask 语义由默认策略兜底，见 check_and_wait）
+    def get_trust(self, session_id: str) -> str:
+        return self._trust.get(session_id, "allow")
+
+    # 会话是否已有登记过信任档（send 路径按此决定是否从 TrustStore 重查）
+    def has_trust(self, session_id: str) -> bool:
+        return session_id in self._trust
 
     # 设置当前努力等级
     def set_effort_level(self, level: str) -> None:
@@ -272,28 +391,22 @@ class PermissionManager:
         """
         return self._model_preset
 
-    # 判断指定工具在当前自动模式下是否可以自动批准
-    def _auto_mode_allows(self, tool_name: str) -> bool:
+    # 判断指定工具在该权限模式下是否可被自动批准（Tier 6 的 auto 豁免档）
+    def _mode_auto_allows(self, tool_name: str, mode: str) -> bool:
         """
-        判断当前自动模式是否允许自动批准该工具
+        模式 → 白名单自动批准映射（bash 与未登记工具永不在任何模式的白名单里）
 
-        【参数说明】
-        - tool_name: str - 工具名称
-
-        【返回值】
-        - bool: True 表示可以自动批准，False 表示仍需走正常审批流程
-
-        【逻辑说明】
-        - off: 不允许任何自动批准
-        - read_only: 只自动批准只读工具
-        - on: 自动批准只读工具 + 白名单内的写工具
+        - acceptEdits：只读 + 写文件白名单（≈旧 "on"，但不含 bash——Edits 不解锁 shell）
+        - auto：仅只读（≈旧 "read_only"；官方 auto 走分类器，本期为白名单近似）
+        - 其余（default/plan/bypassPermissions）：False——plan 另有整级 DENY，
+          bypass 在更早的位置整级 ALLOW，都不经过本函数
         """
-        if self._auto_mode == "off":
+        if tool_name == "bash":
             return False
-        if tool_name in AUTO_MODE_READ_ONLY_TOOLS:
-            return True
-        if self._auto_mode == "on" and tool_name in AUTO_MODE_WRITE_ALLOW_TOOLS:
-            return True
+        if mode == "acceptEdits":
+            return tool_name in (AUTO_MODE_READ_ONLY_TOOLS | AUTO_MODE_WRITE_ALLOW_TOOLS)
+        if mode == "auto":
+            return tool_name in AUTO_MODE_READ_ONLY_TOOLS
         return False
 
     def evaluate(self, tool_name: str, params: dict[str, Any]) -> PermissionDecision:
@@ -323,7 +436,7 @@ class PermissionManager:
         # 获取工具策略
         policy = self._policies.get(tool_name)
         # 调用策略评估函数
-        return evaluate(tool_name, params, policy)
+        return evaluate(tool_name, params, policy, self._rules)
 
     async def check_and_wait(
         self,
@@ -341,18 +454,21 @@ class PermissionManager:
         - tool_name: str - 工具名称
         - params: dict[str, Any] - 工具参数
         - session_id: str - session ID
-        - event_emitter: Callable[[dict[str, Any]], Awaitable[None]] - 事件发射器（向客户端发送权限请求）
+        - event_emitter: Callable[[dict[str, Any]], Awaitable[None]] -
+          事件发射器（向客户端发送权限请求）
 
         【返回值】
         - tuple[bool, str]: (是否允许, 决策字符串)
           - bool: True 表示允许，False 表示拒绝
-          - str: 决策类型（auto_allow, auto_deny, timeout, allow_once, always_allow, deny_once, always_deny）
+          - str: 决策类型（auto_allow, auto_deny, timeout, allow_once,
+            always_allow, deny_once, always_deny）
 
         【评估流程】
         Tier 1: deny_patterns（bash only，不可被缓存绕过）→ DENY
         Tier 2: OUTSIDE_CWD_HEURISTICS（bash only，强制 ASK，不可被任何缓存绕过）
-        Tier 3: session always 缓存（session 内存，重启丢失）
-        Tier 4: persistent always（跨 session，从 policy_file 加载）
+        Tier 2.5: 沙箱检查（路径越界 / run_python 动态写路径，强制 ASK，不可被任何缓存绕过）
+        Tier 3: session always 缓存（session 内存，按 工具+参数指纹 键控，重启丢失）
+        Tier 4: persistent always（跨 session，键为 "tool|参数指纹"，从 policy_file 加载）
         Tier 5: allow_patterns（bash only）→ ALLOW
         Tier 6: tool default → 默认决策
         ASK 路径: 向客户端发送事件，等待响应
@@ -380,69 +496,98 @@ class PermissionManager:
         )
         ```
         """
-        # 获取 bash 命令（非 bash 工具为空字符串）
-        command = str(params.get("command", "")) if tool_name == "bash" else ""
         # 获取工具策略
         policy = self._policies.get(tool_name)
 
-        # Tier 0: Auto Mode 自动批准（仅适用于非 bash 工具，且不能绕过安全规则）
-        auto_allowed = False
-        if tool_name != "bash" and self._auto_mode_allows(tool_name):
-            auto_allowed = True
+        # Tier 0: PreToolUse hook——先于一切权限评估的外部裁判（六种语境都运行，
+        # 对齐官方"hook 是规则之前的一道闸"）。裁定值用字符串比较：HookDecision
+        # 是 StrEnum，且此处延迟 import 会打断可读性——协议值即稳定契约。
+        hook_pre: Any = None
+        if self._hooks is not None and not self._hooks.is_empty():
+            hook_pre = await self._hooks.run_pre_tool_use(
+                tool_name, params, session_id)
+            if hook_pre.decision == "deny":
+                logger.info(
+                    "permission: hook DENY tool=%s  %s", tool_name, hook_pre.reason)
+                return False, "hook_deny"
 
-        # Tier 1: deny_patterns（bash only，不可被缓存绕过）
-        # 合并两个来源：policy.deny_patterns + sandbox.command_blacklist（硬 DENY）
-        if command and policy:
-            # 1a. 策略文件中定义的 deny_patterns
-            for pat in policy.deny_patterns:
-                if re.search(pat, command):
-                    logger.debug("permission: deny_pattern hit tool=%s", tool_name)
-                    return False, "auto_deny"
-            # 1b. 沙箱配置的 command_blacklist（进程内强化新增）
-            from iwan_claude.core.sandbox import get_sandbox
-            sandbox = get_sandbox()
-            if sandbox.enabled:
-                for pat in sandbox.command_blacklist:
-                    if re.search(pat, command):
-                        logger.debug("permission: command_blacklist hit tool=%s", tool_name)
-                        return False, "auto_deny"
+        # 本会话生效的权限模式（五态；per-session 覆盖 > 全局默认）
+        mode = self.get_permission_mode(session_id)
 
-        # Tier 2: OUTSIDE_CWD_HEURISTICS（bash only，强制 ASK，不可被任何缓存绕过）
-        outside_cwd = bool(command and matches_outside_cwd(command))
+        # Tier 1+2: deny 地板与强制 ASK —— 与 policy.evaluate 共享同一实现，
+        # 静态评估和审批链永不漂移（此前这里是复制的第二份 tier 逻辑，已删）
+        pre = evaluate_pre_cache(tool_name, params, policy, self._rules)
+        if pre is not None and pre.decision == PermissionDecision.DENY:
+            logger.debug("permission: deny floor tool=%s  %s", tool_name, pre.detail)
+            return False, "auto_deny"
+        # Layer 0 信任地板：trust=deny 的会话里，文件变更/执行类工具强制 DENY。
+        # 放在 plan/bypass/缓存之前——它是"这个目录根本不该被写"的裁决，
+        # bypassPermissions 与 always_allow 都豁免不了（对齐 managed deny 语义）；
+        # 未登记会话按 allow 处理：ask 的"每次写走审批"由默认策略兜底 ASK 承担，
+        # 这一层只对显式 deny 加码，不改变任何既有会话的行为
+        if self._trust.get(session_id, "allow") == "deny" and tool_name in TRUST_DENY_FORBIDDEN_TOOLS:
+            logger.info("permission: trust-deny floor tool=%s session=%s", tool_name, session_id)
+            return False, "trust_deny"
+        # plan 模式的整级 DENY：只读白名单之外的工具（含 bash/未知工具）一律拒绝。
+        # 放在 deny 地板之后：地板 DENY 的理由更精确；放在缓存之前：模式是策略
+        # 不是用户意愿，always_allow 缓存不该在 plan 里漏执行（官方 ask→deny 语义）
+        if mode == "plan" and tool_name not in AUTO_MODE_READ_ONLY_TOOLS:
+            logger.debug("permission: plan mode denied tool=%s", tool_name)
+            return False, "plan_mode"
+        # 强制 ASK 的来源：策略链 Tier2 / hook 显式 ASK —— bypass 也保留（bypass
+        # 只豁免"默认会弹问的"，地板与强制档不动，见 docs/design/permission-modes.md §2）
+        forced_ask = pre is not None or (
+            hook_pre is not None and hook_pre.decision == "ask")
+        # bypassPermissions：越过缓存与 Tier5/6 直接放行（地板与强制 ASK 已拦过）
+        if mode == "bypassPermissions" and not forced_ask:
+            return True, "bypass_allow"
 
-        if not outside_cwd:
+        # 参数指纹：always 缓存按 tool + 参数（命令/路径）键控，不再按工具名一刀切
+        fingerprint = param_fingerprint(tool_name, params)
+
+        if not forced_ask:
             # Tier 3: session always 缓存（session 内存，重启丢失）
-            session_key = (session_id, tool_name)
+            session_key = (session_id, tool_name, fingerprint)
             if session_key in self._session_always:
                 cached = self._session_always[session_key]
                 logger.debug("permission: session cache hit tool=%s decision=%s", tool_name, cached)
                 return cached == "allow", f"auto_{cached}"
 
             # Tier 4: persistent always（跨 session，从 policy_file 加载）
-            if tool_name in self._persistent_always:
-                cached = self._persistent_always[tool_name]
-                logger.debug("permission: persistent cache hit tool=%s decision=%s", tool_name, cached)
+            persistent_key = f"{tool_name}|{fingerprint}"
+            if persistent_key in self._persistent_always:
+                cached = self._persistent_always[persistent_key]
+                logger.debug(
+                    "permission: persistent cache hit tool=%s decision=%s", tool_name, cached
+                )
                 return cached == "allow", f"auto_{cached}"
 
-            # Tier 5: allow_patterns（bash only）
-            if command and policy:
-                for pat in policy.allow_patterns:
-                    if re.search(pat, command):
-                        return True, "auto_allow"
+            # Hook ALLOW 落点（方向不对称的另一半）：它能豁免的只有 Tier 5/6
+            # （规则未覆盖时的默认 ASK / auto 模式），而 deny 地板、强制 ASK、
+            # 缓存里的 always_deny 这些"更强的声音"都已在前面拦截过——
+            # 被攻陷的 hook 脚本因此换不来全系统特赦
+            if hook_pre is not None and hook_pre.decision == "allow":
+                logger.debug(
+                    "permission: hook ALLOW tool=%s  %s", tool_name, hook_pre.reason)
+                return True, "hook_allow"
 
-            # Tier 6: tool default
-            if policy is not None:
-                if policy.default == PermissionDecision.ALLOW:
-                    return True, "auto_allow"
-                if policy.default == PermissionDecision.DENY:
-                    return False, "auto_deny"
-            # default == ASK（bash、unknown tool）→ 检查 Auto Mode 是否允许自动批准
-            if auto_allowed:
-                logger.debug("permission: auto_mode allowed tool=%s mode=%s", tool_name, self._auto_mode)
+            # Tier 5+6: allow 类（规则/legacy/默认）
+            post = evaluate_post_cache(tool_name, params, policy, self._rules)
+            if post.decision == PermissionDecision.ALLOW:
+                return True, "auto_allow"
+            if post.decision == PermissionDecision.DENY:
+                return False, "auto_deny"
+            # default == ASK（bash、unknown tool）→ 检查权限模式的白名单豁免档；
+            # 来自规则引擎的 ASK（未覆盖段/动态语法）不受模式豁免——
+            # 模式是"少弹窗"，不是"少审查"
+            if self._mode_auto_allows(tool_name, mode) and not post.from_rules:
+                logger.debug(
+                    "permission: mode %s auto-allowed tool=%s", mode, tool_name
+                )
                 return True, "auto_allow"
             # 仍需要用户确认 → fall through to Future
 
-        # ASK 路径（来自 OUTSIDE_CWD 强制 ASK，或 default=ASK）
+        # ASK 路径（来自 OUTSIDE_CWD 强制 ASK、沙箱强制 ASK，或 default=ASK）
         # 获取事件循环
         loop = asyncio.get_event_loop()
         # 创建异步 Future
@@ -473,14 +618,14 @@ class PermissionManager:
                 raw = await asyncio.wait_for(future, timeout=self._timeout_s)
             else:
                 raw = await future
-        except asyncio.TimeoutError:
+        except TimeoutError:
             # 超时处理：取消待审批请求
             self._pending.pop(tool_use_id, None)
             logger.info("permission: timeout tool_use_id=%s tool=%s", tool_use_id, tool_name)
             return False, "timeout"
 
         # 应用审批决策
-        allowed = self._apply_response(raw, session_id, tool_name)
+        allowed = self._apply_response(raw, session_id, tool_name, fingerprint)
         return allowed, raw
 
     def respond(self, tool_use_id: str, decision: str) -> None:
@@ -534,7 +679,9 @@ class PermissionManager:
                 tool_use_id, decision,
             )
 
-    def _apply_response(self, decision: str, session_id: str, tool_name: str) -> bool:
+    def _apply_response(
+        self, decision: str, session_id: str, tool_name: str, fingerprint: str
+    ) -> bool:
         """
         应用审批决策，更新 session + persistent 缓存，返回是否放行
 
@@ -542,6 +689,7 @@ class PermissionManager:
         - decision: str - 审批决策
         - session_id: str - session ID
         - tool_name: str - 工具名称
+        - fingerprint: str - 参数指纹（param_fingerprint 生成），缓存键的组成部分
 
         【返回值】
         - bool: True 表示允许，False 表示拒绝
@@ -553,29 +701,30 @@ class PermissionManager:
         - always_deny: 始终拒绝（更新 session 和 persistent 缓存，保存到 policy_file）
 
         【缓存更新】
-        - session_always: 更新 (session_id, tool_name) → "allow" | "deny"
-        - persistent_always: 更新 tool_name → "allow" | "deny"
+        - session_always: 更新 (session_id, tool_name, fingerprint) → "allow" | "deny"
+        - persistent_always: 更新 "tool_name|fingerprint" → "allow" | "deny"
         - policy_file: 如果存在，保存 persistent_always
 
         【示例】
         ```python
-        allowed = manager._apply_response("always_allow", "session_01", "bash")
+        allowed = manager._apply_response("always_allow", "session_01", "bash", "ab12cd34ef567890")
         # 返回: True
-        # 更新: session_always[(session_01, bash)] = "allow"
-        # 更新: persistent_always[bash] = "allow"
+        # 更新: session_always[(session_01, bash, ab12cd34ef567890)] = "allow"
+        # 更新: persistent_always["bash|ab12cd34ef567890"] = "allow"
         # 保存: policy_file
         ```
         """
         # 判断是否允许（allow_once 和 always_allow 表示允许）
         allow = decision in ("allow_once", "always_allow")
+        persistent_key = f"{tool_name}|{fingerprint}"
         if decision == "always_allow":
-            # 更新 session 级缓存
-            self._session_always[(session_id, tool_name)] = "allow"
+            # 更新 session 级缓存（键含参数指纹，只放行同参数调用）
+            self._session_always[(session_id, tool_name, fingerprint)] = "allow"
             # 更新持久化缓存
-            self._persistent_always[tool_name] = "allow"
+            self._persistent_always[persistent_key] = "allow"
             logger.info(
-                "permission: always allow tool=%s policy_file=%s persistent=%s",
-                tool_name, self._policy_file, self._persistent_always,
+                "permission: always allow tool=%s fingerprint=%s policy_file=%s",
+                tool_name, fingerprint, self._policy_file,
             )
             # 如果策略文件存在，保存持久化缓存
             if self._policy_file is not None:
@@ -583,17 +732,19 @@ class PermissionManager:
                     save_policy_file(self._persistent_always, self._policy_file)
                     logger.info("permission: policy.toml written path=%s", self._policy_file)
                 except Exception:
-                    logger.exception("permission: failed to write policy.toml path=%s", self._policy_file)
+                    logger.exception(
+                        "permission: failed to write policy.toml path=%s", self._policy_file
+                    )
             else:
                 logger.warning("permission: policy_file is None, skipping persistence")
         elif decision == "always_deny":
-            # 更新 session 级缓存
-            self._session_always[(session_id, tool_name)] = "deny"
+            # 更新 session 级缓存（键含参数指纹）
+            self._session_always[(session_id, tool_name, fingerprint)] = "deny"
             # 更新持久化缓存
-            self._persistent_always[tool_name] = "deny"
+            self._persistent_always[persistent_key] = "deny"
             logger.info(
-                "permission: always deny tool=%s policy_file=%s persistent=%s",
-                tool_name, self._policy_file, self._persistent_always,
+                "permission: always deny tool=%s fingerprint=%s policy_file=%s",
+                tool_name, fingerprint, self._policy_file,
             )
             # 如果策略文件存在，保存持久化缓存
             if self._policy_file is not None:
@@ -601,7 +752,9 @@ class PermissionManager:
                     save_policy_file(self._persistent_always, self._policy_file)
                     logger.info("permission: policy.toml written path=%s", self._policy_file)
                 except Exception:
-                    logger.exception("permission: failed to write policy.toml path=%s", self._policy_file)
+                    logger.exception(
+                        "permission: failed to write policy.toml path=%s", self._policy_file
+                    )
             else:
                 logger.warning("permission: policy_file is None, skipping persistence")
         return allow
@@ -643,3 +796,8 @@ class PermissionManager:
                     "permission: cancel pending tool_use_id=%s reason=%s", uid, reason
                 )
                 req.future.set_result("deny_once")
+        # 会话结束：per-session 模式覆盖一并清除——_modes 是无界字典，
+        # 长期运行的 daemon 里不清就是慢性内存泄漏（design §4）
+        self._modes.pop(session_id, None)
+        # 信任档同理：会话死了它对应的信任记录留在 TrustStore 里，内存态无需保留
+        self._trust.pop(session_id, None)

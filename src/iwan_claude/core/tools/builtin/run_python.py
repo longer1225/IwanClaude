@@ -3,14 +3,15 @@
 这个模块实现了一个安全的 Python 代码执行工具，允许 Agent 在隔离环境中执行 Python 代码。
 
 **核心特性：**
-1. **沙箱隔离**：通过正则表达式检测代码中的文件操作，防止越权访问
+1. **沙箱隔离**：通过 AST 解析检测代码中的文件写操作，防止越权访问（动态写路径强制人工确认）
 2. **虚拟环境**：支持在独立的虚拟环境中运行代码，避免依赖冲突
 3. **超时控制**：可配置的执行超时时间（1-300秒）
 4. **依赖安装**：支持在运行前安装指定的 pip 依赖
 5. **路径验证**：严格的路径遍历检测，禁止 ".." 访问
 
 **安全机制详解：**
-1. **文件操作检测**：通过正则表达式扫描代码中的 open()、Path()、os.path.* 等文件操作
+1. **文件操作检测**：通过 AST 静态分析扫描代码中的 open()、pathlib 写方法、os/shutil 写操作；
+   写路径能静态确定的做沙箱硬校验，无法确定的（f-string/拼接/子进程调用）交由权限层强制 ASK
 2. **路径验证**：使用 validate_path() 验证文件路径是否在沙箱内
 3. **工作目录限制**：work_dir 必须在沙箱内，且不能包含路径遍历
 4. **临时文件清理**：执行完成后自动清理临时脚本文件和虚拟环境
@@ -48,9 +49,9 @@ result = await run_python_tool.invoke({
 """
 from __future__ import annotations
 
+import ast
 import asyncio
 import os
-import re
 import sys
 import tempfile
 import venv
@@ -59,7 +60,7 @@ from typing import ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from iwan_claude.core.sandbox import validate_path, scrub_env
+from iwan_claude.core.sandbox import scrub_env, validate_path
 from iwan_claude.core.tools.base import BaseTool, ToolResult
 
 # 输出最大字节数兜底值：128 KB，防止大输出导致内存问题
@@ -85,23 +86,147 @@ def _timeout_s() -> int:
 # 检测是否为 Windows 平台，用于跨平台兼容
 _IS_WINDOWS = sys.platform == "win32"
 
-# 文件操作函数名称集合，用于安全检查
-_FILE_OP_FUNCTIONS = {
-    "open", "open_file", "file",
-    "__import__('os').open", "__import__('pathlib').Path",
-}
+# pathlib 对象上的写操作方法名
+_PATHLIB_WRITE_METHODS: frozenset[str] = frozenset({
+    "write_text", "write_bytes", "touch", "mkdir",
+    "rmdir", "unlink", "rename", "replace", "chmod", "lchmod", "link_to", "hardlink_to",
+})
+# os.* 中第一参数为路径的写/删操作函数名
+_OS_WRITE_FUNCS: frozenset[str] = frozenset({
+    "remove", "unlink", "mkdir", "makedirs", "rmdir", "removedirs",
+    "rename", "renames", "replace", "truncate", "chmod", "lchmod",
+    "chown", "lchown", "link", "symlink",
+})
+# 一律视为"写路径无法静态确定"的危险调用（shell/子进程/动态执行都能写任意文件）
+_ALWAYS_DYNAMIC_CALLS: frozenset[str] = frozenset({
+    "os.system", "os.popen", "os.startfile",
+    "subprocess.run", "subprocess.call", "subprocess.check_call",
+    "subprocess.check_output", "subprocess.Popen", "subprocess.getoutput",
+    "subprocess.getstatusoutput", "os.execv", "os.execve", "os.spawnl",
+    "exec", "eval", "compile", "__import__",
+    "pickle.loads", "marshal.loads", "os.fdopen",
+})
 
-# 文件操作模式匹配正则表达式，用于检测代码中的文件路径
-_FILE_OP_PATTERNS = [
-    # 匹配 open("path") 或 open('path')
-    re.compile(r'\bopen\s*\(\s*["\']([^"\']+)["\']'),
-    # 匹配 Path("path") 或 Path('path')
-    re.compile(r'\bPath\s*\(\s*["\']([^"\']+)["\']'),
-    # 匹配 os.path.*("path")
-    re.compile(r'\bos\.path\.\w+\s*\(\s*["\']([^"\']+)["\']'),
-    # 匹配 os.mkdir, os.makedirs, os.rmdir, os.remove, os.unlink, os.rename
-    re.compile(r'\bos\.(?:mkdir|makedirs|rmdir|remove|unlink|rename)\s*\(\s*["\']([^"\']+)["\']'),
-]
+
+# 把 ast.Call 的 func 节点还原为点号名字（如 os.path.join / Path / builtins.open）
+def _call_dotted_name(func: ast.expr) -> str:
+    parts: list[str] = []
+    node: ast.expr = func
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if isinstance(node, ast.Name):
+        parts.append(node.id)
+    return ".".join(reversed(parts))
+
+
+# 提取字符串常量参数（f-string/拼接等非纯字面量一律返回 None，交由调用方按动态处理）
+def _const_str(node: ast.expr | None) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return None
+
+
+# AST 静态分析代码中的文件写操作，返回 (可静态确定的写路径列表, 是否存在无法静态确定的写操作)
+def analyze_python_writes(code: str) -> tuple[list[str], bool]:
+    """
+    替换旧的"正则扫字面量"方案：f-string / 字符串拼接 / Path.home() 都能绕过正则，
+    但绕不过 AST。写路径能解析为字符串常量 → 交给沙箱 validate_path 硬校验；
+    解析不出常量（动态路径）→ has_dynamic=True，权限层据此强制 ASK（fail-closed）。
+    覆盖：open(path,mode含wax+) / Path(x).write_text 等 pathlib 写方法 /
+    os.remove/mkdir/rename 等 / shutil.* / os.system、subprocess.*、exec/eval（直接计为动态写）。
+    代码语法错误无法分析时按 (空, True) 返回，即要求人工确认。
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        # 连语法都过不了，无法验证任何写操作 → fail-closed 要求确认
+        return [], True
+
+    static_paths: list[str] = []
+    has_dynamic = False
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        name = _call_dotted_name(node.func)
+        short = name.rsplit(".", 1)[-1]
+
+        # ===== 1. open(path, mode) / io.open =====
+        if name in {"open", "io.open", "_io.open", "builtins.open"}:
+            path_arg = node.args[0] if node.args else None
+            mode_const = _const_str(node.args[1]) if len(node.args) > 1 else None
+            # mode 也可能以关键字传
+            for kw in node.keywords:
+                if kw.arg == "mode":
+                    mode_const = _const_str(kw.value)
+            mode = mode_const if mode_const is not None else "r"
+            is_write = any(c in mode for c in "wax+")
+            if is_write:
+                lit = _const_str(path_arg)
+                if lit is not None:
+                    static_paths.append(lit)
+                else:
+                    # 写模式但路径非常量（变量/f-string/拼接）→ 动态写
+                    has_dynamic = True
+            elif mode_const is None:
+                # mode 本身无法确定，保守按写处理（可能含 w/a/x/+）
+                lit = _const_str(path_arg)
+                if lit is not None:
+                    static_paths.append(lit)
+                else:
+                    has_dynamic = True
+            continue
+
+        # ===== 2. os.remove/mkdir/rename ... =====
+        # 必须先于 pathlib 分支：rename/replace/unlink/chmod 等名字两边重叠，
+        # os.rename('a','b') 的短名会先命中 pathlib 集合导致接收者判断错误降级为动态
+        if name.startswith("os.") and short in _OS_WRITE_FUNCS:
+            lit = _const_str(node.args[0]) if node.args else None
+            # rename/replace 还要看目标路径
+            dst_lit = _const_str(node.args[1]) if len(node.args) > 1 else None
+            needs_dst = short in {"rename", "replace", "link", "symlink"}
+            if lit is not None and (not needs_dst or dst_lit is not None):
+                static_paths.append(lit)
+                if dst_lit is not None and needs_dst:
+                    static_paths.append(dst_lit)
+            else:
+                has_dynamic = True
+            continue
+
+        # ===== 3. Path(x).write_text / mkdir / touch ... =====
+        if short in _PATHLIB_WRITE_METHODS:
+            recv = node.func
+            # 接收者需是 Path("字面量") 或 Path("字面量")/子路径；否则无法静态确定
+            inner: ast.expr | None = None
+            if isinstance(recv, ast.Attribute) and isinstance(recv.value, ast.Call):
+                base_call = recv.value
+                base_name = _call_dotted_name(base_call.func).rsplit(".", 1)[-1]
+                if base_name in {"Path", "WindowsPath", "PosixPath"}:
+                    inner = base_call.args[0] if base_call.args else None
+            lit = _const_str(inner) if inner is not None else None
+            if lit is not None:
+                static_paths.append(lit)
+            else:
+                has_dynamic = True
+            continue
+
+        # ===== 4. shutil.copy/move/rmtree ... =====
+        if name.startswith("shutil."):
+            # 目标路径取最后一个位置参数；任何参数非常量都视为动态
+            args_consts = [_const_str(a) for a in node.args]
+            if args_consts and all(c is not None for c in args_consts):
+                static_paths.extend(str(c) for c in args_consts if c is not None)
+            else:
+                has_dynamic = True
+            continue
+
+        # ===== 5. 一律动态的危险调用 =====
+        if name in _ALWAYS_DYNAMIC_CALLS or short in {"system", "popen"}:
+            has_dynamic = True
+            continue
+
+    return static_paths, has_dynamic
 
 
 class RunPythonParams(BaseModel):
@@ -146,8 +271,8 @@ class RunPythonTool(BaseTool):
     提供安全隔离的 Python 代码执行能力，支持虚拟环境和依赖安装。
     
     **安全检查流程：**
-    1. 使用正则表达式扫描代码中的文件操作
-    2. 对检测到的文件路径进行沙箱验证
+    1. 使用 AST 静态分析扫描代码中的文件写操作
+    2. 对静态可确定的写路径进行沙箱验证（动态写由权限层强制 ASK）
     3. 检查 work_dir 和 venv_dir 是否包含路径遍历
     4. 验证 work_dir 是否在沙箱内
     
@@ -192,7 +317,8 @@ class RunPythonTool(BaseTool):
             },
             "timeout": {
                 "type": "integer",
-                "description": "Seconds before the process is killed (max 300). Default from tools.run_python_timeout_s config.",
+                "description": "Seconds before the process is killed (max 300). "
+                               "Default from tools.run_python_timeout_s config.",
             },
             "use_venv": {
                 "type": "boolean",
@@ -226,8 +352,8 @@ class RunPythonTool(BaseTool):
         """执行 Python 代码
 
         **安全检查阶段：**
-        1. 使用正则表达式扫描代码中的文件操作路径
-        2. 对每个检测到的路径调用 validate_path() 进行沙箱验证
+        1. AST 静态分析代码中的文件写操作（analyze_python_writes）
+        2. 对每个静态写路径调用 validate_path() 进行沙箱验证
         3. 检查 work_dir 是否包含路径遍历（".."）
         4. 验证 work_dir 是否在沙箱内
         5. 检查 work_dir 是否存在
@@ -262,20 +388,24 @@ class RunPythonTool(BaseTool):
         # 使用 pydantic 验证并转换参数
         p = RunPythonParams.model_validate(params)
 
-        # ========== 安全检查：扫描代码中的文件操作 ==========
-        # 遍历所有文件操作模式，检测代码中的文件路径
-        for pattern in _FILE_OP_PATTERNS:
-            for match in pattern.finditer(p.code):
-                file_path = match.group(1)
-                # 对检测到的路径进行沙箱验证
-                try:
-                    validate_path(file_path, "execute")
-                except PermissionError:
-                    return ToolResult(
-                        content=f"sandbox access denied: Python code attempts to access file outside sandbox: '{file_path}'",
-                        is_error=True,
-                        error_type="permission_denied",
-                    )
+        # ========== 安全检查：AST 分析代码中的文件写操作 ==========
+        # 静态可确定的写路径 → 沙箱硬校验（越界即拒绝）
+        # 无法静态确定写路径（动态写）→ 由权限层 sandbox_forces_ask 强制 ASK；
+        #   走到这里说明用户已批准（或无权限管理器的内部调用），工具层不再重复拦截
+        static_writes, _dynamic_writes = analyze_python_writes(p.code)
+        for file_path in static_writes:
+            # 对检测到的路径进行沙箱验证
+            try:
+                validate_path(file_path, "execute")
+            except PermissionError:
+                return ToolResult(
+                    content=(
+                        "sandbox access denied: Python code attempts to access "
+                        f"file outside sandbox: '{file_path}'"
+                    ),
+                    is_error=True,
+                    error_type="permission_denied",
+                )
 
         # ========== 安全检查：验证工作目录 ==========
         work_path: Path | None = None
@@ -386,7 +516,13 @@ class RunPythonTool(BaseTool):
                     else asyncio.subprocess.DEVNULL  # 丢弃
                 )
                 
-                # 创建子进程
+                # 创建子进程（Windows 下立即加入 Job Object，防孤儿进程树）
+                from iwan_claude.core.tools.job_object import (
+                    assign_process_to_job,
+                    close_job,
+                    create_process_job,
+                )
+                job = create_process_job()
                 try:
                     proc = await asyncio.create_subprocess_exec(
                         *argv,
@@ -396,6 +532,8 @@ class RunPythonTool(BaseTool):
                         cwd=proc_cwd,
                         env=_child_env(scrub_env(os.environ.copy()), venv_path),
                     )
+                    # 进程已创建，立即加入 Job（刚 spawn，逃逸窗口最小）
+                    assign_process_to_job(job, proc.pid)
                 except Exception as exc:
                     return ToolResult(
                         content=f"failed to spawn python subprocess: {exc}",
@@ -420,6 +558,9 @@ class RunPythonTool(BaseTool):
                         is_error=True,
                         error_type="timeout",
                     )
+                finally:
+                    # 关闭 Job 句柄：残余进程树（含超时后未死透的子孙）被 KILL_ON_JOB_CLOSE 清杀
+                    close_job(job)
             finally:
                 # 清理临时脚本文件
                 try:

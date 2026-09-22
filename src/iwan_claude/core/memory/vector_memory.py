@@ -16,8 +16,8 @@
 - Chunk：文档分块数据结构（复用为对话片段载体）
 
 【存储格式】
-向量数据存储在 MemoryVectorStore 中，持久化到 JSON 文件：
-~/.iwan_claude/memory/vector_memory.json
+向量数据存储在 MemoryVectorStore 中，持久化到目录：
+~/.iwan_claude/memory/vector_memory/（内含 chunks.json 与 vectors.json）
 
 【示例场景】
 1. 用户在第 3 次会话中问"怎么配置 RAG？"
@@ -31,7 +31,6 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
 
 from iwan_claude.core.rag.chunker import Chunk
 from iwan_claude.core.rag.embedding import EmbeddingProvider
@@ -66,7 +65,7 @@ class VectorMemory:
     vector_mem = VectorMemory(
         vector_store=MemoryVectorStore(),
         embedding_provider=embedder,
-        index_path=Path("~/.iwan_claude/memory/vector_memory.json"),
+        index_path=Path("~/.iwan_claude/memory/vector_memory"),
     )
     vector_mem.load()
 
@@ -273,4 +272,5 @@ class VectorMemory:
 
     def count(self) -> int:
         """返回存储的对话片段数量"""
-        return len(self._store._chunks)
+        # 走 store 的公开 size() 接口，不再伸手 _chunks 私有成员
+        return self._store.size()

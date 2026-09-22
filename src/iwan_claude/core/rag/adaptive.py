@@ -34,6 +34,7 @@ LLM 分类失败时，降级为 RAG（最通用的策略）。
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 from iwan_claude.core.rag.chunker import Chunk
 from iwan_claude.core.rag.index import KnowledgeIndexManager
@@ -103,24 +104,34 @@ class AdaptiveRetriever:
         self,
         index_manager: KnowledgeIndexManager,
         llm_client: LLMClient | None = None,
+        *,
+        enable_rerank: bool = True,
     ) -> None:
         """
         初始化自适应检索器
 
         【参数说明】
         - index_manager: KnowledgeIndexManager - 知识索引管理器
-        - llm_client: LLMClient | None - LLM 客户端（可选）
+        - llm_client: LLM 客户端（可选）
             用于查询分类。传入 None 时所有查询都走 RAG。
+        - enable_rerank: bool - 是否启用 LLM 重排（默认 True 保持旧行为）
+            【设计】rerank 每次检索多花一整轮 LLM 调用且时延最高，
+            收益（精排 top_k 条）未必抵得过成本——留给 [rag] rerank_enabled 关掉。
 
         【字段说明】
         - _index_manager: 知识索引管理器
         - _llm_client: LLM 客户端（可选）
+        - _enable_rerank: 是否启用 LLM 重排
         """
         self._index_manager = index_manager
         self._llm_client = llm_client
+        self._enable_rerank = enable_rerank
 
     async def retrieve(
-        self, query: str, top_k: int = 5
+        self,
+        query: str,
+        top_k: int = 5,
+        filters: dict[str, Any] | None = None,
     ) -> RetrievalResult:
         """
         自适应检索 - 分类查询并路由到最优策略，含 CRAG 质量修正
@@ -128,6 +139,8 @@ class AdaptiveRetriever:
         【参数说明】
         - query: str - 用户查询
         - top_k: int - 返回前 K 个结果（默认 5）
+        - filters: dict[str, Any] | None - 过滤器（source_path/symbol），
+            透传到检索的三条腿。工具层的 filters 参数此前只被忽略
 
         【返回值】
         - RetrievalResult: 检索结果（包含策略信息和 chunk 列表）
@@ -174,12 +187,12 @@ class AdaptiveRetriever:
                 quality="unknown",
             )
         elif query_type == "grep":
-            # 精确查找：用关键词搜索
-            chunks = await self._index_manager._vector_store.search_by_text(
-                query, top_k=top_k
+            # 精确查找：用关键词搜索（走 manager 公开口，不再伸手私有成员）
+            chunks = await self._index_manager.keyword_search(
+                query, top_k=top_k, filters=filters
             )
             # 附带父级上下文
-            await self._index_manager._enrich_with_parent_context(chunks)
+            await self._index_manager.enrich_with_parent_context(chunks)
             return RetrievalResult(
                 strategy="grep",
                 query_type="grep",
@@ -188,7 +201,9 @@ class AdaptiveRetriever:
             )
         else:
             # 语义检索：使用 hybrid_search（含 LLM 查询重写 + Parent-Child）
-            chunks = await self._index_manager.hybrid_search(query, top_k=top_k)
+            chunks = await self._index_manager.hybrid_search(
+                query, top_k=top_k, filters=filters
+            )
 
             # CRAG 质量评估
             quality = self._evaluate_quality(chunks)
@@ -200,17 +215,17 @@ class AdaptiveRetriever:
                 strategy = "rag"
             elif quality == "ambiguous" and self._llm_client:
                 # 中等置信：改写查询重新检索，取最优结果
-                chunks = await self._rewrite_and_research(query, chunks, top_k)
+                chunks = await self._rewrite_and_research(query, chunks, top_k, filters)
                 strategy = "crag_rewrite"
                 quality = self._evaluate_quality(chunks)
                 rewritten = True
             else:
                 # 低置信：回退到 grep 关键词搜索
-                grep_chunks = await self._index_manager._vector_store.search_by_text(
-                    query, top_k=top_k
+                grep_chunks = await self._index_manager.keyword_search(
+                    query, top_k=top_k, filters=filters
                 )
                 if grep_chunks:
-                    await self._index_manager._enrich_with_parent_context(grep_chunks)
+                    await self._index_manager.enrich_with_parent_context(grep_chunks)
                     chunks = grep_chunks
                     strategy = "crag_fallback_grep"
                     quality = "incorrect"
@@ -220,7 +235,7 @@ class AdaptiveRetriever:
             # Reranking：如果有 LLM 且有结果，用 LLM 重排序
             # Reranking 在 CRAG 修正之后执行，对最终返回的结果做精排
             reranked = False
-            if self._llm_client and chunks:
+            if self._enable_rerank and self._llm_client and chunks:
                 chunks = await self._llm_client.rerank(query, chunks, top_k=top_k)
                 reranked = True
 
@@ -249,10 +264,13 @@ class AdaptiveRetriever:
             - "incorrect": 低置信（top_score < 0.3），回退 grep
 
         【评分标准】
-        基于检索结果的最高分数（hybrid_search 的综合分数）：
-        - 分数 >= 0.6：语义和关键词都高度匹配，结果可信
+        优先取 chunk.metadata["semantic_score"]（hybrid_search 携带的原始语义分），
+        缺失时退回综合分数：
+        - 分数 >= 0.6：语义高度匹配，结果可信
         - 分数 0.3~0.6：部分匹配，可能需要改写查询
         - 分数 < 0.3：匹配度低，RAG 可能找错了方向
+        【设计】CRAG 阈值（0.6/0.3）在语义上是对"相似度"的断言；
+        用混合分评估会让关键词加分虚高置信度，把"没找到"误判为"很可靠"
 
         【设计目的】
         避免 low-quality 检索结果误导 LLM 生成。
@@ -260,7 +278,7 @@ class AdaptiveRetriever:
         """
         if not results:
             return "incorrect"
-        top_score = results[0][1]
+        top_score = self._quality_score(results[0])
         if top_score >= 0.6:
             return "correct"
         elif top_score >= 0.3:
@@ -273,6 +291,7 @@ class AdaptiveRetriever:
         query: str,
         original_chunks: list[tuple[Chunk, float]],
         top_k: int,
+        filters: dict[str, Any] | None = None,
     ) -> list[tuple[Chunk, float]]:
         """
         改写查询并重新检索（CRAG ambiguous 修正）
@@ -281,6 +300,7 @@ class AdaptiveRetriever:
         - query: str - 原始查询
         - original_chunks: list[tuple[Chunk, float]] - 原始检索结果
         - top_k: int - 返回前 K 个结果
+        - filters: dict[str, Any] | None - 过滤器，透传给重新检索
 
         【返回值】
         - list[tuple[Chunk, float]]: 最优检索结果（原始或改写后取最好的）
@@ -300,18 +320,29 @@ class AdaptiveRetriever:
         # 用 LLM 生成查询变体
         rewritten_queries = await self._llm_client.rewrite_query(query)
 
-        # 保留原始结果作为基准
+        # 保留原始结果作为基准（与质量评估同口径：优先原始语义分）
         best_chunks = original_chunks
-        best_score = original_chunks[0][1] if original_chunks else 0.0
+        best_score = self._quality_score(original_chunks[0]) if original_chunks else 0.0
 
         # 对每个变体执行检索，取最优结果
         for rq in rewritten_queries[1:]:  # 跳过原始查询
-            new_chunks = await self._index_manager.hybrid_search(rq, top_k=top_k)
-            if new_chunks and new_chunks[0][1] > best_score:
+            new_chunks = await self._index_manager.hybrid_search(
+                rq, top_k=top_k, filters=filters
+            )
+            if new_chunks and self._quality_score(new_chunks[0]) > best_score:
                 best_chunks = new_chunks
-                best_score = new_chunks[0][1]
+                best_score = self._quality_score(new_chunks[0])
 
         return best_chunks
+
+    @staticmethod
+    def _quality_score(pair: tuple[Chunk, float]) -> float:
+        """取单条结果的质量分：优先 metadata 携带的原始语义分，缺失退回综合分。"""
+        chunk, combined = pair
+        raw = chunk.metadata.get("semantic_score")
+        if isinstance(raw, (int, float)):
+            return float(raw)
+        return combined
 
     async def _classify_query(self, query: str) -> str:
         """

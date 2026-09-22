@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -56,6 +55,18 @@ class SpawnAgentParams(BaseModel):
     run_in_background: bool = False
     subagent_type: str = ""
     timeout_sec: float = Field(default=0.0, ge=0.0)
+
+
+@dataclass
+class _ChildHandle:
+    """prepare 出的子 Agent 全套材料：前台阻塞、后台直启、批量带闸启动三条路共用"""
+    run_id: str
+    loop: AgentLoop
+    context: ExecutionContext
+    bus: EventBus
+    run_path: Path
+    timeout: float
+    description: str
 
 
 class SpawnAgentTool(BaseTool):
@@ -118,32 +129,50 @@ class SpawnAgentTool(BaseTool):
         self._parent_run_id = parent_run_id
         self._permission_manager = permission_manager
         self._max_steps = max_steps
-        self._task_registry = task_registry if task_registry is not None else BackgroundTaskRegistry()
-        self._runs_dir = runs_dir if runs_dir is not None else Path.cwd()
+        self._task_registry = (
+            task_registry if task_registry is not None else BackgroundTaskRegistry()
+        )
+        # 【设计】runs_dir 不再默认 Path.cwd()——daemon 的 cwd 是服务目录，
+        # 静默把子 Agent 的 events.jsonl 写到那里等于把调试产物埋进没人看的路径；
+        # 缺参数就让它在构造期响亮失败
+        if runs_dir is None:
+            raise ValueError("SpawnAgentTool requires an explicit runs_dir")
+        self._runs_dir = runs_dir
         self._session_id = session_id
         self._llm_model_name = llm_model_name
         self._depth = depth
         self._batch_id = batch_id
 
-    # Spawn one subagent. This method is reused both by foreground/background modes and
-    # by SpawnAgentsTool when fanning out a batch.
-    async def invoke(self, params: dict[str, object]) -> ToolResult:
-        p = SpawnAgentParams.model_validate(params)
-
+    # 准备一个子 Agent（深度/角色/上下文/总线/循环/事件/目录），返回 (handle, None) 或 (None, 错误)
+    async def _prepare_child(
+        self, description: str, prompt: str, subagent_type: str, timeout_sec: float
+    ) -> tuple[_ChildHandle | None, ToolResult | None]:
         if self._depth >= 2:
-            return ToolResult(
+            return None, ToolResult(
                 content="Subagent nesting limit (2) reached; cannot spawn further subagents.",
                 is_error=True,
                 error_type="runtime_error",
             )
 
         profile: AgentProfile | None = None
-        if p.subagent_type:
+        if subagent_type:
             try:
-                profile = _profile_loader.load(p.subagent_type)
+                profile = _profile_loader.load(subagent_type)
             except Exception as exc:
-                return ToolResult(
-                    content=f"spawn_agent: unknown subagent_type={p.subagent_type}: {exc}",
+                return None, ToolResult(
+                    content=f"spawn_agent: unknown subagent_type={subagent_type}: {exc}",
+                    is_error=True,
+                    error_type="runtime_error",
+                )
+            if profile is None:
+                # loader 对"查无此 profile"返回 None 而不是 raise，旧代码的
+                # except 分支因此是死路：显式指定的角色被静默降级成默认角色，
+                # 模型以为子 Agent 带着 planner 系统提示词在跑，实际啥都没有
+                return None, ToolResult(
+                    content=(
+                        f"spawn_agent: unknown subagent_type={subagent_type} "
+                        "(no profile found or parse failed)"
+                    ),
                     is_error=True,
                     error_type="runtime_error",
                 )
@@ -151,7 +180,7 @@ class SpawnAgentTool(BaseTool):
         child_run_id = new_run_id()
         child_context = ExecutionContext(
             run_id=child_run_id,
-            goal=p.prompt,
+            goal=prompt,
             max_steps=self._max_steps,
             system_prompt_override=profile.system_prompt if profile else None,
         )
@@ -177,7 +206,7 @@ class SpawnAgentTool(BaseTool):
             SubagentStartedEvent(
                 run_id=child_run_id,
                 parent_run_id=self._parent_run_id,
-                description=p.description,
+                description=description,
                 ts=_now(),
             )
         )
@@ -185,70 +214,124 @@ class SpawnAgentTool(BaseTool):
         child_run_path = self._runs_dir / child_run_id
         child_run_path.mkdir(parents=True, exist_ok=True)
 
-        timeout = p.timeout_sec if p.timeout_sec > 0 else self._task_registry.default_timeout_sec
+        timeout = timeout_sec if timeout_sec > 0 else self._task_registry.default_timeout_sec
         if timeout <= 0:
             timeout = 600
 
+        return _ChildHandle(
+            run_id=child_run_id,
+            loop=child_loop,
+            context=child_context,
+            bus=child_bus,
+            run_path=child_run_path,
+            timeout=float(timeout),
+            description=description,
+        ), None
+
+    # 启动已 prepare 的后台任务并注册；gate 为并发闸（批量后台模式排队用）
+    def _start_background(
+        self, handle: _ChildHandle, *, gate: asyncio.Semaphore | None = None
+    ) -> asyncio.Task[None]:
+        task: asyncio.Task[None] = asyncio.create_task(
+            self._run_background_wrapped(
+                handle.loop,
+                handle.context,
+                handle.bus,
+                handle.run_path,
+                handle.run_id,
+                timeout=handle.timeout,
+                gate=gate,
+            )
+        )
+        self._task_registry.register(
+            handle.run_id,
+            task,
+            handle.context,
+            description=handle.description,
+            batch_id=self._batch_id,
+            run_dir=str(handle.run_path),
+        )
+        return task
+
+    # 供批量工具程序化启动后台子 Agent：返回 (run_id, 错误消息)，取代从展示文案里 parse "run_id="
+    async def spawn_background(
+        self,
+        *,
+        description: str,
+        prompt: str,
+        subagent_type: str = "",
+        timeout_sec: float = 0.0,
+        gate: asyncio.Semaphore | None = None,
+    ) -> tuple[str | None, str | None]:
+        handle, err = await self._prepare_child(description, prompt, subagent_type, timeout_sec)
+        if handle is None:
+            return None, (err.content if err is not None else "spawn failed")
+        self._start_background(handle, gate=gate)
+        return handle.run_id, None
+
+    # Spawn one subagent. This method is reused both by foreground/background modes and
+    # by SpawnAgentsTool via spawn_background().
+    async def invoke(self, params: dict[str, object]) -> ToolResult:
+        p = SpawnAgentParams.model_validate(params)
+
+        handle, err = await self._prepare_child(
+            p.description, p.prompt, p.subagent_type, p.timeout_sec
+        )
+        if handle is None:
+            assert err is not None
+            return err
+
         # ── background mode: fan out immediately ──────────────────────────
         if p.run_in_background:
-            task: asyncio.Task[None] = asyncio.create_task(
-                self._run_background_wrapped(
-                    child_loop,
-                    child_context,
-                    child_bus,
-                    child_run_path,
-                    child_run_id,
-                    timeout=timeout,
-                )
-            )
-            self._task_registry.register(
-                child_run_id,
-                task,
-                child_context,
-                description=p.description,
-                batch_id=self._batch_id,
-            )
+            self._start_background(handle)
             return ToolResult(
                 content=(
-                    f"Subagent started in background. run_id={child_run_id}. "
-                    f"Use agent_result(run_id='{child_run_id}') to retrieve result."
+                    f"Subagent started in background. run_id={handle.run_id}. "
+                    f"Use agent_result(run_id='{handle.run_id}') to retrieve result."
                 )
             )
 
         # ── foreground mode: block until done ─────────────────────────────
         try:
-            async with asyncio.timeout(timeout):
-                async with EventWriter(child_run_path / "events.jsonl") as writer:
-                    writer.subscribe(child_bus)
-                    await child_loop.run(child_context)
+            async with asyncio.timeout(handle.timeout):
+                async with EventWriter(handle.run_path / "events.jsonl") as writer:
+                    writer.subscribe(handle.bus)
+                    await handle.loop.run(handle.context)
         except TimeoutError:
-            child_context.status = "failed"
-            child_context.reason = f"timed out after {timeout}s"
-            child_context.result = child_context.result or f"Subagent timed out after {timeout}s"
+            handle.context.status = "failed"
+            handle.context.reason = f"timed out after {handle.timeout}s"
+            handle.context.result = handle.context.result or f"Subagent timed out after {handle.timeout}s"
+        except Exception as exc:
+            # 与后台包装器对称：循环裸异常转成 is_error 结果并照常发 Finished 事件，
+            # 不炸穿父循环、不留半个事件文件状态
+            handle.context.status = "failed"
+            handle.context.reason = f"exception: {exc}"
+            handle.context.result = handle.context.result or str(exc)
 
         await self._parent_bus.publish(
             SubagentFinishedEvent(
-                run_id=child_run_id,
+                run_id=handle.run_id,
                 parent_run_id=self._parent_run_id,
-                status=child_context.status,
+                status=handle.context.status,
                 ts=_now(),
             )
         )
 
-        if child_context.status == "success":
+        if handle.context.status == "success":
             return ToolResult(
-                content=child_context.result or "Subagent completed with no text output."
+                content=handle.context.result or "Subagent completed with no text output."
             )
         return ToolResult(
             content=(
-                child_context.result
-                or f"Subagent failed (status={child_context.status}, reason={child_context.reason})"
+                handle.context.result
+                or f"Subagent failed (status={handle.context.status}, reason={handle.context.reason})"
             ),
             is_error=True,
             error_type="runtime_error",
         )
 
-    # Background wrapper with timeout + mark_finished hook.
+    # Background wrapper with timeout + mark_finished hook; optional gate queues
+    # background-batch spawns behind a concurrency semaphore.
     async def _run_background_wrapped(
         self,
         loop: AgentLoop,
@@ -257,11 +340,17 @@ class SpawnAgentTool(BaseTool):
         run_path: Path,
         run_id: str,
         *,
-        timeout: int,
+        timeout: float,
+        gate: asyncio.Semaphore | None = None,
     ) -> None:
         try:
-            async with asyncio.timeout(timeout):
-                await self._run_background(loop, context, bus, run_path, run_id)
+            if gate is not None:
+                # 排队等待不计时：timeout 度量的是真正的 LLM 运行时长，
+                # 否则 max_concurrency 一限流，排队时间就会冒充超时把任务杀了
+                async with gate:
+                    await self._timed_run(loop, context, bus, run_path, run_id, timeout=timeout)
+            else:
+                await self._timed_run(loop, context, bus, run_path, run_id, timeout=timeout)
         except TimeoutError:
             try:
                 context.status = "failed"
@@ -321,6 +410,20 @@ class SpawnAgentTool(BaseTool):
                 self._task_registry.mark_finished(run_id)
             except Exception:
                 pass
+
+    # 超时控制的核心执行段（无闸/有闸两条路复用）
+    async def _timed_run(
+        self,
+        loop: AgentLoop,
+        context: ExecutionContext,
+        bus: EventBus,
+        run_path: Path,
+        run_id: str,
+        *,
+        timeout: float,
+    ) -> None:
+        async with asyncio.timeout(timeout):
+            await self._run_background(loop, context, bus, run_path, run_id)
 
     async def _run_background(
         self,
@@ -459,7 +562,15 @@ class AgentResultTool(BaseTool):
             )
         task, context = entry
         if not task.done():
-            return ToolResult(content="still running")
+            # 轮询结果带上运行时长与描述：模型据此判断"再等等"还是"该放弃了"，
+            # 只回 "still running" 会让它盲poll烧对话轮次
+            meta = self._task_registry.meta(p.run_id) or {}
+            created = meta.get("created_at")
+            seconds = (datetime.now(UTC) - created).total_seconds() if created else None
+            elapsed = f", elapsed {seconds:.0f}s" if seconds is not None else ""
+            desc = meta.get("description") or ""
+            desc_part = f", description={desc!r}" if desc else ""
+            return ToolResult(content=f"still running{elapsed}{desc_part}")
         if task.cancelled():
             return ToolResult(
                 content="Subagent was cancelled.", is_error=True, error_type="runtime_error"
@@ -500,9 +611,11 @@ class SpawnAgentsTool(BaseTool):
     name = "spawn_agents"
     description = (
         "Spawn MULTIPLE isolated sub-agents in parallel to handle a batch of independent tasks. "
-        "max_concurrency limits how many sub-agents run at once (prevents rate-limit 429). "
+        "max_concurrency limits how many sub-agents run at once in BOTH wait modes "
+        "(prevents rate-limit 429). "
         "wait=true blocks until all complete and returns aggregated results; "
-        "wait=false returns immediately with a batch_id; use batch_result to poll later."
+        "wait=false returns immediately with a batch_id (tasks queue on the concurrency "
+        "semaphore in the background); use batch_result to poll later."
     )
     input_schema: dict[str, Any] = {
         "type": "object",
@@ -609,29 +722,22 @@ class SpawnAgentsTool(BaseTool):
         failure_msg = ""
 
         if not p.wait:
-            # Background batch: register each task immediately (no concurrency cap on
-            # spawning — caller uses batch_result for ongoing polling).
+            # Background batch: 同样受 max_concurrency 约束——子任务在闸上排队、
+            # 排队时间不计入超时（见 _run_background_wrapped）。旧实现后台批不设闸，
+            # description 宣称防 429、N 个全量起飞时恰恰最疼。
+            sem = asyncio.Semaphore(p.max_concurrency)
             for task in p.tasks:
-                sub_params = {
-                    "description": task.description,
-                    "prompt": task.prompt,
-                    "run_in_background": True,
-                    "subagent_type": task.subagent_type,
-                    "timeout_sec": task.timeout_sec,
-                }
-                res = await per_task_tool.invoke(sub_params)
-                if res.is_error:
+                rid, err = await per_task_tool.spawn_background(
+                    description=task.description,
+                    prompt=task.prompt,
+                    subagent_type=task.subagent_type,
+                    timeout_sec=task.timeout_sec,
+                    gate=sem,
+                )
+                if err is not None or rid is None:
                     start_failed = True
-                    failure_msg = res.content
+                    failure_msg = err or "unknown start failure"
                     break
-                marker = "run_id="
-                start = res.content.find(marker)
-                if start == -1:
-                    start_failed = True
-                    failure_msg = f"unexpected background response: {res.content}"
-                    break
-                tail = res.content[start + len(marker) :]
-                rid = tail.split()[0].rstrip(".")
                 run_ids.append(rid)
 
             if start_failed:
@@ -656,34 +762,30 @@ class SpawnAgentsTool(BaseTool):
         # ── wait=true: use Semaphore to cap how many sub-agents run in parallel ──
         sem = asyncio.Semaphore(p.max_concurrency)
         cancelled_any: dict[str, bool] = {"v": False}
+        start_errors: list[str] = []
 
-        async def _run_one(i: int, task: SpawnAgentTask) -> tuple[int, str | None]:
+        async def _run_one(i: int, task: SpawnAgentTask) -> tuple[int, str | None, str | None]:
             """
             One per-task coroutine that:
               (1) holds semaphore for the ENTIRE sub-agent lifecycle (spawn+run),
                   so max_concurrency truly limits parallel-in-flight sub-agents.
               (2) registers the run_id into the shared list (ordered by input order).
-            Returns (index, extracted run_id or None on failure).
+            Returns (index, run_id or None on failure, failure reason or None).
             """
             async with sem:
                 if cancelled_any["v"]:
-                    return (i, None)
-                sub_params = {
-                    "description": task.description,
-                    "prompt": task.prompt,
-                    "run_in_background": True,
-                    "subagent_type": task.subagent_type,
-                    "timeout_sec": task.timeout_sec,
-                }
-                res = await per_task_tool.invoke(sub_params)
-                if res.is_error:
-                    return (i, None)
-                marker = "run_id="
-                pos = res.content.find(marker)
-                if pos == -1:
-                    return (i, None)
-                tail = res.content[pos + len(marker) :]
-                rid = tail.split()[0].rstrip(".")
+                    return (i, None, "skipped: batch aborted after sibling failure")
+                rid, err = await per_task_tool.spawn_background(
+                    description=task.description,
+                    prompt=task.prompt,
+                    subagent_type=task.subagent_type,
+                    timeout_sec=task.timeout_sec,
+                )
+                if err is not None or rid is None:
+                    # 任一任务起不来即拉闸：剩余还没开跑的兄弟直接跳过，
+                    # 不再"先起后杀"白烧已启动的
+                    cancelled_any["v"] = True
+                    return (i, None, err or "unknown start failure")
 
                 # Wait for actual sub-agent completion WHILE STILL holding the
                 # semaphore — this is what guarantees max_concurrency caps
@@ -693,9 +795,20 @@ class SpawnAgentsTool(BaseTool):
                     t, _ctx = entry
                     try:
                         await t
-                    except BaseException:
-                        pass
-                return (i, rid)
+                    except asyncio.CancelledError:
+                        # 分辨这个 CancelledError 是谁的：子任务 t 自己被取消
+                        # （cancel_agent 的正常结局，我们继续交付 rid）还是外部
+                        # 冲着本协程来的（超时/关闸）——后者必须原样上抛，
+                        # 旧实现 except BaseException: pass 会把两种混吞，
+                        # 违反 asyncio 取消契约，shutdown 时表现为"取消不掉"
+                        cur = asyncio.current_task()
+                        if t.cancelled() and (cur is None or cur.cancelling() == 0):
+                            pass
+                        else:
+                            raise
+                    except Exception:
+                        pass  # 任务内部异常经 context/batch_status 呈现，不拖垮 gather
+                return (i, rid, None)
 
         worker_coros = [_run_one(i, t) for i, t in enumerate(p.tasks)]
         try:
@@ -712,14 +825,9 @@ class SpawnAgentsTool(BaseTool):
             # still be in flight inside their spawned Task already registered.
             for rid in run_ids:
                 self._task_registry.cancel(rid, reason="batch wait timeout")
-            # Also scan registry for any registered run_ids belonging to this
-            # batch by checking parent_run_id/description heuristics not possible,
-            # so rely on the run_ids list we *did* collect so far plus cancel all
-            # tasks whose batch_id matches ours.
-            for already_rid in list(self._task_registry._tasks.keys()):
-                meta = self._task_registry._task_meta.get(already_rid, {})
-                if meta.get("batch_id") == batch_id:
-                    self._task_registry.cancel(already_rid, reason="batch wait timeout")
+            # 批次还没 register_batch，按注册元数据里的 batch_id 反查归属本批的任务收尸
+            for already_rid in self._task_registry.task_ids_in_batch(batch_id):
+                self._task_registry.cancel(already_rid, reason="batch wait timeout")
             return ToolResult(
                 content=(
                     f"spawn_agents: batch_id={batch_id} timed out after {p.wait_timeout_sec}s; "
@@ -735,10 +843,13 @@ class SpawnAgentsTool(BaseTool):
         for out in outcomes:
             if isinstance(out, BaseException) or not isinstance(out, tuple):
                 any_failed_start = True
+                start_errors.append(str(out))
                 continue
-            idx, rid = out
+            idx, rid, err = out
             if rid is None:
                 any_failed_start = True
+                if err:
+                    start_errors.append(err)
                 continue
             ordered.append((idx, rid))
         ordered.sort(key=lambda x: x[0])
@@ -747,10 +858,11 @@ class SpawnAgentsTool(BaseTool):
         if any_failed_start or len(run_ids) != len(p.tasks):
             for started in run_ids:
                 self._task_registry.cancel(started, reason="sibling failed to start")
+            reason = f" First failures: {'; '.join(start_errors[:3])}" if start_errors else ""
             return ToolResult(
                 content=(
                     f"spawn_agents: one or more tasks failed to start; "
-                    f"succeeded={len(run_ids)}/{len(p.tasks)}."
+                    f"succeeded={len(run_ids)}/{len(p.tasks)}.{reason}"
                 ),
                 is_error=True,
                 error_type="runtime_error",
@@ -800,6 +912,8 @@ def format_batch_status(status: BatchStatus, *, include_results: bool = True) ->
         snippet = ""
         if r.get("result"):
             text = str(r["result"])
+            # 【设计】200 字符截断是有意的：批量摘要写给模型看，全量结果
+            # 会让 N 个子 Agent 的长文本挤爆父上下文；要全文用 agent_result(run_id)
             snippet = text[:200].replace("\n", "\\n")
             if len(text) > 200:
                 snippet += "…"

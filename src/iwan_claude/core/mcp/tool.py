@@ -29,7 +29,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from iwan_claude.core.mcp.client import McpClient, McpServerUnavailableError, McpToolDef, McpToolError
+from iwan_claude.core.mcp.client import (
+    McpClient,
+    McpServerUnavailableError,
+    McpToolDef,
+    McpToolError,
+)
 from iwan_claude.core.tools.base import BaseTool, ToolResult
 
 
@@ -71,8 +76,10 @@ class McpTool(BaseTool):
         - tool_def: McpToolDef - MCP 工具定义（包含 name、description、input_schema）
 
         【工具命名规范】
-        工具名格式：{server_name}__{tool_name}
-        例如："database__query", "api__fetch"
+        工具名格式：mcp__{server_name}__{tool_name}（对齐 Claude Code 惯例）。
+        例如："mcp__database__query", "mcp__api__fetch"
+        mcp__ 命名空间的价值：权限规则可用 deny/ask 模式 `mcp__*` 一刀切管住
+        所有外部工具——没有统一前缀就没有"外部工具"这个可表达的概念。
 
         【设计目的】
         使用 server_name 作为前缀，防止不同 MCP Server 的工具名冲突。
@@ -87,7 +94,7 @@ class McpTool(BaseTool):
             input_schema={"type": "object", "properties": {"sql": {"type": "string"}}}
         )
         mcp_tool = McpTool(client, "database", tool_def)
-        # mcp_tool.name = "database__query"
+        # mcp_tool.name = "mcp__database__query"
         ```
         """
         # MCP 客户端（已连接到 Server）
@@ -96,8 +103,8 @@ class McpTool(BaseTool):
         self._server_name = server_name
         # MCP 工具定义
         self._tool_def = tool_def
-        # 工具名格式：{server_name}__{tool_name}（防止命名冲突）
-        self.name = f"{server_name}__{tool_def.name}"
+        # 工具名格式：mcp__{server_name}__{tool_name}（防冲突 + 可被 mcp__* 规则统一管控）
+        self.name = f"mcp__{server_name}__{tool_def.name}"
         # 工具描述（如果没有，使用默认描述）
         self.description = tool_def.description or f"MCP tool from {server_name}"
         # 输入参数 Schema（如果没有，使用空对象 Schema）
@@ -145,21 +152,25 @@ class McpTool(BaseTool):
             # 成功：返回 ToolResult
             return ToolResult(content=content)
         except McpServerUnavailableError as exc:
-            # MCP Server 不可用（连接失败、超时、断开）
+            # MCP Server 不可用：细分超时与断线两种语义——
+            # "timeout" 表示结果未知（副作用可能已发生），"server_offline" 表示连接已死；
+            # 模型对两者的正确反应不同（前者不能盲目重试，后者重试也没用）
+            is_timeout = "timeout" in str(exc).lower()
             return ToolResult(
                 content=f"mcp server '{self._server_name}' unavailable: {exc}",
                 is_error=True,
-                error_type="runtime_error",
+                error_type="timeout" if is_timeout else "server_offline",
             )
         except McpToolError as exc:
-            # MCP Server 返回应用层错误（连接正常，但工具调用失败）
+            # MCP Server 返回应用层错误（连接正常，但工具调用失败/isError）：
+            # 参数或业务问题，换个入参重试是合理的，用独立类型告知模型
             return ToolResult(
                 content=f"mcp tool '{self.name}' error: {exc}",
                 is_error=True,
-                error_type="runtime_error",
+                error_type="tool_error",
             )
         except Exception as exc:
-            # 其他未预期的错误
+            # 其他未预期的错误（包装层 bug 等），保持 runtime_error
             return ToolResult(
                 content=f"mcp tool '{self.name}' unexpected error: {exc}",
                 is_error=True,

@@ -14,13 +14,19 @@
 
 from __future__ import annotations
 
-import os
-import tempfile
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from iwan_claude.core.config import SandboxConfig
+from iwan_claude.core.permissions.policy import (
+    NETWORK_COMMAND_PATTERNS,
+    PermissionDecision,
+    evaluate,
+    matches_network_command,
+    matches_outside_cwd,
+)
 from iwan_claude.core.sandbox import (
     SandboxAccessError,
     SandboxManager,
@@ -29,18 +35,25 @@ from iwan_claude.core.sandbox import (
     scrub_env,
     validate_path,
 )
-from iwan_claude.core.permissions.policy import (
-    matches_outside_cwd,
-    matches_network_command,
-    NETWORK_COMMAND_PATTERNS,
-    PermissionDecision,
-    evaluate,
-)
-
 
 # ======================================================================
 # 辅助函数
 # ======================================================================
+
+
+@pytest.fixture(autouse=True)
+def reset_sandbox_state() -> Any:
+    # 功能：每个测试前后重置沙箱全局单例与 contextvar，消除测试间状态泄漏
+    # 设计：get_sandbox 优先级为 contextvar > session 表 > 全局默认；set_sandbox_root
+    #       在同步测试中会直接改动主线程 contextvar 并泄漏到后续测试，必须显式设回 None
+    import iwan_claude.core.sandbox as sb_module
+    sb_module._sandbox_manager = None
+    token = sb_module._active_sandbox.set(None)
+    sb_module._sandbox_by_session.clear()
+    yield
+    sb_module._active_sandbox.reset(token)
+    sb_module._sandbox_manager = None
+    sb_module._sandbox_by_session.clear()
 
 
 def _make_manager(
@@ -815,7 +828,7 @@ class TestAuditLog:
             audit_log=True,
             audit_log_path=str(audit_path),
         ))
-        from iwan_claude.core.audit import log_sandbox_block, log_env_scrub
+        from iwan_claude.core.audit import log_env_scrub, log_sandbox_block
         log_sandbox_block(tool="bash", reason="reason1")
         log_env_scrub(removed_keys=["KEY1"])
         log_sandbox_block(tool="bash", reason="reason2")
@@ -857,3 +870,105 @@ class TestAuditLog:
         content = audit_path.read_text(encoding="utf-8")
         assert "env_scrub" in content
         assert "ANTHROPIC_API_KEY" in content
+
+
+# ======================================================================
+# 会话级沙箱隔离 + 相对路径解析基准测试（per-session 竞态修复）
+# ======================================================================
+
+
+class TestSessionSandboxIsolation:
+    """测试 set_sandbox_root 的 per-session 隔离语义"""
+
+    # 功能：验证两个并发会话各自绑定沙箱根后互不覆盖，且全局默认根不受影响
+    # 设计：会话逻辑放入独立 asyncio.Task —— Task 创建时拷贝当前上下文，
+    #       contextvar.set 只作用于本 Task 树，这正是生产环境 socket_server
+    #       "每条命令一个 Task" 的真实并发模型；交错 sleep 确保无先后顺序依赖；
+    #       最后断言 gather 之后任务外 get_sandbox() 仍返回全局根（未被会话覆写）
+    async def test_concurrent_sessions_do_not_overwrite(self, tmp_path: Path) -> None:
+        import asyncio
+
+        from iwan_claude.core.sandbox import (
+            peek_session_sandbox,
+            remove_session_sandbox,
+            set_sandbox_root,
+        )
+
+        global_root = tmp_path / "global"
+        global_root.mkdir()
+        init_sandbox(SandboxConfig(enabled=True, root=str(global_root)))
+
+        root_a = tmp_path / "sessionA"
+        root_b = tmp_path / "sessionB"
+
+        async def _session(new_root: Path, sid: str) -> tuple[Path, Path]:
+            set_sandbox_root(new_root, session_id=sid)
+            await asyncio.sleep(0)  # 交错点：另一会话已完成覆写的时机
+            resolved = validate_path("data.txt", "write")
+            return get_sandbox().root, resolved
+
+        (seen_a, file_a), (seen_b, file_b) = await asyncio.gather(
+            asyncio.create_task(_session(root_a, "sA")),
+            asyncio.create_task(_session(root_b, "sB")),
+        )
+
+        # 各自解析到自己的根，文件路径落在各自目录
+        assert seen_a == root_a.resolve()
+        assert seen_b == root_b.resolve()
+        assert file_a == root_a / "data.txt"
+        assert file_b == root_b / "data.txt"
+
+        # 全局默认沙箱未被任何会话覆写（旧实现里后写者会踩掉先写者）
+        assert get_sandbox().root == global_root.resolve()
+
+        # session 键控表可显式查询，remove 后清理
+        peeked = peek_session_sandbox("sA")
+        assert peeked is not None and peeked.root == root_a.resolve()
+        remove_session_sandbox("sA")
+        assert peek_session_sandbox("sA") is None
+
+    # 功能：验证未绑定 contextvar 时 get_sandbox(session_id) 从键控表回退取会话沙箱
+    # 设计：模拟"另一执行上下文按 ID 访问会话沙箱"的场景——在新 Task 之外先清掉
+    #       contextvar 泄漏面（键控表是显式路径），断言优先级 dict 生效
+    async def test_get_sandbox_by_session_id(self, tmp_path: Path) -> None:
+        import asyncio
+
+        from iwan_claude.core.sandbox import set_sandbox_root
+
+        global_root = tmp_path / "g"
+        global_root.mkdir()
+        init_sandbox(SandboxConfig(enabled=True, root=str(global_root)))
+        sess_root = tmp_path / "s"
+
+        # 在独立 Task 内绑定会话（contextvar 只进该 Task），键控表则全局可见
+        await asyncio.create_task(_bind_session(sess_root, "sid-42", set_sandbox_root))
+
+        sb = get_sandbox(session_id="sid-42")
+        assert sb.root == sess_root.resolve()
+
+    # 功能：验证模块级 validate_path 的相对路径按沙箱根解析、而非进程 CWD
+    # 设计：monkeypatch.chdir 把 CWD 移到沙箱外，若仍按 CWD 解析则 "notes.txt"
+    #       会解析到沙箱外并被放行（旧行为与 bash 工具的 cwd=sandbox.root 语义分裂）；
+    #       修复后应落回沙箱根内；同时 "../" 逃逸必须仍被拒绝
+    def test_relative_path_resolves_against_sandbox_root(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = tmp_path / "proj"
+        root.mkdir()
+        outside = tmp_path / "elsewhere"
+        outside.mkdir()
+        monkeypatch.chdir(outside)  # CWD 故意在沙箱外
+        init_sandbox(SandboxConfig(enabled=True, root=str(root)))
+
+        resolved = validate_path("notes.txt", "write")
+        assert resolved == (root / "notes.txt").resolve()
+
+        # 逃逸性相对路径仍被拒绝（解析基准改成 root 不放松边界）
+        with pytest.raises(SandboxAccessError):
+            validate_path("../escape.txt", "write")
+
+
+# 协程辅助：在独立 asyncio Task 中绑定会话沙箱（contextvar 不外泄到调用方上下文）
+async def _bind_session(root: Path, sid: str, setter: object) -> None:
+    assert callable(setter)
+    setter(root, session_id=sid)  # type: ignore[operator]

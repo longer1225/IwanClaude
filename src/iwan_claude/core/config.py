@@ -84,25 +84,41 @@ class AgentConfig:
     
     属性：
         max_steps: Agent 执行的最大步骤数（防止无限循环）
-        engine: Agent 引擎类型（legacy / langgraph / plan_execute / debate / pipeline）
+        engine: Agent 引擎类型（legacy / langgraph / plan_execute / debate / pipeline / auto）
             - legacy: 简单循环实现（AgentLoop）
             - langgraph: LangGraph ReAct 引擎（chat→tools 循环）
             - plan_execute: LangGraph Plan & Execute 引擎（先规划再执行再反思）
             - debate: LangGraph Worker-Critic 辩论引擎（worker 回答 → critic 审查 → 改进循环）
             - pipeline: LangGraph 三角色流水线引擎（planner 规划 → executor 执行 → reviewer 审查）
-        checkpoint_backend: 检查点存储后端（none, memory, sqlite）
-        checkpoint_db_path: SQLite 检查点数据库路径
+        checkpoint_backend: 检查点后端（none, memory, sqlite）；默认 memory，回溯开箱可用
+        checkpoint_db_path: SQLite 检查点库路径；相对路径锚定会话根父目录
+        checkpoint_keep_last: 每 thread 保留 checkpoint 数上限（超出裁剪），<=0 关闭裁剪
         auto_mode: 自动模式（off / read_only / on）
         effort_level: 努力等级（minimal / low / medium / high / max）
         model_preset: 模型预设（fast / balanced / powerful）
     """
     max_steps: int = _DEFAULT_MAX_STEPS
     engine: str = "legacy"
-    checkpoint_backend: str = "none"  # "none" | "memory" | "sqlite"
-    checkpoint_db_path: str = ".iwan/checkpoints.db"
+    checkpoint_backend: str = "memory"  # "none" | "memory" | "sqlite"
+    checkpoint_db_path: str = "checkpoints.db"
+    checkpoint_keep_last: int = 50
     auto_mode: str = _DEFAULT_AUTO_MODE  # "off" | "read_only" | "on"
     effort_level: str = _DEFAULT_EFFORT_LEVEL  # "minimal" | "low" | "medium" | "high" | "max"
     model_preset: str = _DEFAULT_MODEL_PRESET  # "fast" | "balanced" | "powerful"
+
+
+# 解析 sqlite checkpoint 数据库路径：相对路径锚定会话根父级，避免懒启动 cwd 漂移
+def resolve_checkpoint_db_path(agent: AgentConfig) -> Path:
+    p = Path(agent.checkpoint_db_path)
+    if p.is_absolute():
+        return p
+    sessions_root = Path(os.environ.get("IWAN_SESSIONS_DIR", "~/.iwan/sessions")).expanduser()
+    return sessions_root.parent / p
+
+
+# 解析会话根目录：影子快照/信任/回放等多处共用，保持与 daemon 同一环境语义
+def resolve_sessions_root() -> Path:
+    return Path(os.environ.get("IWAN_SESSIONS_DIR", "~/.iwan/sessions")).expanduser()
 
 
 @dataclass
@@ -172,11 +188,23 @@ class TraceConfig:
 class PermissionConfig:
     """
     权限配置类 - 对应 [permission] section
-    
+
     属性：
         timeout_s: 权限审批超时时间（秒），0 表示不超时
+        mode: 会话默认权限模式（五态：default/acceptEdits/plan/auto/
+            bypassPermissions；对齐 Claude Code，语义矩阵见设计文档）
+        deny/ask/allow: 声明式规则（对齐 Claude Code 的 deny→ask→allow 序），
+            形如 "bash" 或 "bash(git status:*)"；空列表 = 关闭规则引擎
+        trust_file: 项目信任决定持久化路径（S9 Layer 0；与 policy.toml 平级）
+        trust_inherit: 子目录是否继承祖先目录的信任决定（false = 仅精确匹配）
     """
     timeout_s: float = 60.0  # 审批超时秒数；0 表示不超时
+    mode: str = "default"    # 五态权限模式的 daemon 默认值
+    deny: list[str] = field(default_factory=list)
+    ask: list[str] = field(default_factory=list)
+    allow: list[str] = field(default_factory=list)
+    trust_file: str = "~/.iwan/trust.toml"
+    trust_inherit: bool = True
 
 
 @dataclass
@@ -210,6 +238,7 @@ class McpServerConfig:
         env: 额外的环境变量
         host: tcp 模式下的主机地址
         port: tcp 模式下的端口号
+        timeout_sec: 单次读取该 server 响应的超时秒数（慢工具需调大）
     """
     name: str
     transport: str = "stdio"       # "stdio" | "tcp"
@@ -218,6 +247,7 @@ class McpServerConfig:
     env: dict[str, str] = field(default_factory=dict)
     host: str = "localhost"        # tcp 专用
     port: int = 3000               # tcp 专用
+    timeout_sec: float = 30.0      # 读响应超时（initialize/tools/list/tools/call 共用）
 
 
 @dataclass
@@ -331,6 +361,12 @@ class SandboxConfig:
     audit_log: bool = True
     audit_log_path: str = ".iwan/audit.log"
 
+    # ===== S9 文件影子快照（ShadowStore，支撑回滚）=====
+    # 是否对写类工具启用修改前快照（存于会话目录内，绝不写用户仓库）
+    shadow_enabled: bool = True
+    # 单文件快照上限；超限只记账"未捕获"不落盘（防大文件撑爆会话目录）
+    shadow_max_file_bytes: int = 5 * 1024 * 1024
+
 
 @dataclass
 class RagConfig:
@@ -349,6 +385,8 @@ class RagConfig:
         chunk_overlap: 分块重叠大小（字符数）
         top_k: 检索时返回的最相关文档数
         index_path: 向量索引存储路径
+        rerank_enabled: 自适应检索是否启用 LLM 重排（每次检索多一轮 LLM 调用，
+            默认 True 保持旧行为；追求时延/成本可关掉，仅影响精排不影响召回）
     """
     enabled: bool = False
     embedding_model: str = "text-embedding-v3"  # 通义 dashscope embedding 模型（DeepSeek 不提供 embedding 端点）
@@ -358,6 +396,7 @@ class RagConfig:
     chunk_overlap: int = 64
     top_k: int = 5
     index_path: str = ".iwan/rag_index"
+    rerank_enabled: bool = True
 
 
 @dataclass
@@ -465,6 +504,9 @@ class IwanConfig:
     sandbox: SandboxConfig = field(default_factory=SandboxConfig)
     rag: RagConfig = field(default_factory=RagConfig)
     tools: ToolsConfig = field(default_factory=ToolsConfig)
+    # [[hooks]] 原样条目（array of tables）；启动期已经 parse_hook_entries 校验，
+    # app 层再解析成 HookSpec 构建 HookRegistry——配置层不 import 执行层类型
+    hooks: list[dict[str, Any]] = field(default_factory=list)
 
 
 # 构建并返回运行时配置：默认值 → 全局 TOML → 项目本地 TOML → .env → 系统环境变量（后者优先级最高）
@@ -535,7 +577,12 @@ def get_config() -> IwanConfig:
 
 # 将已解析的 TOML 根表写入 config；未知小节或类型错误时退出进程
 def _apply_toml(config: IwanConfig, data: dict[str, Any]) -> None:
-    unknown = set(data.keys()) - {"core", "logging", "agent", "llm", "trace", "permission", "compaction", "mcp", "sandbox", "rag", "tools"}
+    # 已知顶层小节（写成常量集合便于换行审查；未知小节 = 笔误，当场退出）
+    known_sections = {
+        "core", "logging", "agent", "llm", "trace", "permission",
+        "compaction", "mcp", "sandbox", "rag", "tools", "hooks",
+    }
+    unknown = set(data.keys()) - known_sections
     if unknown:
         raise SystemExit(f"Unknown top-level config keys: {', '.join(sorted(unknown))}")
 
@@ -578,6 +625,7 @@ def _apply_toml(config: IwanConfig, data: dict[str, Any]) -> None:
         unknown_agent: set[str] = set(agent.keys()) - {
             "max_steps", "auto_mode", "effort_level", "model_preset",
             "engine", "checkpoint_backend", "checkpoint_db_path",
+            "checkpoint_keep_last",
         }
         if unknown_agent:
             raise SystemExit(f"Unknown [agent] keys: {', '.join(sorted(unknown_agent))}")
@@ -603,7 +651,7 @@ def _apply_toml(config: IwanConfig, data: dict[str, Any]) -> None:
             config.agent.model_preset = val
         if "engine" in agent:
             val = agent["engine"]
-            valid_engines = ("legacy", "langgraph", "plan_execute", "debate", "pipeline")
+            valid_engines = ("legacy", "langgraph", "plan_execute", "debate", "pipeline", "auto")
             if not isinstance(val, str) or val not in valid_engines:
                 raise SystemExit(f"Config error: agent.engine must be one of {valid_engines}")
             config.agent.engine = val
@@ -617,6 +665,15 @@ def _apply_toml(config: IwanConfig, data: dict[str, Any]) -> None:
             if not isinstance(val, str):
                 raise SystemExit("Config error: agent.checkpoint_db_path must be a string")
             config.agent.checkpoint_db_path = val
+        if "checkpoint_keep_last" in agent:
+            val = agent["checkpoint_keep_last"]
+            # bool 是 int 子类：显式挡掉 True/False 当数字用的错配
+            if not isinstance(val, int) or isinstance(val, bool):
+                raise SystemExit(
+                    "Config error: agent.checkpoint_keep_last must be an integer"
+                    " (<=0 disables pruning)"
+                )
+            config.agent.checkpoint_keep_last = val
 
     if "llm" in data:
         llm = data["llm"]
@@ -696,14 +753,68 @@ def _apply_toml(config: IwanConfig, data: dict[str, Any]) -> None:
         perm = data["permission"]
         if not isinstance(perm, dict):
             raise SystemExit("Config error: [permission] must be a table")
-        unknown_perm: set[str] = set(perm.keys()) - {"timeout_s"}
+        unknown_perm: set[str] = set(perm.keys()) - {
+            "timeout_s", "mode", "deny", "ask", "allow", "trust_file", "trust_inherit",
+        }
         if unknown_perm:
             raise SystemExit(f"Unknown [permission] keys: {', '.join(sorted(unknown_perm))}")
+        if "trust_file" in perm:
+            val = perm["trust_file"]
+            if not isinstance(val, str) or not val:
+                raise SystemExit("Config error: permission.trust_file must be a non-empty string")
+            config.permission.trust_file = val
+        if "trust_inherit" in perm:
+            val = perm["trust_inherit"]
+            if not isinstance(val, bool):
+                raise SystemExit("Config error: permission.trust_inherit must be a boolean")
+            config.permission.trust_inherit = val
+        if "mode" in perm:
+            val = perm["mode"]
+            # 函数内 import：permissions→policy→sandbox→config 有回边，顶层 import 成环；
+            # 且这是唯一事实来源——两处维护五态枚举迟早漂移
+            from iwan_claude.core.permissions.manager import PERMISSION_MODES
+            if not isinstance(val, str) or val not in PERMISSION_MODES:
+                raise SystemExit(
+                    f"Config error: permission.mode must be one of "
+                    f"{', '.join(PERMISSION_MODES)}, got: {val!r}"
+                )
+            config.permission.mode = val
         if "timeout_s" in perm:
             val = perm["timeout_s"]
             if not isinstance(val, (int, float)) or val < 0:
                 raise SystemExit("Config error: permission.timeout_s must be a non-negative number")
             config.permission.timeout_s = float(val)
+        # 声明式规则在启动期逐条 parse——规则笔误要当场炸，不能静默不生效
+        # （函数内 import：permissions→policy→sandbox→config 存在回边，顶层 import 会成环）
+        from iwan_claude.core.permissions.rules import parse_rule
+        for kind in ("deny", "ask", "allow"):
+            if kind in perm:
+                raw_list = perm[kind]
+                if not isinstance(raw_list, list) or not all(isinstance(x, str) for x in raw_list):
+                    raise SystemExit(f"Config error: permission.{kind} must be a list of strings")
+                for entry in raw_list:
+                    try:
+                        tool_part, _ = parse_rule(entry)
+                    except ValueError as exc:
+                        raise SystemExit(f"Config error: permission.{kind} — {exc}") from exc
+                    # 宽 allow 当场拒绝（官方是跳过+告警，我们更严：静默不生效的
+                    # 安全配置和用户配置写错一样危险）：免批范围必须逐个点名
+                    if kind == "allow" and "*" in tool_part:
+                        raise SystemExit(
+                            f"Config error: permission.allow — 工具名通配 {entry!r} 不允许"
+                            "出现在 allow（对齐官方：allow 必须精确点名，通配只可用于 deny/ask）"
+                        )
+                setattr(config.permission, kind, list(raw_list))
+
+    if "hooks" in data:
+        # [[hooks]] 在启动期全量校验（event 枚举/matcher/argv 拆分/timeout）：
+        # hook 是审批守卫，静默丢掉一条坏配置比拒绝启动危险——与 permission 同哲学
+        from iwan_claude.core.hooks.spec import parse_hook_entries
+        try:
+            parse_hook_entries(data["hooks"])
+        except ValueError as exc:
+            raise SystemExit(f"Config error: {exc}") from exc
+        config.hooks = [dict(e) for e in data["hooks"] if isinstance(e, dict)]
 
     if "compaction" in data:
         comp = data["compaction"]
@@ -738,12 +849,28 @@ def _apply_toml(config: IwanConfig, data: dict[str, Any]) -> None:
         servers_raw = mcp.get("servers", [])
         if not isinstance(servers_raw, list):
             raise SystemExit("Config error: mcp.servers must be an array of tables")
+        # 重名提前拦截：_clients 按 name 索引，重名会让后连的覆盖先连的并泄漏孤儿连接
+        _seen_mcp_names: set[str] = set()
         for i, srv in enumerate(servers_raw):
             if not isinstance(srv, dict):
                 raise SystemExit(f"Config error: mcp.servers[{i}] must be a table")
+            # server 表内部的未知键同样硬失败：拼错的配置项静默忽略=带着错觉上线
+            _srv_allowed = {
+                "name", "transport", "command", "args",
+                "env", "host", "port", "timeout_sec",
+            }
+            _srv_unknown = set(srv.keys()) - _srv_allowed
+            if _srv_unknown:
+                raise SystemExit(
+                    f"Config error: mcp.servers[{i}] has unknown keys: "
+                    f"{', '.join(sorted(_srv_unknown))}"
+                )
             name = srv.get("name")
             if not isinstance(name, str) or not name:
                 raise SystemExit(f"Config error: mcp.servers[{i}].name must be a non-empty string")
+            if name in _seen_mcp_names:
+                raise SystemExit(f"Config error: mcp.servers[{i}].name '{name}' is duplicated")
+            _seen_mcp_names.add(name)
             transport = srv.get("transport", "stdio")
             if transport not in ("stdio", "tcp"):
                 raise SystemExit(f"Config error: mcp.servers[{i}].transport must be 'stdio' or 'tcp'")
@@ -773,6 +900,13 @@ def _apply_toml(config: IwanConfig, data: dict[str, Any]) -> None:
                 if not isinstance(val, int):
                     raise SystemExit(f"Config error: mcp.servers[{i}].port must be an integer")
                 s.port = val
+            if "timeout_sec" in srv:
+                val = srv["timeout_sec"]
+                if not isinstance(val, (int, float)) or isinstance(val, bool) or val <= 0:
+                    raise SystemExit(
+                        f"Config error: mcp.servers[{i}].timeout_sec must be a positive number"
+                    )
+                s.timeout_sec = float(val)
             config.mcp.servers.append(s)
 
     if "sandbox" in data:
@@ -783,6 +917,7 @@ def _apply_toml(config: IwanConfig, data: dict[str, Any]) -> None:
             "enabled", "root", "allow_parent_dirs", "max_file_size", "max_total_size",
             "search_limited", "ask_on_access_denied",
             "block_network_commands", "audit_log", "audit_log_path",
+            "shadow_enabled", "shadow_max_file_bytes",
         }
         if unknown_sb:
             raise SystemExit(f"Unknown [sandbox] keys: {', '.join(sorted(unknown_sb))}")
@@ -836,12 +971,24 @@ def _apply_toml(config: IwanConfig, data: dict[str, Any]) -> None:
             if not isinstance(val, str):
                 raise SystemExit("Config error: sandbox.audit_log_path must be a string")
             config.sandbox.audit_log_path = val
+        if "shadow_enabled" in sb:
+            val = sb["shadow_enabled"]
+            if not isinstance(val, bool):
+                raise SystemExit("Config error: sandbox.shadow_enabled must be a boolean")
+            config.sandbox.shadow_enabled = val
+        if "shadow_max_file_bytes" in sb:
+            val = sb["shadow_max_file_bytes"]
+            if not isinstance(val, int) or isinstance(val, bool) or val <= 0:
+                raise SystemExit(
+                    "Config error: sandbox.shadow_max_file_bytes must be a positive integer"
+                )
+            config.sandbox.shadow_max_file_bytes = val
 
     if "rag" in data:
         rag = data["rag"]
         if not isinstance(rag, dict):
             raise SystemExit("Config error: [rag] must be a table")
-        unknown_rag: set[str] = set(rag.keys()) - {"enabled", "embedding_model", "embedding_base_url", "embedding_api_key_env", "max_chunk_size", "chunk_overlap", "top_k", "index_path"}
+        unknown_rag: set[str] = set(rag.keys()) - {"enabled", "embedding_model", "embedding_base_url", "embedding_api_key_env", "max_chunk_size", "chunk_overlap", "top_k", "index_path", "rerank_enabled"}
         if unknown_rag:
             raise SystemExit(f"Unknown [rag] keys: {', '.join(sorted(unknown_rag))}")
         if "enabled" in rag:
@@ -884,6 +1031,11 @@ def _apply_toml(config: IwanConfig, data: dict[str, Any]) -> None:
             if not isinstance(val, str):
                 raise SystemExit("Config error: rag.index_path must be a string")
             config.rag.index_path = val
+        if "rerank_enabled" in rag:
+            val = rag["rerank_enabled"]
+            if not isinstance(val, bool):
+                raise SystemExit("Config error: rag.rerank_enabled must be a boolean")
+            config.rag.rerank_enabled = val
 
     # ===== 加载 [tools] section：工具输出/超时默认参数 =====
     if "tools" in data:
@@ -1058,6 +1210,16 @@ def _apply_env(config: IwanConfig) -> None:
                 f"Config error: IWAN_PERMISSION_TIMEOUT_S must be a number, got: {perm_timeout!r}"
             )
 
+    perm_mode = os.environ.get("IWAN_PERMISSION_MODE")
+    if perm_mode is not None:
+        from iwan_claude.core.permissions.manager import PERMISSION_MODES
+        if perm_mode not in PERMISSION_MODES:
+            raise SystemExit(
+                f"Config error: IWAN_PERMISSION_MODE must be one of "
+                f"{', '.join(PERMISSION_MODES)}, got: {perm_mode!r}"
+            )
+        config.permission.mode = perm_mode
+
     compact_threshold = os.environ.get("IWAN_COMPACT_THRESHOLD")
     if compact_threshold is not None:
         try:
@@ -1207,8 +1369,16 @@ def _apply_env(config: IwanConfig) -> None:
     if rag_embedding_api_key_env is not None:
         config.rag.embedding_api_key_env = rag_embedding_api_key_env
 
+    # LLM 重排开关：关掉省一次 LLM 往返，代价是 top_k 排序质量略降
+    rag_rerank_enabled = os.environ.get("IWAN_RAG_RERANK_ENABLED")
+    if rag_rerank_enabled is not None:
+        config.rag.rerank_enabled = rag_rerank_enabled.lower() not in ("0", "false", "no")
+
     agent_engine = os.environ.get("IWAN_AGENT_ENGINE")
     if agent_engine is not None:
+        # 环境变量同样校验，防止未检查的引擎名绕过配置层注入 runner
+        if agent_engine not in ("legacy", "langgraph", "plan_execute", "debate", "pipeline", "auto"):
+            raise SystemExit("Config error: IWAN_AGENT_ENGINE must be one of legacy/langgraph/plan_execute/debate/pipeline/auto")
         config.agent.engine = agent_engine
 
     checkpoint_backend = os.environ.get("IWAN_AGENT_CHECKPOINT_BACKEND")

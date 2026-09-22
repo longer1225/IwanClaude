@@ -47,10 +47,9 @@ from iwan_claude.core.context import ExecutionContext
 from iwan_claude.core.effort import get_effort_params
 from iwan_claude.core.events.bus import EventBus
 from iwan_claude.core.llm.base import LLMProvider
-from iwan_claude.core.llm.types import LlmResponse, ToolCallBlock
 from iwan_claude.core.permissions.manager import PermissionManager
 from iwan_claude.core.system_prompt import build_base_system_prompt
-from iwan_claude.core.tools.invocation import invoke_tool
+from iwan_claude.core.tool_turn import maybe_compact, run_tool_turn
 from iwan_claude.core.tools.registry import ToolRegistry
 
 log = logging.getLogger(__name__)
@@ -122,6 +121,7 @@ class DebateState(TypedDict):
     result: str | None
     fail_reason: str | None
     step: int
+    _ctx_pct: float  # 上一回合 LLM 报告的上下文占用率（驱动跨轮次压缩）
 
 
 class LangGraphDebateLoop:
@@ -243,11 +243,13 @@ class LangGraphDebateLoop:
         worker 节点：回答用户问题
 
         【执行流程】
-        1. 用 state["messages"] 构建本地消息（不修改原 messages）
-        2. 若有 critic_feedback，追加一条 user 消息要求改进
-        3. 调用 LLM（可调用工具）
-        4. 有工具调用则执行工具
-        5. 更新 worker_answer，不修改 state["messages"]（保持会话历史清洁）
+        1. 若上一回合上下文占用超阈值，先压缩 state["messages"]
+        2. 以会话历史为本地消息（不修改原 messages）
+        3. 若有 critic 反馈，追加一条 user 消息要求改进
+        4. 运行 run_tool_turn 内循环（模型→工具→结果→模型），
+           权限检查与工具执行统一走 invoke_tool
+        5. 工具轨迹写回 state["messages"]：下一轮 worker 能看到自己
+           上一轮的回答与工具结果（修复"每轮从头重新回答"的失忆问题）
         """
         await self._bus.publish(StepStartedEvent(
             run_id=self._run_id,
@@ -255,8 +257,18 @@ class LangGraphDebateLoop:
             ts=_now(),
         ))
 
-        # 构建本地消息（深拷贝，不修改 state["messages"]）
-        local_messages = [dict(m) for m in state["messages"]]
+        # 压缩检查：长任务多轮辩论必然撑爆上下文，compactor 此前收了从未调用
+        history = state["messages"]
+        if self._compactor and self._compact_threshold > 0:
+            history, compacted = await maybe_compact(
+                self._compactor, self._provider, history,
+                state.get("_ctx_pct", 0.0), self._compact_threshold, self._run_id,
+            )
+            if compacted:
+                log.info("debate compacted history before round %d", state.get("round", 0) + 1)
+
+        # 构建本地消息（浅拷贝每条消息字典，不修改 state["messages"]）
+        local_messages = [dict(m) for m in history]
 
         # 若有 critic 反馈，追加 user 消息要求 worker 改进
         if state.get("critic_feedback"):
@@ -268,31 +280,27 @@ class LangGraphDebateLoop:
                 ),
             })
 
-        try:
-            response = await self._provider.chat(
-                messages=local_messages,
-                tool_schemas=self._registry.tool_schemas(),
-                bus=self._bus,
-                run_id=self._run_id,
-                step=state["step"],
-                system=state["worker_system"],
-            )
-        except Exception as exc:
-            log.error("Worker node failed: %s", exc)
+        # 运行工具回合内循环：LLM 异常不再抛出，而是反映在 turn.error 上
+        turn = await run_tool_turn(
+            self._provider,
+            self._registry,
+            self._bus,
+            system=state["worker_system"],
+            messages=local_messages,
+            run_id=self._run_id,
+            step=state["step"],
+            permission_manager=self._permission_manager,
+            session_id=self._session_id,
+        )
+
+        if turn.error and not turn.text:
+            log.error("Worker node failed: %s", turn.error)
             await self._bus.publish(StepFinishedEvent(
                 run_id=self._run_id,
                 step=state["step"],
                 ts=_now(),
             ))
-            return {"status": "failed", "fail_reason": f"Worker failed: {exc}"}
-
-        # 提取回答文本
-        result_text = response.text or ""
-
-        # 如果有工具调用，执行工具并将结果附加到回答
-        if response.tool_calls:
-            tool_results = await self._execute_tools(response.tool_calls, state)
-            result_text += "\n\n" + tool_results
+            return {"status": "failed", "fail_reason": f"Worker failed: {turn.error}"}
 
         await self._bus.publish(StepFinishedEvent(
             run_id=self._run_id,
@@ -300,34 +308,14 @@ class LangGraphDebateLoop:
             ts=_now(),
         ))
 
+        # 轨迹（assistant/tool_result 消息）并入会话历史，worker_answer 作为本轮回答文本
         return {
-            "worker_answer": result_text,
+            "worker_answer": turn.text,
             "status": "debating",
             "step": state["step"] + 1,
+            "messages": list(history) + turn.trajectory,
+            "_ctx_pct": turn.ctx_pct,
         }
-
-    async def _execute_tools(self, tool_calls: list[ToolCallBlock], state: DebateState) -> str:
-        """执行工具调用，返回格式化的结果文本（复用 plan_execute 模式）"""
-        results: list[str] = []
-        for tc in tool_calls:
-            try:
-                # 权限检查
-                if self._permission_manager:
-                    allowed, reason = await self._permission_manager.check_and_wait(
-                        tool_use_id=tc.id,
-                        tool_name=tc.name,
-                        params=tc.input,
-                        session_id=self._session_id,
-                    )
-                    if not allowed:
-                        results.append(f"Tool {tc.name} denied: {reason}")
-                        continue
-
-                result = await invoke_tool(self._registry, tc.name, tc.input)
-                results.append(f"Tool {tc.name}: {result.content[:500]}")
-            except Exception as exc:
-                results.append(f"Tool {tc.name} error: {exc}")
-        return "\n".join(results)
 
     # ==================================================================
     # 节点：critic（独立评判，不调用工具）
@@ -482,8 +470,18 @@ class LangGraphDebateLoop:
             result = state.get("worker_answer") or "No result."
             status = "done"
 
-        # 【关键】将最终结果作为 assistant 消息追加到消息历史
-        new_messages = list(state["messages"]) + [{"role": "assistant", "content": result}]
+        # 【关键】将最终结果作为 assistant 消息追加到消息历史。
+        # runner.run_and_capture 通过 context.messages[prefill_len:] 把新增消息写入 session store，
+        # 若不追加 assistant 消息，会话历史里就只有 user 消息，客户端拿不到回复。
+        # worker 轨迹的末尾通常已是同文本 assistant 消息（run_tool_turn 已并入），跳过避免重复。
+        new_messages = list(state["messages"])
+        if not (
+            new_messages
+            and new_messages[-1].get("role") == "assistant"
+            and isinstance(new_messages[-1].get("content"), str)
+            and new_messages[-1]["content"] == result
+        ):
+            new_messages.append({"role": "assistant", "content": result})
 
         return {"status": status, "result": result, "messages": new_messages}
 
@@ -539,6 +537,7 @@ class LangGraphDebateLoop:
             "result": None,
             "fail_reason": None,
             "step": 0,
+            "_ctx_pct": 0.0,
         }
 
         # 执行配置

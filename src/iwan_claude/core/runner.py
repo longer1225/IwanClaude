@@ -37,7 +37,10 @@ from iwan_claude.core.bus.events import RunFinishedEvent, RunStartedEvent
 
 # 导入核心组件
 from iwan_claude.core.compact.compactor import Compactor       # 会话压缩器
-from iwan_claude.core.config import IwanConfig                 # 配置
+from iwan_claude.core.config import (
+    IwanConfig,
+    resolve_checkpoint_db_path,               # checkpoint DB 路径解析（锚会话根）
+)
 from iwan_claude.core.context import ExecutionContext           # 执行上下文
 from iwan_claude.core.model_presets import get_model_preset     # 模型预设查询
 from iwan_claude.core.sandbox import init_sandbox              # 沙箱初始化
@@ -145,6 +148,62 @@ from iwan_claude.core.trace.provider import TracingProvider    # 跟踪包装器
 from iwan_claude.core.trace.writer import TraceWriter          # 跟踪写入器
 
 
+# 裁剪 sqlite checkpoint 库：每 (thread, ns) 只留最近 keep_last 个，返回删除数
+async def prune_sqlite_checkpoints(saver: Any, keep_last: int) -> int:
+    """
+    裁剪过旧的 checkpoint，防止 checkpoints.db 无限膨胀
+
+    【学习要点】
+    1. LangGraph checkpointer 无内置保留策略——每个 superstep 存一行，
+       不裁剪的库会随会话长度线性膨胀，这里在初始化时做一次启动期维护
+    2. checkpoint_id 是单调可排序字符串（uuid6），lexicographic desc = 时间倒序，
+       所以"保留最近 N 个"= 按 id 降序取前 N
+    3. writes 表以 checkpoint_id 关联，删 checkpoints 前必须同删 pending writes，
+       否则留下无人引用的孤儿写记录
+    4. keep_last <= 0 = 显式关闭裁剪（配置里给了用户 off 档）
+    """
+    if keep_last <= 0:
+        return 0
+    log = logging.getLogger(__name__)
+    # 确保表已建立（首次使用、库还不存在时 setup() 幂等建表）
+    await saver.setup()
+    cur = await saver.conn.execute(
+        "select distinct thread_id, checkpoint_ns from checkpoints"
+    )
+    groups = await cur.fetchall()
+    removed = 0
+    for thread_id, ns in groups:
+        cur = await saver.conn.execute(
+            "select checkpoint_id from checkpoints"
+            " where thread_id = ? and checkpoint_ns = ?"
+            " order by checkpoint_id desc",
+            (thread_id, ns),
+        )
+        ids = [row[0] for row in await cur.fetchall()]
+        stale = ids[keep_last:]
+        if not stale:
+            continue
+        rows = [(thread_id, ns, cid) for cid in stale]
+        await saver.conn.executemany(
+            "delete from writes where thread_id = ? and checkpoint_ns = ?"
+            " and checkpoint_id = ?",
+            rows,
+        )
+        await saver.conn.executemany(
+            "delete from checkpoints where thread_id = ? and checkpoint_ns = ?"
+            " and checkpoint_id = ?",
+            rows,
+        )
+        removed += len(stale)
+    if removed:
+        await saver.conn.commit()
+        log.info(
+            "checkpoint retention: pruned %d stale checkpoint(s), keep_last=%d",
+            removed, keep_last,
+        )
+    return removed
+
+
 # 获取当前时间的 ISO 格式字符串
 def _now() -> str:
     """
@@ -214,10 +273,11 @@ class AgentRunner:
         mcp_manager: McpServerManager | None = None,
         checkpointer: Any | None = None,
         memory_manager: MemoryManager | None = None,
+        task_registry: BackgroundTaskRegistry | None = None,
     ) -> None:
         """
         构造函数 - 注入运行时依赖
-        
+
         参数：
             config: 系统配置，包含 LLM、RAG、Agent 等配置项
             bus: 事件总线，用于发布和订阅系统事件
@@ -228,6 +288,8 @@ class AgentRunner:
             permission_manager: 权限管理器，控制工具调用权限
             mcp_manager: MCP 服务器管理器，管理外部 MCP 工具
             checkpointer: LangGraph 检查点管理器，支持状态持久化和回溯
+            task_registry: 后台子 Agent 注册表；daemon 应注入全局共享实例，
+                不传则自建（仅限单进程测试——run_id 会随本 runner 一起作废）
         
         注意：
             所有可选参数默认 None，由调用者根据需要传入
@@ -258,11 +320,22 @@ class AgentRunner:
         # MCP 服务器管理器：管理外部 MCP 工具的注册和调用
         self._mcp_manager = mcp_manager
         
-        # 跨 run 共享的后台 subagent 任务注册表：用于管理异步子 Agent 任务
-        self._task_registry = BackgroundTaskRegistry()
+        # 跨 run 共享的后台 subagent 任务注册表：
+        # 【设计】旧版每个 AgentRunner 自建一个——而 AgentRunner 是每次用户发言
+        # 新建的（session/manager 每 run 调一次工厂），后果是上一轮 spawn 的后台
+        # 子 Agent 的 run_id 下一轮查不到、也没人能取消它。
+        # 现在由 CoreApp 注入每 daemon 唯一的注册表，工厂缺省时才自建（测试路径）
+        self._task_registry = (
+            task_registry if task_registry is not None else BackgroundTaskRegistry()
+        )
         
         # 外部传入的 checkpointer（跨 run 共享），如果没有传入则延迟初始化
         self._checkpointer = checkpointer
+        # 【设计】所有权标记：谁创建谁关闭。daemon 注入的是全进程共享实例
+        # （app.py 在 shutdown 时统一关闭），per-request runner 若在自己的
+        # close() 里把它关掉，一次 restore_checkpoint 就会让 daemon 剩余
+        # 所有 run 的 checkpoint 写入撞在已关闭的 sqlite 连接上。
+        self._checkpointer_owned = checkpointer is None
 
         # 跨会话记忆管理器（可选）：用于 recall 检索相关记忆注入 system prompt
         self._memory_manager = memory_manager
@@ -321,8 +394,8 @@ class AgentRunner:
             # 动态导入 AsyncSqliteSaver
             from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
-            # 构建数据库文件路径
-            db_path = Path(self._config.agent.checkpoint_db_path)
+            # 构建数据库文件路径（相对路径锚定会话根父级，daemon 换 cwd 不再让 DB 漂移）
+            db_path = resolve_checkpoint_db_path(self._config.agent)
             # 确保父目录存在（递归创建）
             db_path.parent.mkdir(parents=True, exist_ok=True)
             # 获取绝对路径字符串
@@ -335,6 +408,8 @@ class AgentRunner:
             # 保存上下文管理器引用，用于关闭时清理
             self._checkpointer_ctx = ctx
             self._checkpointer = saver
+            # 启动期保留策略裁剪（初始化时点无并发写入，安全）
+            await prune_sqlite_checkpoints(saver, self._config.agent.checkpoint_keep_last)
             return saver
         
         # 未知后端类型：记录警告并使用 none
@@ -348,44 +423,46 @@ class AgentRunner:
     async def close(self) -> None:
         """
         关闭资源 - 正确清理 checkpointer 相关资源
-        
+
         【学习要点】
-        1. 资源清理顺序：先关闭上下文管理器，再关闭 checkpointer
-        2. 异步/同步兼容：同时支持异步和同步的 close 方法
-        3. 异常处理：使用 try-except 确保清理失败不会影响其他操作
-        4. 属性检查：使用 hasattr() 检查对象是否具有特定方法，增强代码健壮性
-        
+        1. 所有权决定关闭：只关闭本 runner 自己创建的 checkpointer，
+           daemon 注入的共享实例由 CoreApp 在 shutdown 时统一回收
+        2. 资源清理顺序：先关闭上下文管理器，再关闭 checkpointer
+        3. 异步/同步兼容：同时支持异步和同步的 close 方法
+        4. 异常处理：使用 try-except 确保清理失败不会影响其他操作
+
         【清理流程】
-        1. 关闭 checkpointer_ctx（如果存在）：用于正确关闭 sqlite 连接
-        2. 关闭 checkpointer（如果存在且没有通过上下文管理器关闭）
+        1. 仅当自建（_checkpointer_owned）：关闭 ctx（sqlite 连接）或 saver
+        2. 共享实例只丢引用不关连接——否则一次 restore 会毒死全 daemon
         3. 将引用置为 None，便于垃圾回收
         """
-        # 第一步：关闭上下文管理器（用于 sqlite 后端）
-        if self._checkpointer_ctx is not None:
-            try:
-                # 检查是否是异步上下文管理器
-                if hasattr(self._checkpointer_ctx, "__aexit__"):
-                    await self._checkpointer_ctx.__aexit__(None, None, None)
-                # 检查是否是同步上下文管理器
-                elif hasattr(self._checkpointer_ctx, "__exit__"):
-                    self._checkpointer_ctx.__exit__(None, None, None)
-            except Exception:
-                # 记录异常但不抛出，确保后续清理继续执行
-                logging.getLogger(__name__).exception("Error closing checkpointer context")
-            # 清理引用
-            self._checkpointer_ctx = None
-        
-        # 第二步：关闭 checkpointer（如果没有通过上下文管理器关闭）
-        if self._checkpointer is not None:
-            # 检查 checkpointer 是否有 close 方法，且没有通过上下文管理器关闭
-            if hasattr(self._checkpointer, "close") and not hasattr(self._checkpointer_ctx, "__exit__"):
+        # 只有本 runner 自建的 checkpointer 才归它关闭
+        if self._checkpointer_owned:
+            # 第一步：关闭上下文管理器（用于 sqlite 后端）
+            if self._checkpointer_ctx is not None:
+                try:
+                    # 检查是否是异步上下文管理器
+                    if hasattr(self._checkpointer_ctx, "__aexit__"):
+                        await self._checkpointer_ctx.__aexit__(None, None, None)
+                    # 检查是否是同步上下文管理器
+                    elif hasattr(self._checkpointer_ctx, "__exit__"):
+                        self._checkpointer_ctx.__exit__(None, None, None)
+                except Exception:
+                    # 记录异常但不抛出，确保后续清理继续执行
+                    logging.getLogger(__name__).exception("Error closing checkpointer context")
+                # 清理引用
+                self._checkpointer_ctx = None
+            # 第二步：无 ctx 时才直接 close saver（有 ctx 时连接已随 ctx 关闭）
+            elif self._checkpointer is not None and hasattr(self._checkpointer, "close"):
                 # 检查 close 方法是异步还是同步
                 if asyncio.iscoroutinefunction(self._checkpointer.close):
                     await self._checkpointer.close()
                 else:
                     self._checkpointer.close()
-            # 清理引用
-            self._checkpointer = None
+
+        # 无论归属与否都清理本实例引用（之后不再使用该 runner）
+        self._checkpointer = None
+        self._checkpointer_owned = False
 
     async def list_checkpoints(self, thread_id: str) -> list[dict[str, Any]]:
         """
@@ -465,6 +542,8 @@ class AgentRunner:
                     "timestamp": timestamp,
                     "summary": summary,
                     "node": None,
+                    # run 归属标注（AgentState.run_id 通道；旧 checkpoint 无此键 → 空串）
+                    "run_id": channel_values.get("run_id", ""),
                 })
         except Exception:
             # 记录异常但不抛出，确保方法返回空列表而非崩溃
@@ -799,6 +878,7 @@ class AgentRunner:
                 embedding_provider = get_embedding_provider(
                     self._config.rag,
                     self._config.llm.base_url,
+                    timeout_s=self._config.llm.embedding_timeout_s,
                 )
 
                 # 创建文档分块器
@@ -837,7 +917,12 @@ class AgentRunner:
                 index_manager.load()
 
                 # 创建自适应检索器（Adaptive RAG + CRAG + Reranking）
-                adaptive_retriever = AdaptiveRetriever(index_manager, llm_client=llm_client)
+                # rerank 受 [rag] rerank_enabled 控制：默认开（保持旧行为），关掉省一次 LLM 往返
+                adaptive_retriever = AdaptiveRetriever(
+                    index_manager,
+                    llm_client=llm_client,
+                    enable_rerank=self._config.rag.rerank_enabled,
+                )
 
                 # 注册 RAG 工具
                 if _ok("search_knowledge"):
@@ -1121,7 +1206,10 @@ class AgentRunner:
                 if engine_name == "auto":
                     from iwan_claude.core.engine_selector import select_engine
                     engine_name = await select_engine(goal, provider)
-                    log.info("auto engine selection: goal=%r → engine=%s", goal[:80], engine_name)
+                    logging.getLogger(__name__).info(
+                        "auto engine selection: goal=%r → engine=%s", goal[:80], engine_name
+                    )
+                    # 选择结果只对本次 run 生效，不写回全局配置：每条消息可自适应不同引擎
 
                 if engine_name == "langgraph":
                     # 使用 LangGraph ReAct 引擎（chat→tools 循环，支持 checkpoint）
@@ -1197,7 +1285,34 @@ class AgentRunner:
                     )
                 
                 # ========== 第六步：执行 Agent 循环 ==========
-                await loop.run(context)
+                # ===== 影子快照挂载（S9 Part C）=====
+                # 每个 run 一个 ShadowStore 实例，但对象存储指向会话级目录
+                # （跨 run 内容去重），账本落在本 run 目录（C2 按 run 还原）。
+                # 经 ContextVar 暴露给 invoke_tool——循环/工具链零签名改动。
+                # token/finally 成对：嵌套 run（子 Agent）各自进出互不污染
+                shadow_token = None
+                if self._config.sandbox.shadow_enabled:
+                    from iwan_claude.core.shadow import (
+                        ShadowStore,
+                        reset_active_shadow,
+                        set_active_shadow,
+                    )
+                    if session is not None and store is not None:
+                        shadow_objects = store.session_dir(session.id) / "shadow"
+                    else:
+                        shadow_objects = run_path / "shadow"
+                    shadow_store = ShadowStore(
+                        shadow_objects,
+                        run_path / "file_changes.json",
+                        max_file_bytes=self._config.sandbox.shadow_max_file_bytes,
+                    )
+                    shadow_token = set_active_shadow(shadow_store)
+                try:
+                    await loop.run(context)
+                finally:
+                    if shadow_token is not None:
+                        from iwan_claude.core.shadow import reset_active_shadow
+                        reset_active_shadow(shadow_token)
             
             except asyncio.CancelledError:
                 # 用户取消操作
