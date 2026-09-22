@@ -188,6 +188,11 @@ class SessionManager:
         self._locks: dict[str, asyncio.Lock] = {}
         # Skill 加载器
         self._skill_loader = SkillLoader()
+        # 首轮自动起名竞态保护：step 9 启发式标题存这里，LLM 精修前核对
+        # "标题还等于种子"——用户中途 /name 手动改过就放弃精修，不覆盖人的决定
+        self._title_seed: dict[str, str] = {}
+        # 后台标题精修任务集合：持有引用防 GC，测试也可确定性 pump
+        self._title_tasks: set[asyncio.Task[None]] = set()
 
     async def create(self, mode: SessionMode, title: str = "", cwd: str = "") -> Session:
         """
@@ -349,8 +354,10 @@ class SessionManager:
             )
 
             # 9. 如果会话没有标题，根据第一条消息自动起名
-            # 【设计思路】取第一条用户消息的前 30 个字符，在词边界截断
-            # 不调用 LLM（避免额外延迟），保持轻量；后续可通过 /rename 手动修改
+            # 【设计思路】先取第一条消息做即时启发式标题（零延迟，标签栏马上
+            # 脱离 sess-xxxx 数字态），首轮 run 结束后再交给 LLM 精修成
+            # 真正的主题标题；后续可通过 /name 手动覆盖
+            auto_titled_now = False
             if not session.title:
                 # 取消息的第一行（避免多行消息标题过长）
                 first_line = content.strip().split("\n")[0].strip()
@@ -363,6 +370,9 @@ class SessionManager:
                         session.title = first_line[:30] + "…"
                 else:
                     session.title = first_line or "(untitled)"
+                # 记录种子标题：LLM 精修前用它判断"有没有被人改过"
+                self._title_seed[sid] = session.title
+                auto_titled_now = True
                 # 发布重命名事件，通知 TUI 刷新标签栏
                 from iwan_claude.core.bus.events import SessionRenamedEvent
                 await self._bus.publish(
@@ -514,6 +524,24 @@ class SessionManager:
                     logging.getLogger(__name__).exception(
                         "memory: remember_conversation failed session=%s", sid
                     )
+
+            # ==================== 首轮 LLM 标题精修（后台任务）====================
+            # 启发式标题已即时生效（不等这里）；拿到"用户消息+助手回复"这对
+            # 完整上下文后再让 LLM 起一个真正的主题标题。独立 task：绝不为
+            # 起标题推迟 run 结束事件的送达
+            if (
+                auto_titled_now
+                and self._provider is not None
+                and not cancelled_by_user
+                and outcome is not None
+            ):
+                refine = asyncio.create_task(
+                    self._refine_title(
+                        sid, content, str(getattr(outcome, "result", "") or "")
+                    )
+                )
+                self._title_tasks.add(refine)
+                refine.add_done_callback(self._title_tasks.discard)
 
             # ==================== 更新会话状态 ====================
             session.updated_at = _now()
@@ -905,6 +933,69 @@ class SessionManager:
         result = list(by_id.values())
         result.sort(key=lambda s: s.updated_at, reverse=True)
         return result
+
+    # 清洗 LLM 输出的标题：只取首行、剥引号与句尾标点、超长截断，不可信输出直接弃用
+    @staticmethod
+    def _clean_title(raw: str) -> str:
+        s = (raw or "").strip()
+        if not s:
+            return ""
+        line = s.splitlines()[0].strip()
+        # 模型常见的包装物：中英文引号、书名号、句号冒号——全部剥掉
+        line = line.strip("\"'“”‘’「」『』《》【】.。:：、 \t")
+        if len(line) > 24:
+            line = line[:24].rstrip() + "…"
+        # 单字/空标题没有信息量，宁可保留启发式标题
+        if len(line) < 2:
+            return ""
+        return line
+
+    # 首轮对话结束后用一次轻量 LLM 调用把"第一句话"精修成主题标题（后台执行）
+    async def _refine_title(self, sid: str, user_msg: str, assistant_result: str) -> None:
+        """
+        LLM 精修会话标题
+
+        【设计】用独立 EventBus 调 provider.chat——标题 token 绝不能流进
+        会话事件流污染渲染；改题前核对 session.title 仍等于启发式种子，
+        用户中途 /name 过就放弃；任何异常只记日志，启发式标题兜底。
+        """
+        try:
+            session = self._sessions.get(sid)
+            seed = self._title_seed.get(sid, "")
+            if session is None or not seed or session.title != seed or self._provider is None:
+                return
+            system = (
+                "你是会话标题生成器。根据首轮用户消息与助手回复，"
+                "总结一个概括会话主题的标题。要求：不超过 16 个字；"
+                "名词性短语优先；只输出标题本身，"
+                "不要引号、句号、前缀、换行或任何解释。"
+            )
+            user = (
+                f"用户消息：{user_msg[:400]}\n"
+                f"助手回复摘要：{assistant_result[:400]}"
+            )
+            resp = await self._provider.chat(
+                [{"role": "user", "content": user}],
+                [],
+                EventBus(),
+                f"title-{sid}",
+                system=system,
+            )
+            title = self._clean_title(getattr(resp, "text", "") or "")
+            session = self._sessions.get(sid)  # await 期间可能被关闭/改名，重查
+            if session is None or not title or session.title != seed:
+                return
+            session.title = title
+            self._store.write_meta(session)
+            from iwan_claude.core.bus.events import SessionRenamedEvent
+            await self._bus.publish(
+                SessionRenamedEvent(session_id=sid, title=title, ts=_now())
+            )
+            log.info("auto-title refined session=%s title=%s", sid, title)
+        except Exception:
+            log.exception("auto-title refine failed session=%s (keep heuristic title)", sid)
+        finally:
+            self._title_seed.pop(sid, None)
 
     async def rename_session(self, sid: str, title: str) -> Session:
         """

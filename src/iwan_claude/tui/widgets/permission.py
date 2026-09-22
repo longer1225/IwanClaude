@@ -26,6 +26,22 @@ from textual.widgets import Static
 log = logging.getLogger(__name__)
 
 
+# 归一化参数摘要：空/"{}" 收敛为 ""；非空则转义字面方括号防 markup 解析炸渲染
+def _norm_preview(raw: str) -> str:
+    """
+    参数预览的统一清洗点。
+
+    【学习要点】"{}" 是 daemon 侧 json.dumps 空参数 dict 的产物，直接渲染
+    给用户就是"task_list{}"这种谁也看不懂的噪声；而工具参数（bash 命令等）
+    可能含字面 [ ]，Textual markup 会把它们当标签解析抛 MarkupError——
+    渲染用户数据前转义是硬规则（同 invocation.py 的 \\[sandbox\\] 教训）。
+    """
+    pp = (raw or "").strip()
+    if pp in ("", "{}"):
+        return ""
+    return pp.replace("[", "\\[").replace("]", "\\]")
+
+
 class PermissionSelect(Static):
     """
     内联权限选择控件
@@ -47,7 +63,7 @@ class PermissionSelect(Static):
     - can_focus=True 使该控件可以接收键盘事件
 
     使用示例：
-        >>> select = PermissionSelect("call_01")
+        >>> select = PermissionSelect("call_01", "bash", "command='ls'")
         >>> app.mount(select, before="#prompt")
         >>> # 用户按 y/a/n/d 或方向键选择
     """
@@ -64,13 +80,14 @@ class PermissionSelect(Static):
     }
     """
 
-    # 权限选项元组：每项为 (决策值, 显示标签, 快捷键提示)
-    # 决策值是 IPC 协议中使用的标识符
-    _CHOICES: tuple[tuple[str, str, str], ...] = (
-        ("allow_once",   "Allow once",   "y / 1"),
-        ("always_allow", "Always allow", "a / 2"),
-        ("deny_once",    "Deny",         "n / 3"),
-        ("always_deny",  "Always deny",  "d / 4"),
+    # 权限选项四元组：(决策值, 显示标签, 作用域一句话, 快捷键提示)
+    # 决策值是 IPC 协议中使用的标识符；作用域一句话直接回答用户 feedback
+    # "点了 always allow 却不知道批了什么"——选项文案必须自带后果说明。
+    _CHOICES: tuple[tuple[str, str, str, str], ...] = (
+        ("allow_once",   "Allow once",   "仅这一次放行",            "y / 1"),
+        ("always_allow", "Always allow", "同参数调用不再询问(记住)", "a / 2"),
+        ("deny_once",    "Deny",         "仅这一次拒绝",            "n / 3"),
+        ("always_deny",  "Always deny",  "同参数调用一律拒绝(记住)", "d / 4"),
     )
 
     # 键盘字符到决策值的映射表，用于快速选择
@@ -113,21 +130,22 @@ class PermissionSelect(Static):
             # 调用父类 Message 的 __init__ 完成消息初始化
             super().__init__()
 
-    def __init__(self, tool_use_id: str) -> None:
+    def __init__(self, tool_use_id: str, tool_name: str = "", param_preview: str = "") -> None:
         """
         初始化权限选择控件
 
         参数：
             tool_use_id: str - 工具调用 ID，用于后续 IPC 回复
-
-        属性：
-            _tool_use_id: 工具调用 ID
-            _cursor: 当前光标的位置（选项索引），初始为 0
+            tool_name: str - 被询问的工具名（渲染进"你在批什么"标题行）
+            param_preview: str - 参数摘要；空/"{}" 归一为"无参数"显示
         """
         # 调用父类 Static 的 __init__，传入空字符串作为初始显示内容
         super().__init__("")
         # 保存工具调用 ID
         self._tool_use_id = tool_use_id
+        # 上下文信息：让用户在看不到日志滚动位置时也能回答这个问题
+        self._tool_name = tool_name
+        self._param_preview = _norm_preview(param_preview)
         # 初始化光标位置为第一个选项（索引 0）
         self._cursor = 0
 
@@ -190,30 +208,30 @@ class PermissionSelect(Static):
 
     def _render_ui(self) -> str:
         """
-        生成带光标高亮的选项列表文本
-
-        根据当前光标位置，生成包含光标高亮的选项列表。
-
-        返回：
-            str: 格式化的选项列表文本
+        生成"问题 + 带作用域说明的选项"文本
 
         显示格式：
-            ❯ Allow once    y / 1
-              Always allow  a / 2
-              Deny          n / 3
-              Always deny   d / 4
-              ↑↓ navigate   enter confirm
+            🔑 允许执行 git_status  （无参数）
+            ❯ Allow once   仅这一次放行   y / 1
+              Always allow 同参数调用不再询问(记住)  a / 2
+              ...
         """
         # 创建行列表，用于拼接最终显示文本
         lines: list[str] = []
-        # 遍历所有选项，i 为索引，_ 为决策值（此处不使用），label 为显示标签，key_hint 为快捷键提示
-        for i, (_, label, key_hint) in enumerate(self._CHOICES):
-            # 如果当前光标在此选项上，使用粗体青色和 ❯ 标记高亮
+        # 标题行：问题本身。工具名是用户"批的是什么"的唯一答案，必须进面板
+        if self._tool_name:
+            params = self._param_preview or "（无参数）"
+            lines.append(
+                f"[bold yellow]🔑 允许执行[/bold yellow] "
+                f"[bold cyan]{self._tool_name}[/bold cyan]  [white]{params}[/white]"
+            )
+        # 遍历所有选项：光标行高亮，每行带作用域说明
+        for i, (_, label, scope, key_hint) in enumerate(self._CHOICES):
             if i == self._cursor:
-                lines.append(f"  [bold cyan]❯ {label}[/bold cyan]  [dim]{key_hint}[/dim]")
+                cursor_txt = f"  [bold cyan]❯ {label}[/bold cyan]  [white]{scope}[/white]"
+                lines.append(f"{cursor_txt}  [dim]{key_hint}[/dim]")
             else:
-                # 非光标选项使用普通缩进显示
-                lines.append(f"    {label}  [dim]{key_hint}[/dim]")
+                lines.append(f"    {label}  [dim]{scope}[/dim]  [dim]{key_hint}[/dim]")
         # 在末尾追加操作提示行
         lines.append("[dim]  ↑↓ navigate   enter confirm[/dim]")
         # 将所有行拼接为字符串并返回
@@ -319,12 +337,14 @@ class PermissionBlock(Static):
     """
 
     # 决策值到友好显示标签的映射表（私有版本用于实际查找）
+    # 【学习要点】标签必须说清"批到哪层"：用户反馈"点了 always allowed
+    # 不知道意味着什么"——英文过去分词短语对后果的描述太隐晦。
     _LABEL_MAP: dict[str, str] = {
-        "allow_once":   "allowed (once)",
-        "always_allow": "always allowed",
-        "deny_once":    "denied",
-        "always_deny":  "always denied",
-        "timeout":      "⏱ timed out",
+        "allow_once":   "本次已放行",
+        "always_allow": "已记住：同参数调用不再询问",
+        "deny_once":    "本次已拒绝",
+        "always_deny":  "已记住：同参数调用一律拒绝",
+        "timeout":      "⏱ 审批超时",
     }
     # 公开访问接口：外部通过 LABEL_MAP 访问映射表
     LABEL_MAP = _LABEL_MAP
@@ -376,8 +396,8 @@ class PermissionBlock(Static):
         self._tool_use_id = tool_use_id
         # 保存工具名称
         self._tool_name = tool_name
-        # 保存参数预览字符串
-        self._param_preview = param_preview
+        # 保存参数预览字符串（空/"{}" 归一为 ""，渲染时显示"（无参数）"）
+        self._param_preview = _norm_preview(param_preview)
         # 标记尚未解决
         self._resolved = False
         # 调用父类 Static 的 __init__，显示初始待审批文本，附加 "log-line" CSS 类
@@ -393,10 +413,13 @@ class PermissionBlock(Static):
         显示格式：
             ? permission  tool_name  params_preview
         """
-        # 如果有参数预览，添加 dim 样式的预览文本
-        preview = f"  [dim]{self._param_preview}[/dim]" if self._param_preview else ""
+        # 如果有参数预览则显示摘要；无参工具显式写"（无参数）"，
+        # 不再留下 task_list{} 这种让人误以为信息缺失的噪声
+        none_hint = "  [dim]（无参数）[/dim]"
+        dim_preview = f"  [dim]{self._param_preview}[/dim]" if self._param_preview else none_hint
         # 拼接完整的待审批显示文本
-        return f"[bold red]? permission[/bold red]  [bold]{self._tool_name}[/bold]{preview}"
+        ask = "[bold yellow]? 待审批[/bold yellow]"
+        return f"{ask}  [bold cyan]{self._tool_name}[/bold cyan]{dim_preview}"
 
     def _resolve(self, decision: str) -> None:
         """
@@ -422,11 +445,12 @@ class PermissionBlock(Static):
         icon = "[bold green]✓[/bold green]" if allowed else "[bold red]✗[/bold red]"
         # 通过 LABEL_MAP 获取决策的友好显示标签
         label = self._LABEL_MAP.get(decision, decision)
-        # 如果有参数预览，添加 dim 样式
-        preview = f"[dim]{self._param_preview}[/dim]" if self._param_preview else ""
+        # 如果有参数预览，添加 dim 样式（无参数工具显式标注，与待审批行一致）
+        none_hint = "  [dim]（无参数）[/dim]"
+        dim_preview = f"  [dim]{self._param_preview}[/dim]" if self._param_preview else none_hint
         # 更新显示文本为已解决状态
         self.update(
-            f"{icon} permission  [bold]{self._tool_name}[/bold]{preview}  [dim]{label}[/dim]"
+            f"{icon} 已审批  [bold cyan]{self._tool_name}[/bold cyan]{dim_preview}  {label}"
         )
         # 发布 Resolved 消息，通知宿主 App 权限审批已完成
         self.post_message(self.Resolved(self, decision))

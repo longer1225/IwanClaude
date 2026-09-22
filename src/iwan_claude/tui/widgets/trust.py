@@ -91,7 +91,10 @@ class TrustSelect(Static):
                 lines.append(f"  [bold cyan]❯ {label}[/bold cyan]  [dim]{key_hint}[/dim]")
             else:
                 lines.append(f"    {label}  [dim]{key_hint}[/dim]")
-        lines.append("[dim]  tab to focus   ↑↓ navigate   enter confirm[/dim]")
+        h1 = "[dim]  输入框直接敲 [/dim][bold]/trust allow[/bold]"
+        h2 = "[dim] 或 [/dim][bold]/trust deny[/bold][dim] 答复[/dim]"
+        h3 = "[dim]   或 tab 聚焦面板 ↑↓+enter[/dim]"
+        lines.append(h1 + h2 + h3)
         return "\n".join(lines)
 
     # 键盘处理：方向导航 / enter 确认光标 / 快捷键直达（仅聚焦时生效）

@@ -560,3 +560,217 @@ async def test_permission_mode_cycle_and_alias() -> None:
                                 {"session_id": "sess-1", "mode": "auto"})
     await app._do_set_permission_mode("turbo")
     assert client.calls[-1][1]["mode"] == "auto"  # 未被非法值污染
+
+
+# 功能：验证权限审批面板/摘要块自带完整上下文（工具名、无参数归一、选项后果、中文标签）
+# 设计：纯 widget 层测试不启动 app——_render_ui/_pending_text 是拼串纯函数，可直接断言；
+#       _resolve 会 post_message 故打桩拦截；重点锁死用户反馈的三个点：
+#       "{}"必须显示成（无参数）、always 选项必须带"记住"字样、字面方括号必须转义
+def test_permission_panel_self_explains_context() -> None:
+    from iwan_claude.tui.widgets.permission import (
+        PermissionBlock,
+        PermissionSelect,
+        _norm_preview,
+    )
+
+    # 归一化：空/"{}"收敛，方括号转义后仍是合法 markup
+    assert _norm_preview("{}") == ""
+    assert _norm_preview("   ") == ""
+    esc = _norm_preview("rm -rf [x]")
+    assert "\[" in esc and "\]" in esc
+
+    sel = PermissionSelect("tu-1", "git_status", "{}")
+    ui = sel._render_ui()
+    assert "git_status" in ui
+    assert "（无参数）" in ui
+    assert "仅这一次放行" in ui and "同参数调用不再询问" in ui
+
+    blk = PermissionBlock("tu-1", "task_list", "{}")
+    blk.post_message = lambda m: None  # type: ignore[method-assign]
+    updates: list[str] = []
+    blk.update = lambda r, **k: updates.append(str(r))  # type: ignore[assignment]
+    assert "（无参数）" in blk._pending_text()
+    blk._resolve("always_allow")
+    assert "已记住：同参数调用不再询问" in updates[0]
+
+
+# 功能：验证 /trust 斜杠命令四条路：usage 提示、allow 发 trust.respond、dismiss 只收面板、无面板时提示走 CLI
+# 设计：面板是未挂载的 TrustSelect，remove() 打桩；run_worker 接管协程保证确定性；
+#       断言 _trust_panel 槽位清理与 persistent=True 参数——这是"面板不抢焦点"的第二答复路径契约
+async def test_trust_slash_command_routes() -> None:
+    from iwan_claude.tui.widgets.trust import TrustSelect
+
+    class _RecordingClient:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict]] = []
+
+        async def send_command(self, method: str, params: dict) -> dict:
+            self.calls.append((method, params))
+            return {"ok": True}
+
+    class _FakeArea:
+        def __init__(self) -> None:
+            self.text = ""
+
+    class _FakeEvent:
+        def __init__(self, text: str, area: _FakeArea) -> None:
+            self.value = text
+            self.text_area = area
+
+    app = IwanTuiApp("127.0.0.1", 9999)
+    appended: list[Widget] = []
+    app._append = lambda w: appended.append(w)  # type: ignore[method-assign]
+    app._client = _RecordingClient()  # type: ignore[assignment]
+    pending: list[asyncio.Task[None]] = []
+    app.run_worker = lambda coro, **kw: pending.append(asyncio.ensure_future(coro))  # type: ignore[assignment]
+
+    async def submit(text: str) -> None:
+        await app.on_chat_text_area_submitted(_FakeEvent(text, _FakeArea()))
+        for t in pending:
+            await t
+        pending.clear()
+
+    # 无面板：不猜目录，只提示
+    await submit("/trust allow")
+    assert app._client.calls == []  # type: ignore[attr-defined]
+    assert any("没有待答复" in str(getattr(w, "content", "")) for w in appended)
+
+    panel = TrustSelect("sess-9", "D:\proj")
+    panel.remove = lambda: None  # type: ignore[assignment]
+    app._trust_panel = panel
+
+    # 缺参数：usage
+    await submit("/trust")
+    assert any("usage" in str(getattr(w, "content", "")) for w in appended)
+
+    # allow：发持久化 trust.respond 并清面板槽位
+    await submit("/trust allow")
+    assert app._client.calls[0] == (  # type: ignore[attr-defined]
+        "trust.respond",
+        {"session_id": "sess-9", "cwd": "D:\proj", "decision": "allow", "persistent": True},
+    )
+    assert app._trust_panel is None
+
+    # dismiss：不发 RPC，只落"维持逐次审批"状态行
+    panel2 = TrustSelect("sess-9", "D:\proj")
+    panel2.remove = lambda: None  # type: ignore[assignment]
+    app._trust_panel = panel2
+    n_before = len(app._client.calls)  # type: ignore[attr-defined]
+    await submit("/trust dismiss")
+    assert len(app._client.calls) == n_before  # type: ignore[attr-defined]
+    assert any("维持逐次审批" in str(getattr(w, "content", "")) for w in appended)
+
+
+# 功能：验证 always_allow 决策除发 permission.respond 外，还追加一行可撤销指引（policy.toml 落点）
+# 设计：handler 内部 msg.widget.remove/_prompt 涉及 DOM 全部打桩；PermissionBlock 真实挂载进
+#       _pending_permission_blocks，锁住"📌 说明行"与 respond 参数两个用户契约
+async def test_always_allow_appends_policy_note() -> None:
+    from iwan_claude.tui.widgets.permission import PermissionBlock, PermissionSelect
+
+    class _RecordingClient:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict]] = []
+
+        async def send_command(self, method: str, params: dict) -> dict:
+            self.calls.append((method, params))
+            return {"ok": True}
+
+    app = IwanTuiApp("127.0.0.1", 9999)
+    appended: list[Widget] = []
+    app._append = lambda w: appended.append(w)  # type: ignore[method-assign]
+    app._client = _RecordingClient()  # type: ignore[assignment]
+    app._prompt = lambda: None  # type: ignore[assignment]
+
+    blk = PermissionBlock("tu-1", "bash", "ls -la")
+    blk.post_message = lambda m: None  # type: ignore[method-assign]
+    app._pending_permission_blocks["tu-1"] = blk
+
+    sel = PermissionSelect("tu-1", "bash", "ls -la")
+    sel.remove = lambda: None  # type: ignore[assignment]
+    msg = PermissionSelect.Decided(sel, "tu-1", "always_allow")
+    await app.on_permission_select_decided(msg)
+
+    client: _RecordingClient = app._client  # type: ignore[assignment]
+    assert ("permission.respond", {"tool_use_id": "tu-1", "decision": "always_allow"}) in client.calls
+    notes = [str(getattr(w, "content", "")) for w in appended]
+    assert any("policy.toml" in n and "bash" in n for n in notes)
+    assert "bash" in blk._tool_name
+
+
+# 功能：验证信任答复的"可见回声 + 已答复目录永不再弹"契约：成功落 _trust_answered、
+#       同目录 trust.requested 被吞、发送失败出红字而不是静默
+# 设计：daemon 事件用 _handle_event 直喂（不启动 app，mount 打桩记录）；客户端分别给
+#       ok / 抛错两种假实现——用户反馈"面板不消失"根因是无反馈+静默失败，两者都要锁死
+async def test_trust_answer_echo_and_suppression() -> None:
+    from iwan_claude.tui.widgets.trust import TrustSelect
+
+    class _OkClient:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict]] = []
+
+        async def send_command(self, method: str, params: dict) -> dict:
+            self.calls.append((method, params))
+            return {"ok": True, "trust": "allow"}
+
+    app = IwanTuiApp("127.0.0.1", 9999)
+    appended: list[Widget] = []
+    app._append = lambda w: appended.append(w)  # type: ignore[method-assign]
+    app._client = _OkClient()  # type: ignore[assignment]
+    panel = TrustSelect("sess-1", "D:\IwanClaude")
+    panel.remove = lambda: None  # type: ignore[assignment]
+    app._trust_panel = panel
+
+    await app._do_trust_respond("sess-1", "D:\IwanClaude", "allow")
+    notes = [str(getattr(w, "content", "")) for w in appended]
+    assert any("已信任" in n and "不再询问" in n for n in notes)
+    assert app._trust_key("D:\iwanclaude\\") in app._trust_answered  # 归一化一致
+
+    # 已答复目录再被问：不挂面板（mount 根本没被调用）
+    mounted: list[Widget] = []
+    app.mount = lambda w, **kw: mounted.append(w)  # type: ignore[assignment]
+    app._handle_event({
+        "type": "trust.requested", "session_id": "sess-2",
+        "cwd": "d:/IwanClaude", "ts": "t",
+    })
+    assert mounted == []
+
+    # 换个没答复过的目录：照常挂
+    app._handle_event({
+        "type": "trust.requested", "session_id": "sess-3",
+        "cwd": "D:\other", "ts": "t",
+    })
+    assert len(mounted) == 1
+
+    # 失败必须可见：红色"发送失败"行
+    class _FailClient(_OkClient):
+        async def send_command(self, method: str, params: dict) -> dict:
+            raise RuntimeError("connection closed")
+
+    app._client = _FailClient()  # type: ignore[assignment]
+    before = len(appended)
+    await app._do_trust_respond("sess-1", "D:\other2", "allow")
+    notes2 = [str(getattr(w, "content", "")) for w in appended[before:]]
+    assert any("发送失败" in n for n in notes2)
+    assert "d:/other2" not in app._trust_answered
+
+
+# 功能：验证 session.renamed 对"后台标签页"也生效：非当前会话改名→其 state.title 更新且刷新标签栏
+# 设计：两个会话中把活动槽指到 a、给 b 发改名事件，走 _handle_event 完整分发（不测 inner）——
+#       锁定曾经丢失的后台分支：多会话并行时用户只看得到标签栏，后台不更新就等于"一堆数字"
+async def test_bg_session_renamed_updates_title() -> None:
+    app = IwanTuiApp("127.0.0.1", 9999)
+    app._append = lambda w: None  # type: ignore[method-assign]
+    app._update_header = lambda s: None  # type: ignore[method-assign]
+    refreshes: list[int] = []
+    app._refresh_tabbar = lambda: refreshes.append(1)  # type: ignore[method-assign]
+    app._add_session("sess-a", "")
+    app._add_session("sess-b", "")
+    app._session_id = "sess-a"
+
+    app._handle_event({"type": "session.renamed", "session_id": "sess-b", "title": "后台主题", "ts": "t"})
+    assert app._sessions["sess-b"].title == "后台主题"
+    assert refreshes  # 标签栏刷新被触发
+
+    # 当前会话改名走前台分支：同样要更新并刷新
+    app._handle_event({"type": "session.renamed", "session_id": "sess-a", "title": "前台主题", "ts": "t"})
+    assert app._sessions["sess-a"].title == "前台主题"

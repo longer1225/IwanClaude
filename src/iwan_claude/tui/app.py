@@ -283,6 +283,15 @@ class IwanTuiApp(App[None]):
         self._slash_items: list[tuple[str, str]] = []
         # 文件变更回滚面板（S9 C2）：同一时刻最多挂一个，重复 F7 复用刷新
         self._files_panel: FileChangesSelect | None = None
+        # 信任询问面板：不抢焦点所以输入框照常可用——/trust 命令是它的第二条答复路径
+        self._trust_panel: TrustSelect | None = None
+        # 本窗口内已成功持久答复过的目录（归一化键）：再收到同目录的
+        # trust.requested 不再挂面板——"确认一次就永远不再弹"要在客户端也兜底，
+        # 防 daemon 重启/多客户端场景把已决目录重新问一遍
+        self._trust_answered: set[str] = set()
+        # 最近一次本地答复回声 (cwd_key, decision, monotonic_ts)：用于压制 trust.changed
+        # 事件对同一决定的重复状态行，别的一端答复的仍会显示
+        self._trust_echo: tuple[str, str, float] | None = None
         # 用户输入历史列表，用于 Ctrl+R 搜索历史功能
         # 最多保存 100 条记录，新记录插入头部
         self._history: list[str] = []
@@ -992,6 +1001,7 @@ class IwanTuiApp(App[None]):
             ("checkpoint list", "列出所有检查点"),
             ("checkpoint restore <n>", "恢复到指定检查点"),
             ("files [run_id]", "查看/回滚文件变更（同 F7 面板）"),
+            ("trust allow|deny|dismiss", "答复当前目录信任询问（同信任面板）"),
             ("recover", "恢复崩溃的会话"),
             ("history", "查看会话历史"),
             ("close", "关闭当前会话"),
@@ -1442,7 +1452,9 @@ class IwanTuiApp(App[None]):
             )
             # 从响应中解析会话 ID 和标题
             new_sid = str(result["session_id"])
-            title = str(result.get("title", "")) or new_sid
+            # 标题不垫 session_id 数字：留空让标签栏显示 (untitled)，
+            # 首条消息的自动起名事件（daemon step 9 + LLM 精修）会把它替换掉
+            title = str(result.get("title", ""))
 
             # 保存当前会话的 UI 状态
             self._save_current_state()
@@ -1545,6 +1557,26 @@ class IwanTuiApp(App[None]):
                 self.run_worker(self._do_file_changes(rid), name="file_changes", exclusive=False)
             else:
                 self._append(Static("[yellow]agent busy or disconnected[/yellow]", classes="log-line"))
+            return
+
+        # /trust 答复当前信任询问（面板不抢焦点时代的第二条路：直接敲命令）
+        if content.startswith("/trust"):
+            event.text_area.text = ""  # 清空输入框
+            panel = self._trust_panel
+            parts = content.split()  # 分割命令与决策参数
+            if panel is None:
+                # 没有待答询问时不猜目录：持久管理走 CLI（iwan trust list/grant/deny/revoke）
+                self._append(Static(
+                    "[yellow]当前没有待答复的信任询问[/yellow]  "
+                    "[dim]持久管理目录信任：iwan trust list/grant/deny/revoke[/dim]",
+                    classes="log-line",
+                ))
+            elif len(parts) < 2 or parts[1] not in ("allow", "deny", "dismiss"):
+                usage = "[yellow]usage: /trust allow | /trust deny | /trust dismiss[/yellow]"
+                self._append(Static(usage, classes="log-line"))
+            else:
+                trust_coro = self._do_trust_command(panel, parts[1])
+                self.run_worker(trust_coro, name="trust", exclusive=False)
             return
 
         # /help 显示帮助
@@ -2129,6 +2161,8 @@ class IwanTuiApp(App[None]):
         self._append(Static("  [cyan]/checkpoint list[/cyan]  列出所有检查点", classes="log-line"))
         self._append(Static("  [cyan]/checkpoint restore <n>[/cyan]  恢复到指定检查点", classes="log-line"))
         self._append(Static("  [cyan]/files [run_id][/cyan]    查看/回滚文件变更（同 F7 面板）", classes="log-line"))
+        trust_help = "  [cyan]/trust allow|deny|dismiss[/cyan]  答复目录信任询问（免 Tab 聚焦）"
+        self._append(Static(trust_help, classes="log-line"))
         self._append(Static("  [cyan]/history[/cyan]         查看会话历史", classes="log-line"))
         self._append(Static("  [cyan]/close[/cyan]           关闭当前会话", classes="log-line"))
         self._append(Static("  [cyan]/recover[/cyan]         恢复崩溃的会话", classes="log-line"))
@@ -2417,6 +2451,15 @@ class IwanTuiApp(App[None]):
             perm_block = self._pending_permission_blocks.pop(tool_use_id, None)
             if perm_block is not None:
                 perm_block._resolve(decision)
+            # 记住类决策补一行"后果说明"：缓存按 工具+参数指纹 命中，
+            # 并落盘 ~/.iwan/policy.toml——用户要知道撤销门在哪
+            if decision in ("always_allow", "always_deny") and perm_block is not None:
+                scope = "不再询问" if decision == "always_allow" else "一律拒绝"
+                self._append(Static(
+                    f"[dim]📌已记住：{perm_block._tool_name}的相同调用（同命令/同路径）今后{scope}"
+                    r"——编辑 ~/.iwan/policy.toml 的 \[always\] 节可撤销[/dim]",
+                    classes="log-line",
+                ))
             # 步骤 3：发送权限响应到 core 服务
             if self._client is not None:
                 try:
@@ -2447,24 +2490,82 @@ class IwanTuiApp(App[None]):
         """
         log.info("trust decided session=%s cwd=%s decision=%s", msg.session_id, msg.cwd, msg.decision)
         try:
+            if self._trust_panel is msg.widget:
+                self._trust_panel = None
             msg.widget.remove()
-            if msg.decision == "dismiss":
-                return
-            if self._client is not None:
-                try:
-                    await self._client.send_command(
-                        "trust.respond",
-                        {
-                            "session_id": msg.session_id,
-                            "cwd": msg.cwd,
-                            "decision": msg.decision,
-                            "persistent": True,
-                        },
-                    )
-                except (IpcError, RuntimeError, OSError):
-                    pass  # 发送失败静默忽略：daemon 里该目录仍是 ask，下次会话还会问
+            await self._do_trust_respond(msg.session_id, msg.cwd, msg.decision)
         except Exception:
             log.exception("on_trust_select_decided failed cwd=%s", msg.cwd)
+
+    # /trust 命令的 worker 包装：先收面板再发 RPC，保证面板不会在等待中复活
+    async def _do_trust_command(self, panel: TrustSelect, decision: str) -> None:
+        """用户在输入框用 /trust 答复信任询问（等价于聚焦面板后按键）"""
+        if self._trust_panel is panel:
+            self._trust_panel = None
+        panel.remove()
+        # session_id/cwd 以面板挂载时收到的那份为准——答复的永远是"问我的这个目录"
+        await self._do_trust_respond(panel._session_id, panel._cwd, decision)
+
+    # 信任目录键归一化：反斜杠→正斜杠、去尾分隔符、忽略大小写（Windows 路径不分大小写）
+    @staticmethod
+    def _trust_key(cwd: str) -> str:
+        return cwd.replace("\\", "/").rstrip("/").casefold()
+
+    # 信任答复的单一实现：面板键入与 /trust 命令共用，dismiss 不发 RPC 只留状态行
+    async def _do_trust_respond(self, session_id: str, cwd: str, decision: str) -> None:
+        """
+        把信任决策送到 daemon，并把结果大声告诉用户
+
+        allow/deny → trust.respond（持久化 trust.toml）；dismiss → 仅本地收起
+        并说明现状语义。成功/失败都必须有可见回声：用户反馈"面板不消失"的
+        根因是答复成功与否完全无感，静默失败等于答复从未发生。
+        """
+        if decision == "dismiss":
+            # 收起≠决定：说清"维持现状"意味着什么，别让人以为 dismiss 是拒绝
+            self._append(Static(
+                "[dim]↩ 信任询问已收起（未决定）：写操作维持逐次审批[/dim]",
+                classes="log-line",
+            ))
+            return
+        log.info("trust respond session=%s cwd=%s decision=%s", session_id, cwd, decision)
+        ok = False
+        err = ""
+        if self._client is not None:
+            try:
+                res = await self._client.send_command(
+                    "trust.respond",
+                    {
+                        "session_id": session_id,
+                        "cwd": cwd,
+                        "decision": decision,
+                        "persistent": True,
+                    },
+                )
+                ok = bool(res.get("ok", True))
+                if not ok:
+                    err = str(res.get("error", "daemon 拒绝了该答复"))
+            except (IpcError, RuntimeError, OSError) as exc:
+                err = str(exc)
+        else:
+            err = "未连接 daemon"
+        key = self._trust_key(cwd)
+        if ok:
+            # 记住"已答复"：本窗口内该目录后续的 trust.requested 直接吞掉不再挂面板
+            self._trust_answered.add(key)
+            self._trust_echo = (key, decision, time.monotonic())
+            icon = "✅" if decision == "allow" else "⛔"
+            verb = "已信任" if decision == "allow" else "已拉黑（写与执行一律拦截）"
+            self._append(Static(
+                f"[bold {('green' if decision == 'allow' else 'red')}]{icon} {verb}[/bold]"
+                f" [cyan]{cwd}[/cyan]  [dim]已写入 ~/.iwan/trust.toml，这个目录不再询问[/dim]",
+                classes="log-line",
+            ))
+        else:
+            self._append(Static(
+                f"[bold red]⚠ 信任答复发送失败：{err}[/bold red]"
+                "[dim]  面板已收起但决定未生效，可再试 /trust allow 或 CLI: iwan trust grant[/dim]",
+                classes="log-line",
+            ))
 
     # 处理回滚面板的还原请求：发 files.restore、逐行汇报结果、刷新面板（S9 C2）
     async def on_file_changes_select_restore_requested(
@@ -2944,7 +3045,8 @@ class IwanTuiApp(App[None]):
                     "session.create", {"mode": "chat", "cwd": os.getcwd()}
                 )
                 sid = str(created["session_id"])
-                title = str(created.get("title", "")) or sid
+                # 同 _do_new_session：初始不垫数字 ID，(untitled) → 首轮自动起名接管
+                title = str(created.get("title", ""))
                 self._add_session(sid, title)
 
                 # 更新会话配置
@@ -3123,6 +3225,10 @@ class IwanTuiApp(App[None]):
                 state.auto_mode = m
                 if m in _AUTO_ALIAS_TO_MODE:
                     state.permission_mode = _AUTO_ALIAS_TO_MODE[m]
+            elif t == "session.renamed":
+                # 后台标签也要跟着改名：不然切过去看到的还是 sess-xxxx 数字
+                state.title = str(event.get("title", ""))
+                self._refresh_tabbar()
             return  # 后台会话事件处理完毕，不渲染 UI
 
         # ========== LLM Token 事件（优先处理，不打断流式输出） ==========
@@ -3442,8 +3548,8 @@ class IwanTuiApp(App[None]):
                 prompt.border_title = "permission required"
             # 将权限审批块添加到日志视图
             self._append(perm_block)
-            # 创建权限选择控件并挂载
-            select = PermissionSelect(tool_use_id)
+            # 创建权限选择控件并挂载（带工具上下文——面板必须自解释"批的是什么"）
+            select = PermissionSelect(tool_use_id, tool_name, param_preview)
             self._mount_permission_select(select)
             log.debug("PermissionSelect mounted before #prompt  pending=%d", len(self._pending_permission_blocks))
 
@@ -3515,21 +3621,39 @@ class IwanTuiApp(App[None]):
             session_id = str(event.get("session_id", ""))
             cwd = str(event.get("cwd", ""))
             has_instr = bool(event.get("has_instruction_files", False))
-            trust_select = TrustSelect(session_id, cwd, has_instruction_files=has_instr)
-            try:
-                self.mount(trust_select, before="#prompt")
-            except Exception:
-                log.exception("failed to mount TrustSelect cwd=%s", cwd)
+            if self._trust_key(cwd) in self._trust_answered:
+                # 本窗口已成功答复过该目录：daemon 再问（重启/多端）直接吞掉，
+                # 用户预期就是"确认一次永远不再弹"
+                log.debug("trust.requested suppressed for answered cwd=%s", cwd)
+            else:
+                # 同一目录重复询问（新会话复用面板槽位）：撤旧挂新，屏幕上永远只有一张问句
+                if self._trust_panel is not None:
+                    self._trust_panel.remove()
+                trust_select = TrustSelect(session_id, cwd, has_instruction_files=has_instr)
+                self._trust_panel = trust_select
+                try:
+                    self.mount(trust_select, before="#prompt")
+                except Exception:
+                    self._trust_panel = None
+                    log.exception("failed to mount TrustSelect cwd=%s", cwd)
 
         elif t == "trust.changed":
-            # 信任决定被设定/撤销：显示一行状态，供多端一致性观察（本端刚答过也照显）
+            # 信任决定被设定/撤销：显示一行状态，供多端一致性观察；
+            # 本端刚发出的答复由 _do_trust_respond 的大字回声负责，这里压制重复行
             decision = str(event.get("decision", ""))
             cwd = str(event.get("cwd", ""))
-            icon = "✅" if decision == "allow" else ("⛔" if decision == "deny" else "↩")
-            self._append(Static(
-                f"[dim]{icon} trust {decision}[/dim]  [cyan]{cwd}[/cyan]",
-                classes="log-line",
-            ))
+            key = self._trust_key(cwd)
+            if self._trust_echo is not None and self._trust_echo[0] == key \
+                    and self._trust_echo[1] == decision \
+                    and time.monotonic() - self._trust_echo[2] < 5.0:
+                self._trust_echo = None
+            else:
+                zh = {"allow": "✅ 已信任", "deny": "⛔ 已拉黑", "ask": "↩ 回到未决（会重新询问）"}
+                label = zh.get(decision, f"trust {decision}")
+                self._append(Static(
+                    f"[bold]{label}[/bold]  [cyan]{cwd}[/cyan]  [dim]（其他端/CLI 变更）[/dim]",
+                    classes="log-line",
+                ))
 
         # ========== 日志行事件 ==========
 
