@@ -142,3 +142,84 @@ async def test_closed_session_rejects_message(tmp_path: Path) -> None:
     with pytest.raises(HandlerError) as exc:
         await manager.send_message(session.id, "again")
     assert exc.value.code == SESSION_CLOSED
+
+
+# 功能：验证首轮对话结束后 LLM 精修标题生效：种子（第一句话）→ 主题标题，meta 落盘且发第二次 renamed
+# 设计：假 provider 返回带引号句号的脏输出，锁死 _clean_title 的剥壳逻辑；用 _title_tasks
+#       集合确定性 pump 后台任务（不 sleep 轮询）；顺带断言启发式+精修共两次 session.renamed
+#       事件——TUI 靠它们先把标签从数字换成人话、再换成主题
+async def test_first_run_llm_refines_session_title(tmp_path: Path) -> None:
+    import asyncio
+
+    from iwan_claude.core.llm.types import LlmResponse
+
+    class _TitleProvider:
+        def __init__(self) -> None:
+            self.seen_system: str = ""
+
+        async def chat(self, messages: object, tool_schemas: object, bus: object,
+                       run_id: str, *, step: int = 0, system: object = None) -> LlmResponse:
+            self.seen_system = str(system or "")
+            return LlmResponse(stop_reason="end_turn", text="“实验数据对比报告”。")
+
+    provider = _TitleProvider()
+    store = SessionStore(tmp_path)
+    events: list[object] = []
+    bus = EventBus()
+
+    async def collect(event: object) -> None:
+        events.append(event)
+
+    bus.subscribe(collect)
+    manager = SessionManager(store, lambda: _Runner(), bus, provider=provider)  # type: ignore[arg-type]
+    session = await manager.create("chat")
+
+    await manager.send_message(session.id, "帮我把这些实验数据整理成一份对比报告 重点看三组差异", skip_auto_skill=True)
+    # 启发式标题即时生效（第一句话前缀）
+    assert session.title.startswith("帮我把这些实验数据")
+    while manager._title_tasks:
+        await asyncio.gather(*list(manager._title_tasks))
+
+    assert session.title == "实验数据对比报告"
+    assert store.read_meta(session.id).title == "实验数据对比报告"
+    renamed = [e for e in events if getattr(e, "type", "") == "session.renamed"]
+    assert [r.title for r in renamed] == [renamed[0].title, "实验数据对比报告"]
+    assert "标题生成器" in provider.seen_system
+
+
+# 功能：验证精修的两条安全阀——LLM 抛错保留启发式标题；精修前用户手动改名则不覆盖
+# 设计：两个失败/竞态分支各建一个独立 manager，共用 pump 逻辑；断言标题终值而非仅不崩，
+#       确保"人比模型大"的优先级和异常兜底都不是空话
+async def test_title_refine_safety_valves(tmp_path: Path) -> None:
+    import asyncio
+
+    from iwan_claude.core.session.manager import SessionManager as _M  # noqa: F401  拼写防呆：确保引用稳定
+
+    class _BoomProvider:
+        async def chat(self, messages: object, tool_schemas: object, bus: object,
+                       run_id: str, *, step: int = 0, system: object = None) -> object:
+            raise RuntimeError("llm down")
+
+    store = SessionStore(tmp_path)
+    m1 = SessionManager(store, lambda: _Runner(), EventBus(), provider=_BoomProvider())  # type: ignore[arg-type]
+    s1 = await m1.create("chat")
+    await m1.send_message(s1.id, "回退行为验证：LLM 挂掉时保留第一句话标题", skip_auto_skill=True)
+    while m1._title_tasks:
+        await asyncio.gather(*list(m1._title_tasks))
+    assert s1.title.startswith("回退行为验证")  # 启发式保留
+
+    # 手动改名竞态：精修协程被挂起前 title 已不是种子——用先改名再 pump 模拟
+    class _TitleProvider2:
+        async def chat(self, messages: object, tool_schemas: object, bus: object,
+                       run_id: str, *, step: int = 0, system: object = None) -> object:
+            from iwan_claude.core.llm.types import LlmResponse
+            return LlmResponse(stop_reason="end_turn", text="机器起的名字")
+
+    m2 = SessionManager(SessionStore(tmp_path / "s2"), lambda: _Runner(), EventBus(),
+                        provider=_TitleProvider2())  # type: ignore[arg-type]
+    s2 = await m2.create("chat")
+    await m2.send_message(s2.id, "这条消息将被人工标题覆盖", skip_auto_skill=True)
+    await m2.rename_session(s2.id, "人写的标题")
+    while m2._title_tasks:
+        await asyncio.gather(*list(m2._title_tasks))
+    assert s2.title == "人写的标题"
