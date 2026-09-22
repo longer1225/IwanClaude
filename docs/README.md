@@ -9,6 +9,8 @@
 
 | 文档 | 一句话说明 |
 |---|---|
+| [desktop-gui-electron.md](design/desktop-gui-electron.md) | 桌面 GUI 架构篇（选型定稿）：Electron + React 客户端直连 TCP daemon，web 形态 M4 可选；含 PySide6/Tauri 对比存档、Transport 双实现、TS 类型生成、M0-M4 分期 |
+| [gui-frontend-codex-replica.md](design/gui-frontend-codex-replica.md) | 桌面 GUI 界面篇：Codex 桌面版调研（Electron+React+Rust app-server 事实存档）+ 截图复刻规格、视觉 token、控件→协议映射、设置界面 |
 | [hooks.md](design/hooks.md) | PreToolUse/PostToolUse 钩子体系设计：退出码协议、多 hook 取最严、方向不对称（hook ALLOW 不可翻 deny） |
 | [permission-modes.md](design/permission-modes.md) | 权限模式对齐 Claude Code 五态（default/acceptEdits/plan/auto/bypassPermissions），deny 地板任何模式不可穿 |
 | [rag.md](design/rag.md) | RAG 子系统全面评审后的设计复盘：索引、检索、嵌入链路的取舍 |

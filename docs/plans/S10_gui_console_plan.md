@@ -2,6 +2,10 @@
 
 > 前置：`docs/plans/S9_security_rollback_plan.md`（信任对话框、审批、文件回滚的协议都在 S9 定稿，本计划书是它们的**消费方**）。
 > 状态：计划书（未开工）。目标读者：决定要不要做、按什么路线做、分几期做。
+> 修订 2026-09-22（二）：**§3 技术选型定稿**——曾短暂转向 PySide6 原生（"脱离 web"约束），
+> 项目所有者了解 Codex 本体即 Electron 后撤销该约束，终版 = **Electron + React 桌面优先、web 形态后置**。
+> 设计定稿见 `docs/design/desktop-gui-electron.md`（架构）+ `docs/design/gui-frontend-codex-replica.md`（界面复刻规格）。
+> §1 对标分析与 §4 信息架构仍然有效并被继承。
 
 ---
 

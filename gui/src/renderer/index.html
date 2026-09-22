@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- CSP 不写死在这里：dev 模式 vite 要注入内联脚本+开 ws 热更新，meta 会挡死；
+         生产构建时由 electron.vite.config.ts 的 csp 插件注入（apply:'build'） -->
+    <title>iwan</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
