@@ -189,7 +189,7 @@ function createWindow(): void {
               return 'session-picked'
             })()`, 14)
             js('open-settings', `(() => {
-              const b = [...document.querySelectorAll('.side-head .icon-btn')].find((x) => x.title === '设置')
+              const b = document.querySelector('.side-foot .foot-set')
               if (!b) return 'no-gear'
               b.click(); return 'opened'
             })()`, 18)
@@ -241,7 +241,7 @@ function createWindow(): void {
             snap(64) // 文件预览浮层（深色）
             js('close-viewer', `(() => { window.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape'})); return 'closed' })()`, 67)
             js('revert-light', `(() => {
-              const g = [...document.querySelectorAll('.side-head .icon-btn')].find((x) => x.title === '设置')
+              const g = document.querySelector('.side-foot .foot-set')
               if (!g) return 'no-gear'
               g.click(); return 'settings-reopened'
             })()`, 70)

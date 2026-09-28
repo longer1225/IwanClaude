@@ -146,13 +146,21 @@ input { font: inherit; color: inherit; }
   min-height: 0;
 }
 
-.side-head {
-  display: flex;
+.side-foot .foot-set {
+  display: inline-flex;
   align-items: center;
-  gap: 8px;
-  padding: 0 8px 12px;
+  gap: 6px;
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 600;
+  padding: 5px 9px;
+  margin-left: -4px;
+  border-radius: var(--radius-item);
+  cursor: pointer;
 }
-.brand { font-size: 17px; font-weight: 700; letter-spacing: 0.2px; }
+.side-foot .foot-set:hover { background: var(--item-hover); }
 
 .icon-btn {
   border: none;

@@ -307,15 +307,6 @@ export function Sidebar() {
 
   return (
     <aside className="sidebar">
-      <div className="side-head">
-        {/* 品牌名搬进了自绘顶栏 TitleBar，这里只留窗口内工具位 */}
-        <span className="grow" />
-        <button className="icon-btn" title="设置" onClick={() => gui.set({ settingsOpen: true })}>
-          <Icon name="gear" size={15} />
-        </button>
-        <span className={`dot dot-${status}`} title={`daemon: ${status}`} />
-      </div>
-
       <nav className="side-nav">
         <Row item={{ key: 'new', label: '新对话', icon: 'pencil', active: activeSid === null && gui.mainView === 'chat', onClick: () => { gui.set({ mainView: 'chat' }); setActive(null) } }} />
         <Row item={{ key: 'git', label: 'Git', icon: 'git', active: gui.mainView === 'git', onClick: () => gui.set({ mainView: 'git' }) }} />
@@ -420,9 +411,14 @@ export function Sidebar() {
       </div>
 
       <div className="side-foot">
-        <span className={`dot dot-${status}`} />
-        <span className="foot-item">iwan-core</span>
+        {/* 设置入口从侧栏头顶搬到底部左下角：带文字 + 大图标 + 高对比色，
+            不再是一枚让人猜"这是灯泡还是齿轮"的浅灰小图标 */}
+        <button className="foot-set" title="设置" onClick={() => gui.set({ settingsOpen: true })}>
+          <Icon name="gear" size={17} />设置
+        </button>
         <span className="grow" />
+        <span className={`dot dot-${status}`} title={`daemon: ${status}`} />
+        <span className="foot-item">iwan-core</span>
         <span className="foot-item dim">7437</span>
       </div>
     </aside>
