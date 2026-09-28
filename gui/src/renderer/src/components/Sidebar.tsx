@@ -308,7 +308,7 @@ export function Sidebar() {
   return (
     <aside className="sidebar">
       <div className="side-head">
-        <span className="brand">iwan</span>
+        {/* 品牌名搬进了自绘顶栏 TitleBar，这里只留窗口内工具位 */}
         <span className="grow" />
         <button className="icon-btn" title="设置" onClick={() => gui.set({ settingsOpen: true })}>
           <Icon name="gear" size={15} />

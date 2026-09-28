@@ -1,4 +1,4 @@
-// 应用根组件：三栏布局（侧栏 + 主区 + 右栏）+ 设置/预览浮层 + 连接编排
+// 应用根组件：自绘顶栏 + 三栏布局（侧栏 + 主区 + 右栏）+ 设置/预览浮层 + 连接编排
 //
 // 【学习要点】1) 连接生命周期是"事件驱动重连"：主进程 transport 断线自动重连，
 // 渲染层只监听 status——每次变 connected 都重新 event.subscribe（幂等新订阅）
@@ -23,6 +23,7 @@ import { McpView } from './components/McpView'
 import { GitPanel } from './components/GitPanel'
 import { SshView } from './components/SshView'
 import { WorkflowView } from './components/WorkflowView'
+import { TitleBar } from './components/TitleBar'
 import { Icon } from './components/Icon'
 
 // 空态插画：Codex 风格的云形轮廓（单色描边，不引图片资源）
@@ -102,45 +103,48 @@ export default function App() {
     : mainView === 'ssh' ? <SshView /> : mainView === 'workflow' ? <WorkflowView /> : null
 
   return (
-    <div className={`shell status-${status}${rightOpen && mainView === 'chat' ? ' rp-open' : ''}`}>
-      <Sidebar />
-      <main className="main">
-        {fnView ? (
-          <div className="fn-main">{fnView}</div>
-        ) : (
-          <>
-            <div className="main-inner">
-              {empty ? (
-                <div className="empty">
-                  <EmptyCloud />
-                  <div className="empty-title">我们要构建什么？</div>
-                  <div className="empty-sub">先选项目目录，回车开一个新会话；运行中随时输入即转向</div>
-                </div>
-              ) : (
-                <ThreadView sid={activeSid!} msgs={thread} />
-              )}
+    <div className="frame">
+      <TitleBar />
+      <div className={`shell status-${status}${rightOpen && mainView === 'chat' ? ' rp-open' : ''}`}>
+        <Sidebar />
+        <main className="main">
+          {fnView ? (
+            <div className="fn-main">{fnView}</div>
+          ) : (
+            <>
+              <div className="main-inner">
+                {empty ? (
+                  <div className="empty">
+                    <EmptyCloud />
+                    <div className="empty-title">我们要构建什么？</div>
+                    <div className="empty-sub">先选项目目录，回车开一个新会话；运行中随时输入即转向</div>
+                  </div>
+                ) : (
+                  <ThreadView sid={activeSid!} msgs={thread} />
+                )}
+              </div>
+              <button
+                className={`panel-toggle${rightOpen ? ' on' : ''}`}
+                title={rightOpen ? '收起右侧面板' : '展开右侧面板：文件 / 变更 / 任务'}
+                onClick={() => guiSet({ rightOpen: !rightOpen })}
+              >
+                <Icon name="panelRight" size={15} />
+              </button>
+              <Composer booted={booted} />
+            </>
+          )}
+          {status !== 'connected' && (
+            <div className="conn-banner">
+              {status === 'connecting' && '正在连接 iwan-core…（首次会自动启动 daemon，冷启动需要几十秒）'}
+              {status === 'reconnecting' && '与 daemon 的连接断开，正在重连…'}
+              {status === 'error' && '无法连接 daemon —— 可手动运行：uv run iwan-core'}
             </div>
-            <button
-              className={`panel-toggle${rightOpen ? ' on' : ''}`}
-              title={rightOpen ? '收起右侧面板' : '展开右侧面板：文件 / 变更 / 任务'}
-              onClick={() => guiSet({ rightOpen: !rightOpen })}
-            >
-              <Icon name="panelRight" size={15} />
-            </button>
-            <Composer booted={booted} />
-          </>
-        )}
-        {status !== 'connected' && (
-          <div className="conn-banner">
-            {status === 'connecting' && '正在连接 iwan-core…（首次会自动启动 daemon，冷启动需要几十秒）'}
-            {status === 'reconnecting' && '与 daemon 的连接断开，正在重连…'}
-            {status === 'error' && '无法连接 daemon —— 可手动运行：uv run iwan-core'}
-          </div>
-        )}
-      </main>
-      {rightOpen && mainView === 'chat' && <RightPanel />}
-      <FileViewer />
-      {hydrated && <SettingsView />}
+          )}
+        </main>
+        {rightOpen && mainView === 'chat' && <RightPanel />}
+        <FileViewer />
+        {hydrated && <SettingsView />}
+      </div>
     </div>
   )
 }

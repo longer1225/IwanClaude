@@ -82,14 +82,59 @@ body {
 button { font: inherit; color: inherit; }
 input { font: inherit; color: inherit; }
 
-/* ---------------- 三栏骨架 ---------------- */
+/* ---------------- 窗口骨架：自绘顶栏 + 三栏 ---------------- */
+/* frame 接管 100vh，shell 用 flex:1 吃余量——顶栏高度只在其自身规则里改一次 */
+.frame { display: flex; flex-direction: column; height: 100vh; }
 .shell {
   display: grid;
   grid-template-columns: 250px minmax(0, 1fr);
-  height: 100vh;
+  flex: 1;
+  min-height: 0;
   background: linear-gradient(180deg, var(--bg-grad-1) 0%, var(--bg-grad-2) 28%, var(--bg-grad-3) 62%, var(--bg-grad-4) 100%);
 }
 .shell.rp-open { grid-template-columns: 250px minmax(0, 1fr) 340px; }
+
+/* 顶栏：整条是系统拖拽区，按钮各自 no-drag；z-index 压过设置浮层(90)——
+   弹窗开着时窗口照样能拖，这是无边框 App 的基本礼貌。
+   双击拖拽区最大化由系统对 drag 区域自动提供，无需自实现 */
+.titlebar {
+  height: 38px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  background: var(--bg-grad-1);
+  border-bottom: 1px solid var(--line);
+  user-select: none;
+  -webkit-app-region: drag;
+  position: relative;
+  z-index: 100;
+}
+.tb-brand {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 12px 0 15px;
+  font-size: 12.5px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  color: var(--text-primary);
+}
+.tb-mark { width: 10px; height: 10px; border-radius: 50%; background: var(--accent); }
+.tb-drag { flex: 1; align-self: stretch; }
+.tb-btn {
+  width: 46px;
+  align-self: stretch;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  -webkit-app-region: no-drag;
+  cursor: default;
+}
+.tb-btn:hover { background: var(--item-hover); color: var(--text-primary); }
+.tb-close:hover { background: #c42b1c; color: #fff; }
 
 /* ---------------- 左侧栏 ---------------- */
 .sidebar {

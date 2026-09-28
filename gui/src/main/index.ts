@@ -3,7 +3,7 @@
 // 【学习要点】安全红线照抄官方纪律：渲染进程 nodeIntegration=false、
 // contextIsolation=true——页面代码摸不到 node，一切 TCP/文件系统能力
 // 都经 preload 的两个白名单通道过来。这也是 Codex/Electron 应用的标准分层。
-import { app, BrowserWindow, ipcMain, dialog, shell } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, shell, Menu } from 'electron'
 import path from 'node:path'
 import { RpcTransport } from './rpc-transport'
 import { ensureDaemon } from './daemon'
@@ -12,14 +12,20 @@ import { registerFsBridge } from './fs-bridge'
 let win: BrowserWindow | null = null
 let transport: RpcTransport | null = null
 
-// 创建主窗口：1440x900 起始、系统标题栏（frameless 不做——决策见设计文档复刻篇 §3 区域 A）
+// 创建主窗口：1440x900 起始、无边框 + 渲染层自绘顶栏（2026-09-28 用户拍板推翻
+// 复刻篇 §3 的"frameless 不做"决策：原生黑框与暖色主题割裂，去框更显专业）
 function createWindow(): void {
+  // 原生菜单栏随 frame 一起消失；非 mac 直接卸载，避免隐藏菜单仍截获
+  // Ctrl+R 等加速器。mac 保留——darwin 无 frame 菜单是惯例例外，卸载等于
+  // 丢掉复制/粘贴加速器兜底（我们只发 Windows，这行是防坑不是功能）
+  if (process.platform !== 'darwin') Menu.setApplicationMenu(null)
   win = new BrowserWindow({
     width: 1440,
     height: 900,
     minWidth: 980,
     minHeight: 640,
     title: 'iwan',
+    frame: false, // 去原生标题栏；拖拽/双击最大化由渲染层 .titlebar 的 app-region 承担
     backgroundColor: '#F6F1E7', // 首帧即暖色，避免白闪（渐变带的顶色）
     webPreferences: {
       preload: path.join(__dirname, '../preload/index.js'),
@@ -60,6 +66,38 @@ function createWindow(): void {
     const r = await dialog.showOpenDialog(win!, { properties: ['openDirectory'], title: '选择项目目录' })
     return r.canceled ? null : r.filePaths[0]
   })
+
+  // ===== 自绘顶栏的窗口控制三件套 =====
+  // 【学习要点】控制走 ipcRenderer.send（单向、即发即忘）而非 invoke——
+  // 最小化/关闭没有"返回值"要等，invoke 反而给渲染层留一个永不 settle 的
+  // Promise 悬崖（关窗瞬间）；状态回传用事件推送 + 挂载补查双通道，与
+  // iwan:status 同一套模式：推送会丢（时序），补查兜底（.is-maximized）。
+  ipcMain.on('win:minimize', () => win?.minimize())
+  ipcMain.on('win:toggle-maximize', () => {
+    if (!win) return
+    if (win.isMaximized()) win.unmaximize()
+    else win.maximize()
+  })
+  ipcMain.on('win:close', () => win?.close())
+  ipcMain.handle('win:is-maximized', () => !!win?.isMaximized())
+  const pushMax = (maximized: boolean): void => {
+    // 必须先后判 null 与 destroyed：win?.isDestroyed() 在 win 为 null 时得
+    // undefined，取反后为真——"没销毁"和"不存在"是两回事
+    if (win && !win.isDestroyed()) win.webContents.send('win:maximized', maximized)
+  }
+  win.on('maximize', () => pushMax(true))
+  win.on('unmaximize', () => pushMax(false))
+
+  // 菜单卸载后开发期仍要能开 DevTools：F12 / Ctrl+Shift+I（仅 dev 构建生效，
+  // 生产包没有 ELECTRON_RENDERER_URL，快捷键不劫持）
+  if (process.env.ELECTRON_RENDERER_URL) {
+    win.webContents.on('before-input-event', (_e, input) => {
+      const k = input.key.toLowerCase()
+      if (input.type === 'keyDown' && (k === 'f12' || (input.control && input.shift && k === 'i'))) {
+        win?.webContents.toggleDevTools()
+      }
+    })
+  }
 
   // 外部链接一律交给系统浏览器，应用内永不导航到远端
   win.webContents.setWindowOpenHandler(({ url }) => {

@@ -53,5 +53,16 @@ contextBridge.exposeInMainWorld('iwan', {
   // 在系统文件管理器中打开目录
   openPath: (p: string): Promise<string> => ipcRenderer.invoke('ui:open-path', p),
   // 单选文件对话框（附件）
-  pickFile: (): Promise<string | null> => ipcRenderer.invoke('ui:pick-file')
+  pickFile: (): Promise<string | null> => ipcRenderer.invoke('ui:pick-file'),
+  // ===== 自绘顶栏的窗口控制（fire-and-forget，理由见主进程注释） =====
+  winMinimize: (): void => ipcRenderer.send('win:minimize'),
+  winToggleMaximize: (): void => ipcRenderer.send('win:toggle-maximize'),
+  winClose: (): void => ipcRenderer.send('win:close'),
+  winIsMaximized: (): Promise<boolean> => ipcRenderer.invoke('win:is-maximized'),
+  // 订阅最大化态变化（图标在 最大化/还原 间切换）；返回退订函数
+  onWinMaximized: (cb: (maximized: boolean) => void): (() => void) => {
+    const h = (_e: unknown, m: boolean): void => cb(m)
+    ipcRenderer.on('win:maximized', h)
+    return () => ipcRenderer.removeListener('win:maximized', h)
+  }
 })
