@@ -32,6 +32,12 @@ def language_hint() -> str:
     return os.environ.get("IWAN_SPEECH_LANG", "zh").strip()
 
 
+# 启动预热开关：IWAN_SPEECH_PREWARM=0 关闭（集成测试 daemon 不往内存拖百兆模型，
+# 用户想回"首次用到才加载"的老行为也可关）——沿用"env 注入不开配置节"的先例
+def prewarm_enabled() -> bool:
+    return os.environ.get("IWAN_SPEECH_PREWARM", "1").strip() != "0"
+
+
 class SpeechTranscriber:
     """
     语音转写器：懒加载 whisper 模型 + 同步转写入口
@@ -66,6 +72,18 @@ class SpeechTranscriber:
                     "或改用 IWAN_SPEECH_MODEL=tiny"
                 ) from e
         return self._model
+
+    # 预热：加载模型 + 0.1 秒静音空跑一遍。第二段是精髓——ctranslate2 的
+    # "第一次真推理"还有算子路径预热，只 load 不空跑等于把最后一截延迟留给用户
+    def prewarm(self) -> str:
+        model = self._ensure_model()
+        import numpy as np
+
+        silence = np.zeros(1600, dtype=np.float32)  # 0.1 秒 @16k
+        segments, _info = model.transcribe(silence, language=language_hint() or None)
+        for _ in segments:  # transcribe 是生成器，消费完才真正执行推理
+            pass
+        return model_size()
 
     # PCM → 文字（同步）：入参是 int16 小端单声道裸字节的 base64；校验先于模型加载
     def transcribe_sync(self, audio_b64: str, sample_rate: int) -> str:

@@ -205,7 +205,7 @@ from iwan_claude.core.mcp.server import McpServerManager     # MCP 服务器管�
 from iwan_claude.core.permissions.manager import PermissionManager  # 权限管理
 from iwan_claude.core.permissions.storage import load_policy_file   # 加载权限策略
 from iwan_claude.core.schedule import ScheduleStore, Scheduler  # noqa: E402  定时任务（存储 + 调度循环）
-from iwan_claude.core.speech import SpeechTranscriber  # noqa: E402  本地语音转写器（V1）
+from iwan_claude.core.speech import SpeechTranscriber, prewarm_enabled  # noqa: E402  本地语音转写器（V1）
 from iwan_claude.core.ssh import keys as ssh_keys  # noqa: E402  SSH 密钥与主机信任（M4a）
 from iwan_claude.core.ssh.connections import SshConnStore  # noqa: E402  SSH 连接表存储（M4a）
 from iwan_claude.core.ssh.session import SshSessionManager  # noqa: E402  SSH 终端会话池（M4c）
@@ -328,8 +328,10 @@ class CoreApp:
         # W1 工作流：定义/运行存储 + 运行引擎（run() 里创建并清算孤儿；None=未启动）
         self._workflow_store: WorkflowStore | None = None
         self._workflow_engine: WorkflowEngine | None = None
-        # V1 语音转写器（run() 里创建；模型本身懒加载，这里只是挂个空壳）
+        # 语音转写器（run() 里创建；启动后台预热见 _speech_prewarm，可 env 关闭）
         self._speech: SpeechTranscriber | None = None
+        # 预热 task 句柄：防 GC + 关停时 cancel
+        self._speech_prewarm_task: asyncio.Task[None] | None = None
         # run 级懒建缓存：workflow run_id → SpawnAgentTool / one_shot 会话 id；收尾时清空
         self._wf_tools: dict[str, SpawnAgentTool] = {}
         self._wf_sessions: dict[str, str] = {}
@@ -957,6 +959,15 @@ class CoreApp:
         assert self._workflow_store is not None
         rows = self._workflow_store.list_runs(cmd.id, cmd.limit)
         return WorkflowRunsResult(runs=[self._wf_run_wire(r) for r in rows])
+
+    # 后台预热语音模型：加载+静音空跑，失败只记日志——预热是锦上添花，砸了也不许影响启动
+    async def _speech_prewarm(self) -> None:
+        assert self._speech is not None
+        try:
+            size = await asyncio.to_thread(self._speech.prewarm)
+            logger.info("speech: 语音模型已预热就位 model=%s", size)
+        except Exception:
+            logger.exception("speech: 预热失败，语音将退回首次用到时懒加载")
 
     # 语音转文字（speech.transcribe）：模型加载+推理全在 worker 线程，循环不停摆
     async def _speech_transcribe_handler(self, params: dict[str, Any]) -> SpeechTranscribeResult:
@@ -2333,6 +2344,12 @@ class CoreApp:
         logger.info("iwan-core %s listening addr=%s", iwan_claude.__version__, addr)
         logger.info("config: %s", self._config)
 
+        # ===== 语音模型后台预热 =====
+        # 桌面 App 通行做法：启动不挡端口、首次按 🎤 不付模型加载的等待。
+        # 放 server.start() 之后：端口先开、ping/GUI 连接不受百兆加载挤占
+        if self._speech is not None and prewarm_enabled():
+            self._speech_prewarm_task = asyncio.create_task(self._speech_prewarm())
+
         # ===== 设置退出信号处理 =====
         # 获取当前运行的事件循环
         loop = asyncio.get_running_loop()
@@ -2383,6 +2400,12 @@ class CoreApp:
         if self._pr_poller_task is not None:
             self._pr_poller_task.cancel()
             self._pr_poller_task = None
+
+        # 语音预热 task：cancel 只是解开 await（to_thread 的工作线程会跑完当前
+        # 加载动作后自然退出，由 loop 关闭 executor 时回收），防悬挂 task 警告
+        if self._speech_prewarm_task is not None:
+            self._speech_prewarm_task.cancel()
+            self._speech_prewarm_task = None
 
         # 停工作流引擎：cancel 活跃 run 协程并等收口（_execute 里各自标
         # interrupted）；放在 registry.shutdown 前——run 协程还在 await 子任务，

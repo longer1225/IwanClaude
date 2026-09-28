@@ -13,7 +13,7 @@ from typing import Any
 import numpy as np
 import pytest
 
-from iwan_claude.core.speech import SpeechTranscriber, model_size
+from iwan_claude.core.speech import SpeechTranscriber, model_size, prewarm_enabled
 
 
 # 功能：采样率越界（低于 8k / 高于 48k）都在加载模型前被 ValueError 拦下
@@ -115,3 +115,48 @@ def test_model_size_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
     assert model_size() == "tiny"
     monkeypatch.setenv("IWAN_SPEECH_MODEL", "  ")
     assert model_size() == "base"
+
+
+# 功能：prewarm 加载模型后用 0.1 秒静音空跑一遍，并把惰性生成器消费到底，返回模型规模
+# 设计：假模型的 transcribe 记录传入音频并返回"迭代过才置位"的生成器——
+# 若实现忘了 for 消费（ctranslate2 的推理在迭代时才真正发生），consumed 保持
+# False，测试即红；这正是预热比"只 load"多出来的那一截价值，必须锁死。
+# 音频断言 1600 点 float32（=0.1 秒 @16k），语言参数走 language_hint 默认 zh
+def test_prewarm_runs_silence_and_drains_generator(monkeypatch: pytest.MonkeyPatch) -> None:
+    t = SpeechTranscriber()
+    captured: dict[str, Any] = {}
+    consumed = {"drained": False}
+
+    def _lazy_segments() -> Any:
+        yield from ()
+        consumed["drained"] = True
+
+    class _FakeModel:
+        def transcribe(self, audio: np.ndarray, **kw: Any) -> tuple[Any, Any]:
+            captured["audio"] = audio
+            captured["kw"] = kw
+            return _lazy_segments(), object()
+
+    t._model = _FakeModel()  # 预置缓存：prewarm 不该再触发真加载
+    monkeypatch.setenv("IWAN_SPEECH_MODEL", "small")
+    assert t.prewarm() == "small"
+    assert captured["audio"].dtype == np.float32
+    assert len(captured["audio"]) == 1600
+    assert consumed["drained"] is True
+    assert captured["kw"]["language"] == "zh"
+
+
+# 功能：IWAN_SPEECH_PREWARM 默认开（未设/空值都算开），显式设 "0" 才关
+# 设计：开关的消费端（app.py 建 task 与否）属集成面，单测只锁读端语义——
+# 用 "0 "/" 0" 两个带空格变体验证 strip 生效，防 env 传值带尾空格时预热赖着不走
+def test_prewarm_enabled_switch(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("IWAN_SPEECH_PREWARM", raising=False)
+    assert prewarm_enabled() is True
+    monkeypatch.setenv("IWAN_SPEECH_PREWARM", "")
+    assert prewarm_enabled() is True
+    monkeypatch.setenv("IWAN_SPEECH_PREWARM", "0")
+    assert prewarm_enabled() is False
+    monkeypatch.setenv("IWAN_SPEECH_PREWARM", " 0 ")
+    assert prewarm_enabled() is False
+    monkeypatch.setenv("IWAN_SPEECH_PREWARM", "1")
+    assert prewarm_enabled() is True

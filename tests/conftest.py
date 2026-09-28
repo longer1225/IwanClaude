@@ -30,6 +30,8 @@ async def running_daemon(free_port: int) -> AsyncGenerator[subprocess.Popen[byte
     env["IWAN_LOG_LEVEL"] = "WARNING"
     env["IWAN_SESSIONS_DIR"] = str(tmp_dir / "sessions")
     env["IWAN_POLICY_FILE"] = str(tmp_dir / "policy.toml")
+    # 关语音预热：测试 daemon 不拖百兆模型进内存、不依赖模型缓存存在
+    env["IWAN_SPEECH_PREWARM"] = "0"
 
     # 启动 daemon 子进程，将 stderr 重定向到临时日志以便排查启动失败
     stderr_path = tmp_dir / "daemon_stderr.log"
