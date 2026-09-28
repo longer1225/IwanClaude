@@ -765,6 +765,135 @@ class HookEvaluatedEvent(BaseModel):
     ts: str
 
 
+class ScheduleFiredEvent(BaseModel):
+    """
+    定时任务触发事件 - 调度器到点启动一次运行时发送
+
+    【字段说明】
+    - type: Literal["schedule.fired"] - 事件类型
+    - task_id: str - 被触发的任务 ID
+    - run_id: str - 本次触发启动的运行 ID（启动失败时空串）
+    - session_id: str - 为本次触发新建的 one_shot 会话 ID
+    - ok: bool - 触发是否成功（False 时 detail 给出原因）
+    - detail: str - 失败摘要或附加说明
+    - ts: str - 时间戳（ISO 8601）
+
+    【设计目的】
+    调度器在没人盯着屏幕的时候干活，事件是它唯一的"打过卡"证明：
+    GUI 订阅后刷新任务表（last_run/next_due），任何客户端离线也能
+    靠 run 的既有事件链还原全过程。CRUD 不发事件——发起端自知。
+    """
+    type: Literal["schedule.fired"] = "schedule.fired"
+    task_id: str
+    run_id: str = ""
+    session_id: str = ""
+    ok: bool = True
+    detail: str = ""
+    ts: str
+
+
+class SshOutputEvent(BaseModel):
+    """
+    SSH 终端输出事件 - 远端会话的显示字节流（合帧后）推给订阅者
+
+    【字段说明】
+    - type: Literal["ssh.output"] - 事件类型
+    - session_id: str - 目标终端会话
+    - data_b64: str - 输出字节的 base64（终端原始字节可能截断 UTF-8，
+      NDJSON 行必须整字符——二进制一律 b64 上链）
+    - ts: str - 时间戳（ISO 8601）
+
+    【设计目的】
+    30ms/16KB 合帧（见 core/ssh/session.py）：帧率对总线友好，
+    延迟对人眼不可感知。xterm.js 端解 b64 直接 write。
+    """
+    type: Literal["ssh.output"] = "ssh.output"
+    session_id: str
+    data_b64: str
+    ts: str
+
+
+class SshClosedEvent(BaseModel):
+    """
+    SSH 终端关闭事件 - 会话终结（远端 exit / 用户关闭 / 水位熔断 / 停机）
+
+    【字段说明】
+    - type: Literal["ssh.closed"] - 事件类型
+    - session_id: str - 结束的会话
+    - exit_code: int - 远端 ssh 退出码（击杀/未知为 -1）
+    - reason: str - 人类可读的死因（页签灰条原样展示）
+    - ts: str - 时间戳（ISO 8601）
+
+    【设计目的】
+    死因必须有名字：exit 0（正常告别）、overflow（积压熔断）、
+    daemon 停机——GUI 和用户拿这一个字段就能分清"我关的"还是"它死的"。
+    """
+    type: Literal["ssh.closed"] = "ssh.closed"
+    session_id: str
+    exit_code: int = -1
+    reason: str = ""
+    ts: str
+
+
+class WorkflowNodeEvent(BaseModel):
+    """
+    工作流节点状态事件 - 单个节点进入 running/ok/fail 时各发一条
+
+    【字段说明】
+    - type: Literal["workflow.node"] - 事件类型
+    - run_id: str - 本次工作流运行 ID
+    - workflow_id: str - 归属工作流（GUI 判断是否在详情页，决定要不要上色）
+    - node: str - 节点名
+    - status: str - "running" | "ok" | "fail"
+    - child_run_id: str - 该节点子 Agent 的 run ID（running 起就有，深链审计）
+    - detail: str - 失败原因摘要（仅 fail 非空，≤200 字）
+    - ts: str - 时间戳（ISO 8601）
+
+    【设计目的】
+    run 即发即返，节点进度全靠这条事件推——GUI 详情页按
+    run_id==当前查看的 run 做不可变节点补丁即时上色。终态写穿
+    workflow_runs.json，错过事件也能靠 workflow.get 对账补画。
+    """
+    type: Literal["workflow.node"] = "workflow.node"
+    run_id: str
+    workflow_id: str
+    node: str
+    status: str
+    child_run_id: str = ""
+    detail: str = ""
+    ts: str
+
+
+class WorkflowRunFinishedEvent(BaseModel):
+    """
+    工作流运行收尾事件 - 一次 run 到达终态时发一条
+
+    【字段说明】
+    - type: Literal["workflow.finished"] - 事件类型
+    - run_id: str - 结束的运行 ID
+    - workflow_id / workflow_name: str - 归属工作流
+    - session_id: str - 该 run 的 one_shot 会话（""=没建过会话=零节点起跑即失败）
+    - status: str - "success" | "failed" | "interrupted"
+    - error: str - 失败摘要（fail-fast 时是最先炸掉的节点信息）
+    - finished_at: str - 收尾时刻（ISO）
+    - ts: str - 事件时间戳（ISO 8601）
+
+    【设计目的】
+    与 workflow.node 分工：node 管过程上色，finished 管终局对账——
+    GUI 收到后刷新列表页 last_status chip 与详情抽屉，事件里带足
+    行字段快照，订阅端不必再补一次 RPC。
+    """
+    type: Literal["workflow.finished"] = "workflow.finished"
+    run_id: str
+    workflow_id: str
+    workflow_name: str = ""
+    session_id: str = ""
+    status: str
+    error: str = ""
+    finished_at: str = ""
+    ts: str
+
+
 # 根据 type 字段决定事件类型的判别联合
 # 使用 Pydantic 的 Discriminator 实现多态类型，根据 type 字段自动推断事件类型
 Event = Annotated[
@@ -800,6 +929,11 @@ Event = Annotated[
     | SubagentStartedEvent
     | SubagentFinishedEvent
     | SkillInvokedEvent
-    | HookEvaluatedEvent,
+    | HookEvaluatedEvent
+    | ScheduleFiredEvent
+    | SshOutputEvent
+    | SshClosedEvent
+    | WorkflowNodeEvent
+    | WorkflowRunFinishedEvent,
     Discriminator("type"),
 ]

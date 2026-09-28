@@ -982,6 +982,1095 @@ class SessionCheckpointRestoreResult(BaseModel):
     message: str
 
 
+# ==================== M2 新增面：MCP 实况 / Pull Request / 定时任务 ====================
+
+
+class McpStatusCommand(BaseModel):
+    """
+    MCP 状态命令 - 客户端查询各 MCP 服务器的运行时连接状态
+
+    【字段说明】
+    - type: Literal["mcp.status"] - 命令类型
+
+    【设计目的】
+    配置文件只能展示"打算启动什么"，本命令给出运行时真相：连上没有、
+    挂过什么错、每个服务器实际注册了哪些工具——配置是意图，状态是事实。
+
+    【响应】
+    McpStatusResult - 以配置表为准逐行报告（启动失败的服务器也会出现）
+    """
+    type: Literal["mcp.status"] = "mcp.status"
+
+
+class McpServerStatus(BaseModel):
+    """
+    单个 MCP 服务器的状态行
+
+    【字段说明】
+    - name: str - 服务器名（以 [[mcp.servers]] 配置为准）
+    - transport: str - "stdio" | "tcp"
+    - connected: bool - 客户端存活且未断线（无实例或已 offline 时为 False）
+    - tools: list[str] - 该服务器注册的工具名（mcp__server__tool 形态）
+    - last_error: str - 最近一次启动/握手失败的摘要（空串=无失败记录）
+    """
+    name: str
+    transport: str = ""
+    connected: bool = False
+    tools: list[str] = []
+    last_error: str = ""
+
+
+class McpStatusResult(BaseModel):
+    """
+    MCP 状态响应
+
+    【字段说明】
+    - servers: list[McpServerStatus] - 每台服务器一行，顺序与配置一致
+    """
+    servers: list[McpServerStatus] = []
+
+
+class PrContextCommand(BaseModel):
+    """
+    PR 上下文命令 - 从某工作目录解析 git 远端与分支状态
+
+    【字段说明】
+    - type: Literal["pr.context"] - 命令类型
+    - cwd: str - 目标仓库目录
+
+    【设计目的】
+    PR 面板的地基：owner/repo 由 origin URL 解析（ssh/https 两形态），
+    ahead/behind 告诉你本地分支离推送还差几步——全部本地 git 操作，无网络。
+
+    【响应】
+    PrContextResult - ok=False 时 error 给出人类可读原因（非 git 仓库/无远端等）
+    """
+    type: Literal["pr.context"] = "pr.context"
+    cwd: str
+
+
+class PrContextResult(BaseModel):
+    """
+    PR 上下文响应
+
+    【字段说明】
+    - ok: bool - 是否成功解析出 owner/repo
+    - owner / repo: str - GitHub 归属（解析失败为空串）
+    - branch: str - 当前分支
+    - default_branch: str - 远端 HEAD 指向的默认分支（探测不到为 "main" 猜测值）
+    - ahead: int - 本地领先 origin/<branch> 的提交数（远端分支不存在时 = 本地全部提交数）
+    - behind: int - 落后数
+    - has_remote: bool - 是否配置了 origin 且能解析出 GitHub 坐标
+    - error: str - 失败原因
+    """
+    ok: bool = False
+    owner: str = ""
+    repo: str = ""
+    branch: str = ""
+    default_branch: str = ""
+    ahead: int = 0
+    behind: int = 0
+    has_remote: bool = False
+    error: str = ""
+
+
+class PrListCommand(BaseModel):
+    """
+    PR 列表命令 - 拉取某仓库的 Pull Request 清单
+
+    【字段说明】
+    - type: Literal["pr.list"] - 命令类型
+    - cwd: str - 目标仓库目录（owner/repo 由它的 origin 远端决定）
+    - state: str - "open" | "closed" | "all"
+    - page: int - 页码（每页 30 条，GitHub 约定）
+
+    【设计目的】
+    daemon 端用 httpx 直连 api.github.com（本机无 gh CLI 也走得通）。
+    token 缺省时公开仓库只读仍可用（受限流），私有仓库返回明确错误。
+
+    【响应】
+    PrListResult - 归一化行 + 失败原文摘要
+    """
+    type: Literal["pr.list"] = "pr.list"
+    cwd: str
+    state: str = "open"
+    page: int = 1
+
+
+class PrInfo(BaseModel):
+    """
+    PR 列表行（GitHub API 归一化）
+
+    【字段说明】
+    - number: int - PR 编号
+    - title / author / state / url - 基本盘
+    - updated_at: str - 最后更新时间（ISO 8601）
+    - head_ref / base_ref: str - 源分支 / 目标分支
+    - draft: bool - 草稿标记
+    """
+    number: int
+    title: str = ""
+    author: str = ""
+    state: str = ""
+    updated_at: str = ""
+    url: str = ""
+    head_ref: str = ""
+    base_ref: str = ""
+    draft: bool = False
+
+
+class PrListResult(BaseModel):
+    """
+    PR 列表响应
+
+    【字段说明】
+    - ok: bool - 请求是否成功（网络/权限/解析任一失败为 False）
+    - error: str - 失败摘要（HTTP 状态 + GitHub message 字段）
+    - pulls: list[PrInfo] - 归一化列表
+    """
+    ok: bool = True
+    error: str = ""
+    pulls: list[PrInfo] = []
+
+
+class PrCreateCommand(BaseModel):
+    """
+    PR 创建命令 - 推送当前分支并在 GitHub 开一个 Pull Request
+
+    【字段说明】
+    - type: Literal["pr.create"] - 命令类型
+    - cwd: str - 目标仓库
+    - title: str - PR 标题（必填）
+    - body: str - 描述（可空）
+    - base: str - 目标分支；空 = 远端默认分支
+    - head: str - 源分支；空 = 当前分支
+    - draft: bool - 先开草稿（可后改正式）
+
+    【设计目的与安全边界】
+    会改变共享状态（push + 建 PR），因此 GUI 必须二次确认后才发本命令；
+    daemon 侧把动作与结果记入日志审计。push 走 `git push -u origin HEAD`，
+    仅当本地有未推送提交时才执行。需要配置 [github] token 或 IWAN_GITHUB_TOKEN。
+    """
+    type: Literal["pr.create"] = "pr.create"
+    cwd: str
+    title: str
+    body: str = ""
+    base: str = ""
+    head: str = ""
+    draft: bool = False
+
+
+class PrCreateResult(BaseModel):
+    """
+    PR 创建响应
+
+    【字段说明】
+    - ok: bool - 是否成功建出 PR
+    - number: int - 新 PR 编号
+    - url: str - GitHub 页面链接
+    - pushed: bool - 本次是否真的推送过提交（False=分支已在远端）
+    - error: str - 失败摘要（push 失败/无 token/API 拒绝）
+    """
+    ok: bool = False
+    number: int = 0
+    url: str = ""
+    pushed: bool = False
+    error: str = ""
+
+
+class ScheduleListCommand(BaseModel):
+    """
+    定时任务列表命令 - 查询全部任务定义（含下次到期时间）
+
+    【字段说明】
+    - type: Literal["schedule.list"] - 命令类型
+
+    【响应】
+    ScheduleListResult - 任务行列表（读 ~/.iwan/scheduled.json + 内存态）
+    """
+    type: Literal["schedule.list"] = "schedule.list"
+
+
+class ScheduleTaskInfo(BaseModel):
+    """
+    定时任务行
+
+    【字段说明】
+    - id: str - 任务 ID（服务端生成）
+    - name / cwd / prompt: str - 名称、目标工作目录、到点执行的指令
+    - kind: str - 调度档："every_minutes" | "daily" | "weekly"
+    - spec: str - 档参数："N"（分钟）| "HH:MM"（每天）| "WEEKDAY@HH:MM"（每周，0=周一）
+    - enabled: bool - 开关（False 时调度器跳过）
+    - last_run: str - 上次触发时刻（ISO 8601，空=从未）
+    - last_result: str - 上次结果摘要
+    - next_due: str - 下次到期时刻（服务端算好；空=未排/停用）
+    """
+    id: str
+    name: str = ""
+    cwd: str = ""
+    prompt: str = ""
+    kind: str = "every_minutes"
+    spec: str = ""
+    enabled: bool = True
+    last_run: str = ""
+    last_result: str = ""
+    next_due: str = ""
+
+
+class ScheduleListResult(BaseModel):
+    """
+    定时任务列表响应
+
+    【字段说明】
+    - tasks: list[ScheduleTaskInfo] - 全部任务
+    """
+    tasks: list[ScheduleTaskInfo] = []
+
+
+class ScheduleCreateCommand(BaseModel):
+    """
+    定时任务创建命令
+
+    【字段说明】
+    - type: Literal["schedule.create"] - 命令类型
+    - name / cwd / prompt / kind / spec - 见 ScheduleTaskInfo 字段说明
+
+    【设计目的】
+    kind/spec 的合法性在服务端校验（如 "HH:MM" 格式、N>=1），失败返回
+    ok=False + error 人类可读文案；成功则写盘（原子替换）并即时排期。
+
+    【响应】
+    ScheduleOpResult - 携带新任务 id
+    """
+    type: Literal["schedule.create"] = "schedule.create"
+    name: str
+    cwd: str
+    prompt: str
+    kind: str
+    spec: str
+
+
+class ScheduleUpdateCommand(BaseModel):
+    """
+    定时任务更新命令 - 字段为 None 表示不改该项
+
+    【字段说明】
+    - type: Literal["schedule.update"] - 命令类型
+    - id: str - 目标任务
+    - name/cwd/prompt/kind/spec: str | None - 改哪个传哪个
+    - enabled: bool | None - 开关（None=不动）
+    """
+    type: Literal["schedule.update"] = "schedule.update"
+    id: str
+    name: str | None = None
+    cwd: str | None = None
+    prompt: str | None = None
+    kind: str | None = None
+    spec: str | None = None
+    enabled: bool | None = None
+
+
+class ScheduleDeleteCommand(BaseModel):
+    """
+    定时任务删除命令
+
+    【字段说明】
+    - type: Literal["schedule.delete"] - 命令类型
+    - id: str - 目标任务
+
+    【响应】
+    ScheduleOpResult - ok=False 且 error="任务不存在" 表示幂等未命中
+    """
+    type: Literal["schedule.delete"] = "schedule.delete"
+    id: str
+
+
+class ScheduleRunNowCommand(BaseModel):
+    """
+    定时任务立即执行命令 - 手动触发一次（不影响排期）
+
+    【字段说明】
+    - type: Literal["schedule.run_now"] - 命令类型
+    - id: str - 目标任务
+
+    【设计目的】
+    给"验证任务写得对不对"留个按钮：与到点触发走同一执行路径
+    （one_shot 会话 + 异步运行），GUI 能立刻在会话列表看到新任务。
+    """
+    type: Literal["schedule.run_now"] = "schedule.run_now"
+    id: str
+
+
+class ScheduleOpResult(BaseModel):
+    """
+    定时任务写操作统一响应
+
+    【字段说明】
+    - ok: bool - 是否成功
+    - id: str - 相关任务 ID（create 返回新 id）
+    - run_id: str - 仅 run_now 非空：本次触发启动的运行 ID
+    - error: str - 失败原因（校验文案/不存在/非法 kind）
+    """
+    ok: bool = True
+    id: str = ""
+    run_id: str = ""
+    error: str = ""
+
+
+# ==================== 工作流（DAG 编排）协议 ====================
+# 【设计】任务节点的最小定义只有三个字段：名字、指令、依赖。依赖以节点名引用
+# （不用 id）——编排发生在十几行的规模内，人名比 12 位 hex 可读得多；图合法性
+# （重名/缺依赖/环）全部由服务端 Workflow.validate 权威裁决，客户端不重复实现。
+
+
+class WorkflowTaskDef(BaseModel):
+    """
+    工作流节点定义（编辑器与存储共用的最小三字段）
+
+    【字段说明】
+    - name: str - 节点名（图内唯一，兼作事件里的 node 键与依赖引用目标）
+    - prompt: str - 该节点子 Agent 的完整指令（非空）
+    - depends_on: list[str] - 前置节点名列表（空=入口节点）
+    """
+    name: str
+    prompt: str
+    depends_on: list[str] = []
+
+
+class WorkflowInfo(BaseModel):
+    """
+    工作流定义行
+
+    【字段说明】
+    - id: str - 工作流 ID（服务端生成，12 位 hex）
+    - name / description: str - 名称与备注
+    - tasks: list[WorkflowTaskDef] - 节点定义表
+    - layers: list[list[str]] - 服务端现算的分层执行计划（GUI 直接按列渲染）
+    - created_at / updated_at: str - ISO 时刻
+    - last_run_id / last_status: str - 最近一次运行的反范式快照（列表页 chip 用）
+    """
+    id: str
+    name: str = ""
+    description: str = ""
+    tasks: list[WorkflowTaskDef] = []
+    layers: list[list[str]] = []
+    created_at: str = ""
+    updated_at: str = ""
+    last_run_id: str = ""
+    last_status: str = ""
+
+
+class WorkflowNodeRunInfo(BaseModel):
+    """
+    单节点运行态
+
+    【字段说明】
+    - node: str - 节点名
+    - status: str - "pending" | "running" | "ok" | "fail"（pending=run 行预置骨架的初始态）
+    - child_run_id: str - 该节点子 Agent 的 run id（深链审计用）
+    - detail: str - 失败原因/取消说明（≤200 字）
+    - output: str - 成功产出快照（截断存储，≤400 字）
+    - started_at / finished_at: str - ISO 时刻
+    """
+    node: str
+    status: str = "pending"
+    child_run_id: str = ""
+    detail: str = ""
+    output: str = ""
+    started_at: str = ""
+    finished_at: str = ""
+
+
+class WorkflowRunInfo(BaseModel):
+    """
+    一次工作流运行
+
+    【字段说明】
+    - id: str - run id（服务端生成）
+    - workflow_id / workflow_name: str - 归属工作流
+    - session_id: str - 该 run 懒建的 one_shot 会话（子 Agent 审批卡的落点；""=还没建）
+    - status: str - "running" | "success" | "failed" | "interrupted"
+    - started_at / finished_at / error: str - 收尾信息
+    - nodes: list[WorkflowNodeRunInfo] - 各节点运行态
+    """
+    id: str
+    workflow_id: str
+    workflow_name: str = ""
+    session_id: str = ""
+    status: str = "running"
+    started_at: str = ""
+    finished_at: str = ""
+    error: str = ""
+    nodes: list[WorkflowNodeRunInfo] = []
+
+
+class WorkflowListCommand(BaseModel):
+    """
+    工作流列表命令 - 查询全部工作流定义
+
+    【字段说明】
+    - type: Literal["workflow.list"] - 命令类型
+
+    【响应】
+    WorkflowListResult - 定义行列表（layers 服务端算好）
+    """
+    type: Literal["workflow.list"] = "workflow.list"
+
+
+class WorkflowListResult(BaseModel):
+    """
+    工作流列表响应
+
+    【字段说明】
+    - workflows: list[WorkflowInfo] - 全部工作流
+    """
+    workflows: list[WorkflowInfo] = []
+
+
+class WorkflowGetCommand(BaseModel):
+    """
+    工作流详情命令 - 一次拉齐定义 + 最近运行（详情页免往返）
+
+    【字段说明】
+    - type: Literal["workflow.get"] - 命令类型
+    - id: str - 目标工作流
+
+    【响应】
+    WorkflowGetResult - workflow=None 且 ok=False 表示不存在
+    """
+    type: Literal["workflow.get"] = "workflow.get"
+    id: str
+
+
+class WorkflowGetResult(BaseModel):
+    """
+    工作流详情响应
+
+    【字段说明】
+    - ok: bool - 是否命中
+    - error: str - 未命中原因
+    - workflow: WorkflowInfo | None - 定义行
+    - runs: list[WorkflowRunInfo] - 该流程最近 20 次运行（新→旧）
+    """
+    ok: bool = True
+    error: str = ""
+    workflow: WorkflowInfo | None = None
+    runs: list[WorkflowRunInfo] = []
+
+
+class WorkflowSaveCommand(BaseModel):
+    """
+    工作流保存命令 - id 为空新建、非空整图覆盖更新
+
+    【字段说明】
+    - type: Literal["workflow.save"] - 命令类型
+    - id: str - 空=新建
+    - name / description: str - 名称（空则服务端兜底）与备注
+    - tasks: list[WorkflowTaskDef] - 完整节点表（整图替换，不做增量 diff）
+
+    【设计目的】
+    图合法性（非空/≤30 节点/重名/缺依赖/环）在此命令的服务端校验，
+    非法即 ok=False + 中文文案，绝不持久化半张坏图。
+    """
+    type: Literal["workflow.save"] = "workflow.save"
+    id: str = ""
+    name: str = ""
+    description: str = ""
+    tasks: list[WorkflowTaskDef] = []
+
+
+class WorkflowDeleteCommand(BaseModel):
+    """
+    工作流删除命令 - 只删定义，运行历史保留（v1 不级联）
+
+    【字段说明】
+    - type: Literal["workflow.delete"] - 命令类型
+    - id: str - 目标工作流
+    """
+    type: Literal["workflow.delete"] = "workflow.delete"
+    id: str
+
+
+class WorkflowRunCommand(BaseModel):
+    """
+    工作流运行命令 - 即发即返，节点状态全靠 workflow.node 事件
+
+    【字段说明】
+    - type: Literal["workflow.run"] - 命令类型
+    - id: str - 目标工作流
+
+    【设计目的】
+    GUI 点击"运行"是用户显式授权（同 schedule.run_now，RPC 层不设审批门）；
+    节点内子 Agent 的工具调用照常过 permission_manager，这里不新开任何洞。
+    同一工作流已有进行中的运行时拒绝二次触发。
+    """
+    type: Literal["workflow.run"] = "workflow.run"
+    id: str
+
+
+class WorkflowRunsCommand(BaseModel):
+    """
+    工作流运行历史命令
+
+    【字段说明】
+    - type: Literal["workflow.runs"] - 命令类型
+    - id: str - 空=全部工作流的运行混排
+    - limit: int - 返回条数上限（服务端钳位 1..100）
+    """
+    type: Literal["workflow.runs"] = "workflow.runs"
+    id: str = ""
+    limit: int = 20
+
+
+class WorkflowRunsResult(BaseModel):
+    """
+    工作流运行历史响应
+
+    【字段说明】
+    - runs: list[WorkflowRunInfo] - 新→旧
+    """
+    runs: list[WorkflowRunInfo] = []
+
+
+class WorkflowOpResult(BaseModel):
+    """
+    工作流写操作统一响应（save/delete/run 共用）
+
+    【字段说明】
+    - ok: bool - 是否成功
+    - id: str - 相关工作流 id（save/delete/get 口径）
+    - run_id: str - 仅 run 非空：本次启动的运行 id
+    - error: str - 失败原因（校验文案/不存在/并发上限/重复运行）
+    """
+    ok: bool = True
+    id: str = ""
+    run_id: str = ""
+    error: str = ""
+
+
+class GitFile(BaseModel):
+    """
+    git 状态表的单行文件
+
+    【字段说明】
+    - path: str - 仓库相对路径（porcelain 原文，恒用 / 分隔）
+    - index_status / worktree_status: str - porcelain XY 两列字符（M/A/D/R/?/U/空格）
+    - staged: bool - X 列有内容 = 已进暂存区
+    - untracked: bool - 双 ? = 未跟踪
+    - conflicted: bool - 合并冲突未解决（discard/commit 前 GUI 应拦一道）
+    """
+    path: str
+    index_status: str = ""
+    worktree_status: str = ""
+    staged: bool = False
+    untracked: bool = False
+    conflicted: bool = False
+
+
+class GitStatusCommand(BaseModel):
+    """
+    git 状态查询命令
+
+    【字段说明】
+    - type: Literal["git.status"] - 命令类型
+    - cwd: str - 仓库目录（允许是子目录，git 自己向上找根）
+
+    【响应】
+    GitStatusResult - 分支 + ahead/behind + 文件三态表
+    """
+    type: Literal["git.status"] = "git.status"
+    cwd: str
+
+
+class GitStatusResult(BaseModel):
+    """
+    git 状态响应
+
+    【字段说明】
+    - ok: bool - False 时 error 为人话原因（非仓库/无 git）
+    - branch: str - 当前分支（游离 HEAD 为空串）
+    - ahead / behind: int - 相对上游的领先/落后提交数（无上游恒 0）
+    - files: list[GitFile] - 工作区/暂存区全量差异行
+    """
+    ok: bool = True
+    error: str = ""
+    branch: str = ""
+    ahead: int = 0
+    behind: int = 0
+    files: list[GitFile] = []
+
+
+class GitBranchInfo(BaseModel):
+    """
+    分支行
+
+    【字段说明】
+    - name: str - 本地分支名
+    - current: bool - 是否 HEAD 所指
+    - upstream: str - 上游分支短名（无上游空串）
+    """
+    name: str
+    current: bool = False
+    upstream: str = ""
+
+
+class GitBranchesCommand(BaseModel):
+    """
+    git 分支列表命令
+
+    【字段说明】
+    - type: Literal["git.branches"] - 命令类型
+    - cwd: str - 仓库目录
+
+    【响应】
+    GitBranchesResult - 当前分支 + 本地分支表（当前置顶）
+    """
+    type: Literal["git.branches"] = "git.branches"
+    cwd: str
+
+
+class GitBranchesResult(BaseModel):
+    """
+    git 分支列表响应
+
+    【字段说明】
+    - ok / error: 同上（非仓库时 ok=False）
+    - current: str - 当前分支名（游离 HEAD 空串）
+    - branches: list[GitBranchInfo]
+    """
+    ok: bool = True
+    error: str = ""
+    current: str = ""
+    branches: list[GitBranchInfo] = []
+
+
+class GitLogCommand(BaseModel):
+    """
+    git 提交历史命令
+
+    【字段说明】
+    - type: Literal["git.log"] - 命令类型
+    - cwd: str - 仓库目录
+    - limit: int - 最多返回条数（服务端钳到 1..200）
+    """
+    type: Literal["git.log"] = "git.log"
+    cwd: str
+    limit: int = 20
+
+
+class GitLogEntry(BaseModel):
+    """
+    提交行
+
+    【字段说明】
+    - sha / short_sha: str - 本实现只跑 --format=%h，两字段同值（预留全 sha 位）
+    - author / date: str - 作者名 / "YYYY-MM-DD HH:MM" 本地时间
+    - subject: str - 标题行
+    """
+    sha: str = ""
+    short_sha: str = ""
+    author: str = ""
+    date: str = ""
+    subject: str = ""
+
+
+class GitLogResult(BaseModel):
+    """
+    git 提交历史响应
+
+    【字段说明】
+    - ok / error: 空仓库时 error="仓库还没有任何提交"
+    - entries: list[GitLogEntry] - 新→旧排序
+    """
+    ok: bool = True
+    error: str = ""
+    entries: list[GitLogEntry] = []
+
+
+class GitPathsCommand(BaseModel):
+    """
+    git 按路径操作命令（stage/unstage/discard 共用形状，type 区分动作）
+
+    【字段说明】
+    - type: Literal - "git.stage" 暂存 | "git.unstage" 退暂存 | "git.discard" 丢弃改动
+    - cwd: str - 仓库目录
+    - paths: list[str] - 仓库相对路径白名单（discard 对未跟踪文件走 clean -fd -- <paths>，
+      路径限定是底线：参数再错也不该全仓清空）
+
+    【设计目的】
+    type 无默认值：一个类骑三个判别值，任何默认值都会让"忘带 type 的解析"
+    静默选错动作。协议规定 params 不含 type，故由 app 层 handler 按注册方法名
+    注入——方法名就是权威，模型只做形状收口。
+
+    【响应】
+    GitOpResult
+    """
+    type: Literal["git.stage", "git.unstage", "git.discard"]
+    cwd: str
+    paths: list[str] = []
+
+
+class GitCommitCommand(BaseModel):
+    """
+    git 提交命令
+
+    【字段说明】
+    - type: Literal["git.commit"] - 命令类型
+    - cwd: str - 仓库目录
+    - message: str - 提交信息（暂存区为空时服务端拒绝并回执提示）
+
+    【响应】
+    GitOpResult - 成功时 sha 携带新提交的短哈希
+    """
+    type: Literal["git.commit"] = "git.commit"
+    cwd: str
+    message: str
+
+
+class GitCheckoutCommand(BaseModel):
+    """
+    git 切分支命令
+
+    【字段说明】
+    - type: Literal["git.checkout"] - 命令类型
+    - cwd: str - 仓库目录
+    - name: str - 目标分支（仅本地已有分支；无建分支语义）
+
+    【设计目的】
+    工作区脏时 git 会自己拒绝切换，error 原文回显——我们不预检，
+    避免和 git 的判定规则赛跑。
+    """
+    type: Literal["git.checkout"] = "git.checkout"
+    cwd: str
+    name: str
+
+
+class GitPullCommand(BaseModel):
+    """
+    git 拉取命令（--ff-only：需要 merge/rebase 时让 git 报错，不替用户做主）
+
+    【字段说明】
+    - type: Literal["git.pull"] - 命令类型
+    - cwd: str - 仓库目录
+    """
+    type: Literal["git.pull"] = "git.pull"
+    cwd: str
+
+
+class GitPushCommand(BaseModel):
+    """
+    git 推送命令（-u origin HEAD，首次自动建上游）
+
+    【字段说明】
+    - type: Literal["git.push"] - 命令类型
+    - cwd: str - 仓库目录
+    """
+    type: Literal["git.push"] = "git.push"
+    cwd: str
+
+
+class GitOpResult(BaseModel):
+    """
+    git 写操作统一响应
+
+    【字段说明】
+    - ok: bool - 失败时 error 为 git stderr 原文或兜底文案（GUI 直接上屏）
+    - error / output: str - 失败原因 / git stdout（成功回执，GUI 可折叠）
+    - sha: str - 仅 commit 成功时非空：新提交短哈希
+    """
+    ok: bool = True
+    error: str = ""
+    output: str = ""
+    sha: str = ""
+
+
+class SshConnInfo(BaseModel):
+    """
+    SSH 连接行
+
+    【字段说明】
+    - id: str - 服务端生成 ID
+    - name: str - 展示名（全表唯一）
+    - host / user: str - 目标主机与登录用户（user 必填：留空 ssh 会静默用本地用户名）
+    - port: int - 端口（1..65535，默认 22）
+    - key_file: str - 私钥路径覆盖（空 = 用 ~/.iwan/ssh/id_ed25519）
+    """
+    id: str
+    name: str = ""
+    host: str = ""
+    user: str = ""
+    port: int = 22
+    key_file: str = ""
+
+
+class SshConnListCommand(BaseModel):
+    """
+    SSH 连接列表命令
+
+    【字段说明】
+    - type: Literal["ssh.conn_list"] - 命令类型
+
+    【响应】
+    SshConnListResult - 按名称排序的连接表（读 ~/.iwan/ssh/connections.json）
+    """
+    type: Literal["ssh.conn_list"] = "ssh.conn_list"
+
+
+class SshConnListResult(BaseModel):
+    """
+    SSH 连接列表响应
+
+    【字段说明】
+    - connections: list[SshConnInfo] - 全部连接
+    """
+    connections: list[SshConnInfo] = []
+
+
+class SshConnAddCommand(BaseModel):
+    """
+    SSH 连接新建命令
+
+    【字段说明】
+    - type: Literal["ssh.conn_add"] - 命令类型
+    - name / host / user / port / key_file - 见 SshConnInfo
+
+    【设计目的】
+    服务端校验：host/user 非空、host 无空白、port 区间、name 查重。
+    不做连通性探测——存连接 ≠ 连得上，保存被慢主机卡住是反模式。
+
+    【响应】
+    SshConnOpResult - 成功携带新 id
+    """
+    type: Literal["ssh.conn_add"] = "ssh.conn_add"
+    name: str
+    host: str
+    user: str
+    port: int = 22
+    key_file: str = ""
+
+
+class SshConnUpdateCommand(BaseModel):
+    """
+    SSH 连接更新命令 - 字段为 None 表示不改该项
+
+    【字段说明】
+    - type: Literal["ssh.conn_update"] - 命令类型
+    - id: str - 目标连接
+    - name/host/user: str | None、port: int | None、key_file: str | None
+    """
+    type: Literal["ssh.conn_update"] = "ssh.conn_update"
+    id: str
+    name: str | None = None
+    host: str | None = None
+    user: str | None = None
+    port: int | None = None
+    key_file: str | None = None
+
+
+class SshConnDeleteCommand(BaseModel):
+    """
+    SSH 连接删除命令
+
+    【字段说明】
+    - type: Literal["ssh.conn_delete"] - 命令类型
+    - id: str - 目标连接（只删登记信息，不碰密钥与 known_hosts）
+    """
+    type: Literal["ssh.conn_delete"] = "ssh.conn_delete"
+    id: str
+
+
+class SshConnOpResult(BaseModel):
+    """
+    SSH 连接写操作统一响应
+
+    【字段说明】
+    - ok: bool - 失败时 error 为校验文案（重名/空字段/端口越界）
+    - id: str - add 返回新 id；update/delete 回显入参 id
+    - error: str - 失败原因（delete 未命中 = "连接不存在"）
+    """
+    ok: bool = True
+    id: str = ""
+    error: str = ""
+
+
+class SshKeyStatusCommand(BaseModel):
+    """
+    SSH 密钥现状查询命令（纯本地文件检查 + ssh-keygen 指纹，无网络）
+
+    【字段说明】
+    - type: Literal["ssh.key_status"] - 命令类型
+
+    【响应】
+    SshKeyStatusResult
+    """
+    type: Literal["ssh.key_status"] = "ssh.key_status"
+
+
+class SshKeyStatusResult(BaseModel):
+    """
+    SSH 密钥现状响应
+
+    【字段说明】
+    - has_key: bool - 私钥+公钥同存才算有
+    - pubkey_path: str - 公钥绝对路径（无私钥时空串）
+    - fingerprint: str - "SHA256:…"（公钥可读时）
+    """
+    has_key: bool = False
+    pubkey_path: str = ""
+    fingerprint: str = ""
+
+
+class SshKeyGenerateCommand(BaseModel):
+    """
+    SSH 密钥生成命令 - ssh-keygen -t ed25519 无口令
+
+    【字段说明】
+    - type: Literal["ssh.key_generate"] - 命令类型
+
+    【设计目的】
+    已存在时拒绝且不覆盖——密钥一旦被静默替换，所有部署过旧公钥的
+    远端会同时"莫名其妙连不上"。重置的责任留给用户手动删文件。
+
+    【响应】
+    SshKeyOpResult - 成功携带公钥全文与指纹（公钥可贴 authorized_keys）
+    """
+    type: Literal["ssh.key_generate"] = "ssh.key_generate"
+
+
+class SshKeyOpResult(BaseModel):
+    """
+    SSH 密钥操作响应
+
+    【字段说明】
+    - ok: bool / error: str - 失败原因（已存在不覆盖 / ssh-keygen 缺失）
+    - pubkey: str - 公钥全文一行（"ssh-ed25519 AAAA… comment"）
+    - fingerprint: str - "SHA256:…"
+    """
+    ok: bool = True
+    pubkey: str = ""
+    fingerprint: str = ""
+    error: str = ""
+
+
+class SshHostTrustCommand(BaseModel):
+    """
+    SSH 主机信任命令 - keyscan 取回主机密钥并（目视比对后）写入 known_hosts
+
+    【字段说明】
+    - type: Literal["ssh.host_trust"] - 命令类型
+    - host: str / port: int - 目标
+
+    【设计目的】
+    指纹在返回体里，由 GUI 展示给用户【比对确认】后才算建立信任；known_hosts
+    用 ~/.iwan/ssh 下我们自己的文件，与用户日常终端的互不污染。
+    这是"首连信任"（trust-on-first-use）的显式化：TOFU 不询问=默认信任，
+    我们把它改成 GUI 上的一次点击。
+    """
+    type: Literal["ssh.host_trust"] = "ssh.host_trust"
+    host: str
+    port: int = 22
+
+
+class SshTrustResult(BaseModel):
+    """
+    SSH 主机信任响应
+
+    【字段说明】
+    - ok: bool / error: str - keyscan 失败（不可达/端口错）时给原因
+    - fingerprints: str - 多行 "SHA256:… [host]:port"，GUI 原样展示供比对
+    """
+    ok: bool = True
+    fingerprints: str = ""
+    error: str = ""
+
+
+class SshTermOpenCommand(BaseModel):
+    """
+    SSH 终端开会话命令 - 对登记连接启动一条 ssh -tt 交互会话
+
+    【字段说明】
+    - type: Literal["ssh.term_open"] - 命令类型
+    - conn_id: str - 连接库 id（目的地锁定，同 ssh_exec）
+    - cols / rows: int - 初始终端尺寸（经 stty 包装设定；后续 resize
+      v1 不传播——Windows 无 SIGWINCH 注入通道，属已知架构限制）
+
+    【响应】
+    SshTermOpenResult - 成功回 session_id，输出/关闭走 ssh.output/ssh.closed 事件
+    """
+    type: Literal["ssh.term_open"] = "ssh.term_open"
+    conn_id: str
+    cols: int = 80
+    rows: int = 24
+
+
+class SshTermOpenResult(BaseModel):
+    """
+    SSH 终端开会话响应
+
+    【字段说明】
+    - ok: bool / error: str - 连接不存在、ssh 缺失、立即失败时给原因
+    - session_id: str - 新会话 id（后续 write/resize/close 的键）
+    """
+    ok: bool = True
+    session_id: str = ""
+    error: str = ""
+
+
+class SshTermWriteCommand(BaseModel):
+    """
+    SSH 终端输入命令 - 键盘字节写入远端 pty
+
+    【字段说明】
+    - type: Literal["ssh.term_write"] - 命令类型
+    - session_id: str - 目标会话
+    - data_b64: str - 输入字节的 base64（与输出同理：整 NDJSON 行安全）
+
+    【设计目的】
+    输入是用户亲手敲的，不设大小闸门；分片责任在 GUI（≤4KB/帧），
+    超限的畸形巨帧由 pydantic 之后的传输层自然消化。
+    """
+    type: Literal["ssh.term_write"] = "ssh.term_write"
+    session_id: str
+    data_b64: str
+
+
+class SshTermResizeCommand(BaseModel):
+    """
+    SSH 终端尺寸调整命令 - v1 记录不发（协议占位），GUI 侧即点即应
+
+    【字段说明】
+    - type: Literal["ssh.term_resize"] - 命令类型
+    - session_id: str / cols / rows: int - 新尺寸
+    """
+    type: Literal["ssh.term_resize"] = "ssh.term_resize"
+    session_id: str
+    cols: int = 80
+    rows: int = 24
+
+
+class SshTermCloseCommand(BaseModel):
+    """
+    SSH 终端关闭命令 - 用户点页签 ×；daemon 侧幂等收尸
+
+    【字段说明】
+    - type: Literal["ssh.term_close"] - 命令类型
+    - session_id: str - 目标会话
+    """
+    type: Literal["ssh.term_close"] = "ssh.term_close"
+    session_id: str
+
+
+class SshTermOpResult(BaseModel):
+    """
+    SSH 终端操作统一响应（write/resize/close）
+
+    【字段说明】
+    - ok: bool / error: str - 会话不存在或已断开时给原因
+    """
+    ok: bool = True
+    error: str = ""
+
+
 # 根据 type 字段决定命令类型的判别联合
 # 使用 Pydantic 的 Discriminator 实现多态类型，根据 type 字段自动推断命令类型
 Command = Annotated[
@@ -1009,6 +2098,40 @@ Command = Annotated[
     | TrustListCommand
     | TrustRevokeCommand
     | FileChangesListCommand
-    | FileRestoreCommand,
+    | FileRestoreCommand
+    | McpStatusCommand
+    | PrContextCommand
+    | PrListCommand
+    | PrCreateCommand
+    | ScheduleListCommand
+    | ScheduleCreateCommand
+    | ScheduleUpdateCommand
+    | ScheduleDeleteCommand
+    | ScheduleRunNowCommand
+    | GitStatusCommand
+    | GitBranchesCommand
+    | GitLogCommand
+    | GitPathsCommand
+    | GitCommitCommand
+    | GitCheckoutCommand
+    | GitPullCommand
+    | GitPushCommand
+    | SshConnListCommand
+    | SshConnAddCommand
+    | SshConnUpdateCommand
+    | SshConnDeleteCommand
+    | SshKeyStatusCommand
+    | SshKeyGenerateCommand
+    | SshHostTrustCommand
+    | SshTermOpenCommand
+    | SshTermWriteCommand
+    | SshTermResizeCommand
+    | SshTermCloseCommand
+    | WorkflowListCommand
+    | WorkflowGetCommand
+    | WorkflowSaveCommand
+    | WorkflowDeleteCommand
+    | WorkflowRunCommand
+    | WorkflowRunsCommand,
     Discriminator("type"),
 ]

@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import Any
 
 from iwan_claude.core.config import McpServerConfig
 from iwan_claude.core.mcp.client import McpClient
@@ -86,6 +87,24 @@ class McpServerManager:
         self._clients: dict[str, McpClient] = {}
         # 存储所有已发现的 MCP 工具
         self._tools: list[McpTool] = []
+        # 配置快照：status() 以配置为准逐行报告——启动失败的服务器也得现身
+        self._configs: list[McpServerConfig] = []
+        # 最近一次启动失败摘要（server 名 → 异常文本），重连成功即清除
+        self._last_error: dict[str, str] = {}
+
+    # 汇总每台服务器的运行时状态：connected=有活实例、tools=已注册工具名、last_error=启动失败摘要
+    def status(self) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for cfg in self._configs:
+            client = self._clients.get(cfg.name)
+            rows.append({
+                "name": cfg.name,
+                "transport": cfg.transport,
+                "connected": client is not None and not client.offline,
+                "tools": sorted(t.name for t in self._tools if t._server_name == cfg.name),
+                "last_error": self._last_error.get(cfg.name, ""),
+            })
+        return rows
 
     async def start_all(self, servers: list[McpServerConfig]) -> None:
         """
@@ -121,6 +140,8 @@ class McpServerManager:
               port: 8080
         ```
         """
+        # 配置快照先行保存：哪怕后面全部启动失败，status() 也要能报"配了但没起来"
+        self._configs = list(servers)
         # 并行启动所有 Server：单个死配置最坏拖满自己的超时，
         # 串行会让 daemon 启动时间 = Σ超时，一个坏 server 卡全体
         results = await asyncio.gather(
@@ -143,9 +164,11 @@ class McpServerManager:
             client = await self._connect(cfg)
             # 发现工具（调用 tools/list）
             tool_defs = await client.list_tools()
-        except Exception:
+        except Exception as e:
             # 单个 MCP Server 启动失败不影响其他 Server
             log.exception("mcp: server '%s' failed to start, skipping", cfg.name)
+            # 异常摘要进状态表：GUI 里"配了却不在"的服务器要能说清为什么
+            self._last_error[cfg.name] = f"{type(e).__name__}: {e}"
             if client is not None:
                 # connect 成功但 list_tools 失败时 client 尚未进 _clients，
                 # 不在这里 close 的话 stdio 子进程永远无人回收
@@ -167,6 +190,8 @@ class McpServerManager:
             self._tools.append(McpTool(client, cfg.name, tool_def))
         # 缓存 Client（用于后续工具调用）
         self._clients[cfg.name] = client
+        # 连接成功即洗掉旧的失败记录（重连语义：最近一次结果说了算）
+        self._last_error.pop(cfg.name, None)
         # 记录日志
         log.info(
             "mcp: server '%s' connected, %d tool(s) discovered",

@@ -78,13 +78,61 @@ from iwan_claude.core.bus.commands import (
     FileRestoreCommand,             # 文件还原命令
     FileRestoreItem,                # 文件还原结果行
     FileRestoreResult,              # 文件还原结果
+    GitBranchesCommand,             # git 分支列表命令
+    GitBranchesResult,              # git 分支列表结果
+    GitCheckoutCommand,             # git 切分支命令
+    GitCommitCommand,               # git 提交命令
+    GitLogCommand,                  # git 提交历史命令
+    GitLogResult,                   # git 提交历史结果
+    GitOpResult,                    # git 写操作统一结果
+    GitPathsCommand,                # git 按路径操作命令（stage/unstage/discard）
+    GitPullCommand,                 # git 拉取命令
+    GitPushCommand,                 # git 推送命令
+    GitStatusCommand,               # git 状态查询命令
+    GitStatusResult,                # git 状态查询结果
+    McpServerStatus,                # MCP 服务器运行时状态行
+    McpStatusCommand,               # MCP 状态查询命令
+    McpStatusResult,                # MCP 状态查询结果
     PermissionRespondCommand,       # 权限响应命令
     PermissionRespondResult,        # 权限响应结果
     PongResult,                     # Ping 响应
+    PrContextCommand,               # PR 上下文命令（本地 git 解析）
+    PrContextResult,                # PR 上下文结果
+    PrCreateCommand,                # PR 创建命令（push + 建 PR）
+    PrCreateResult,                 # PR 创建结果
+    PrListCommand,                  # PR 列表命令
+    PrListResult,                   # PR 列表结果
     RunCancelCommand,               # 取消运行命令
     RunCancelResult,                # 取消运行结果
     RunSteerCommand,                # 运行中修正命令
     RunSteerResult,                 # 运行中修正结果
+    ScheduleCreateCommand,          # 定时任务创建命令
+    ScheduleDeleteCommand,          # 定时任务删除命令
+    ScheduleListCommand,            # 定时任务列表命令
+    ScheduleListResult,             # 定时任务列表结果
+    ScheduleOpResult,               # 定时任务写操作统一结果
+    ScheduleRunNowCommand,          # 定时任务立即执行命令
+    ScheduleTaskInfo,               # 定时任务行
+    ScheduleUpdateCommand,          # 定时任务更新命令
+    SshConnAddCommand,              # SSH 连接新增命令
+    SshConnDeleteCommand,           # SSH 连接删除命令
+    SshConnInfo,                    # SSH 连接行
+    SshConnListCommand,             # SSH 连接列表命令
+    SshConnListResult,              # SSH 连接列表结果
+    SshConnOpResult,                # SSH 连接写操作统一结果
+    SshConnUpdateCommand,           # SSH 连接更新命令
+    SshHostTrustCommand,            # SSH 主机信任命令
+    SshKeyGenerateCommand,          # SSH 密钥生成命令
+    SshKeyOpResult,                 # SSH 密钥操作结果
+    SshKeyStatusCommand,            # SSH 密钥状态查询命令
+    SshKeyStatusResult,             # SSH 密钥状态结果
+    SshTermCloseCommand,            # SSH 终端关闭会话命令
+    SshTermOpenCommand,             # SSH 终端开会话命令
+    SshTermOpenResult,              # SSH 终端开会话结果
+    SshTermOpResult,                # SSH 终端操作统一结果
+    SshTermResizeCommand,           # SSH 终端尺寸调整命令
+    SshTermWriteCommand,            # SSH 终端输入命令
+    SshTrustResult,                 # SSH 主机信任结果
     SessionCheckpointListCommand,   # 检查点列表命令
     SessionCheckpointListResult,    # 检查点列表结果
     SessionCheckpointRestoreCommand, # 检查点恢复命令
@@ -120,6 +168,19 @@ from iwan_claude.core.bus.commands import (
     TrustRespondResult,             # 信任响应结果
     TrustRevokeCommand,             # 信任撤销命令
     TrustRevokeResult,              # 信任撤销结果
+    WorkflowDeleteCommand,          # 工作流删除命令
+    WorkflowGetCommand,             # 工作流详情命令
+    WorkflowGetResult,              # 工作流详情结果
+    WorkflowInfo,                   # 工作流定义行
+    WorkflowListCommand,            # 工作流列表命令
+    WorkflowListResult,             # 工作流列表结果
+    WorkflowNodeRunInfo,            # 工作流节点运行态行
+    WorkflowOpResult,               # 工作流写操作统一结果
+    WorkflowRunCommand,             # 工作流运行命令
+    WorkflowRunInfo,                # 工作流运行行
+    WorkflowRunsCommand,            # 工作流运行历史命令
+    WorkflowRunsResult,             # 工作流运行历史结果
+    WorkflowSaveCommand,            # 工作流保存命令
 )
 from iwan_claude.core.bus.envelope import EventPushEnvelope  # 事件推送封装
 
@@ -128,13 +189,28 @@ from iwan_claude.core.config import (
     IwanConfig,
     get_config,
     resolve_checkpoint_db_path,                            # checkpoint DB 路径解析（锚定会话根）
+    resolve_sessions_root,                                 # 会话根解析（工作流 run 子目录锚定）
 )   # 配置
+from iwan_claude.core import gitpanel as core_git  # noqa: E402  本地 git 面板支撑（status/stage/commit/分支/log/pull/push）
+from iwan_claude.core import pr as core_pr  # noqa: E402  PR 面板支撑（git 解析 + GitHub API）
 from iwan_claude.core.events.bus import EventBus             # 事件总线
 from iwan_claude.core.llm import create_provider_from_config # LLM 提供者创建
 from iwan_claude.core.logging_setup import setup_logging     # 日志初始化
 from iwan_claude.core.mcp.server import McpServerManager     # MCP 服务器管理
 from iwan_claude.core.permissions.manager import PermissionManager  # 权限管理
 from iwan_claude.core.permissions.storage import load_policy_file   # 加载权限策略
+from iwan_claude.core.schedule import ScheduleStore, Scheduler  # noqa: E402  定时任务（存储 + 调度循环）
+from iwan_claude.core.ssh import keys as ssh_keys  # noqa: E402  SSH 密钥与主机信任（M4a）
+from iwan_claude.core.ssh.connections import SshConnStore  # noqa: E402  SSH 连接表存储（M4a）
+from iwan_claude.core.ssh.session import SshSessionManager  # noqa: E402  SSH 终端会话池（M4c）
+from iwan_claude.core.subagent.tool import SpawnAgentTool  # noqa: E402  工作流节点=后台子 Agent（W1）
+from iwan_claude.core.workflow.engine import (  # noqa: E402  工作流引擎装配（W1）
+    NodeLaunchCtx,
+    NodeTransition,
+    RunTransition,
+    WorkflowEngine,
+)
+from iwan_claude.core.workflow.store import WorkflowStore  # noqa: E402  工作流定义/运行存储（W1）
 from iwan_claude.core.trust import TrustStore, normalize_dir_key    # Layer 0 信任门
 from iwan_claude.core.shadow import ShadowStore                     # Layer 4 文件回滚
 from iwan_claude.core.run_registry import add_steer, request_cancel  # 活跃运行注册表：取消/修正
@@ -228,6 +304,23 @@ class CoreApp:
         self._memory: Any | None = None
         # Layer 0 项目信任存储（start 时按 [permission] trust_file 初始化）
         self._trust_store: TrustStore | None = None
+        # M2 定时任务：存储 + 调度器（run() 里创建并启动；None=未启动）
+        self._schedule_store: ScheduleStore | None = None
+        self._scheduler: Scheduler | None = None
+        # 最近一次触发的 (run_id, session_id) 映射：schedule.fired 事件补字段用
+        self._sched_last_fire: dict[str, tuple[str, str]] = {}
+        # M4a SSH 连接库（run() 里创建；懒载入，handler 访问时才读盘）
+        self._ssh_store: SshConnStore | None = None
+        # M4c SSH 终端会话池（run() 里创建；发射器绑 bus）
+        self._ssh_mgr: SshSessionManager | None = None
+        # W1 工作流：定义/运行存储 + 运行引擎（run() 里创建并清算孤儿；None=未启动）
+        self._workflow_store: WorkflowStore | None = None
+        self._workflow_engine: WorkflowEngine | None = None
+        # run 级懒建缓存：workflow run_id → SpawnAgentTool / one_shot 会话 id；收尾时清空
+        self._wf_tools: dict[str, SpawnAgentTool] = {}
+        self._wf_sessions: dict[str, str] = {}
+        # 懒建会话的互斥锁：同层兄弟并发时防止双开会话（见 _workflow_launch）
+        self._wf_sess_lock = asyncio.Lock()
 
     # 初始化 LangGraph Checkpointer
     async def _init_checkpointer(self) -> None:
@@ -376,6 +469,496 @@ class CoreApp:
         
         # 立即返回 run_id，不等待任务完成
         return AgentRunResult(run_id=run_id)
+
+    # ==================== M2 功能面：MCP 实况 / Pull Request / 定时任务 ====================
+    # 【设计】以下 handler 全部是"薄壳"：参数校验 → 调 core_pr / ScheduleStore / Scheduler，
+    # 结果模型 model_validate 收口。业务逻辑放模块里才有独立单测的可能，
+    # app.py 只负责把 RPC 线翻译成函数调用。
+
+    # 查询各 MCP 服务器运行时实况（纯内存快照，不发探测包）
+    async def _mcp_status_handler(self, params: dict[str, Any]) -> McpStatusResult:
+        McpStatusCommand.model_validate(params)
+        assert self._mcp_manager is not None
+        rows = self._mcp_manager.status()
+        return McpStatusResult(servers=[McpServerStatus.model_validate(r) for r in rows])
+
+    # 解析本地 git/GitHub 坐标（pr.context：owner/repo/branch/ahead，无网络）
+    async def _pr_context_handler(self, params: dict[str, Any]) -> PrContextResult:
+        cmd = PrContextCommand.model_validate(params)
+        data = await core_pr.collect_context(cmd.cwd or os.getcwd())
+        return PrContextResult.model_validate(data)
+
+    # 拉 GitHub PR 列表（pr.list：解析坐标 → httpx 请求；无 token 时公开库只读）
+    async def _pr_list_handler(self, params: dict[str, Any]) -> PrListResult:
+        cmd = PrListCommand.model_validate(params)
+        assert self._config is not None
+        data = await core_pr.list_pulls_for_cwd(
+            cmd.cwd or os.getcwd(), cmd.state, cmd.page,
+            self._config.github.base_url, self._config.github.token,
+        )
+        return PrListResult.model_validate(data)
+
+    # 创建 PR（pr.create：push + POST）——改变共享状态的动作，GUI 必须先二次确认；此处落审计日志
+    async def _pr_create_handler(self, params: dict[str, Any]) -> PrCreateResult:
+        cmd = PrCreateCommand.model_validate(params)
+        assert self._config is not None
+        logger.info(
+            "audit pr.create: cwd=%s title=%r base=%r head=%r draft=%s",
+            cmd.cwd, cmd.title, cmd.base, cmd.head, cmd.draft,
+        )
+        data = await core_pr.create_pull_for_cwd(
+            cmd.cwd or os.getcwd(), cmd.title, cmd.body, cmd.base, cmd.head, cmd.draft,
+            self._config.github.base_url, self._config.github.token,
+        )
+        return PrCreateResult.model_validate(data)
+
+    # 定时任务列表（schedule.list：直读存储，存储层每次变更已落盘）
+    async def _schedule_list_handler(self, params: dict[str, Any]) -> ScheduleListResult:
+        ScheduleListCommand.model_validate(params)
+        assert self._schedule_store is not None
+        rows = self._schedule_store.list()
+        return ScheduleListResult(tasks=[ScheduleTaskInfo.model_validate(t) for t in rows])
+
+    # 新建定时任务（schedule.create：kind/spec 服务端校验，成功即排期写盘）
+    async def _schedule_create_handler(self, params: dict[str, Any]) -> ScheduleOpResult:
+        cmd = ScheduleCreateCommand.model_validate(params)
+        assert self._schedule_store is not None
+        try:
+            row = self._schedule_store.create(cmd.name, cmd.cwd, cmd.prompt, cmd.kind, cmd.spec)
+        except ValueError as e:
+            return ScheduleOpResult(ok=False, error=str(e))
+        return ScheduleOpResult(ok=True, id=str(row["id"]))
+
+    # 更新定时任务（schedule.update：None 字段不动；改节奏/重新启用会重排 next_due）
+    async def _schedule_update_handler(self, params: dict[str, Any]) -> ScheduleOpResult:
+        cmd = ScheduleUpdateCommand.model_validate(params)
+        assert self._schedule_store is not None
+        fields: dict[str, Any] = {}
+        for k in ("name", "cwd", "prompt", "kind", "spec", "enabled"):
+            v = getattr(cmd, k)
+            if v is not None:
+                fields[k] = v
+        try:
+            row = self._schedule_store.update(cmd.id, fields)
+        except ValueError as e:
+            return ScheduleOpResult(ok=False, error=str(e))
+        if row is None:
+            return ScheduleOpResult(ok=False, error=f"任务不存在：{cmd.id}")
+        return ScheduleOpResult(ok=True, id=cmd.id)
+
+    # 删除定时任务（schedule.delete：未命中返回 ok=False，幂等）
+    async def _schedule_delete_handler(self, params: dict[str, Any]) -> ScheduleOpResult:
+        cmd = ScheduleDeleteCommand.model_validate(params)
+        assert self._schedule_store is not None
+        if not self._schedule_store.delete(cmd.id):
+            return ScheduleOpResult(ok=False, error=f"任务不存在：{cmd.id}")
+        return ScheduleOpResult(ok=True, id=cmd.id)
+
+    # 立即手动触发一次（schedule.run_now：与到点触发同路径，但不动排期与记账）
+    async def _schedule_run_now_handler(self, params: dict[str, Any]) -> ScheduleOpResult:
+        cmd = ScheduleRunNowCommand.model_validate(params)
+        assert self._scheduler is not None
+        res = await self._scheduler.run_now(cmd.id)
+        return ScheduleOpResult(
+            ok=bool(res["ok"]), id=cmd.id, run_id=str(res["run_id"]), error=str(res["error"]),
+        )
+
+    # ==================== M3 功能面：本地 Git 面板 ====================
+    # 【设计】与 M2 同构的薄壳：参数校验 → core_git 编排 → model_validate 收口。
+    # 会改仓库/碰网络的动作（discard/commit/checkout/pull/push）全部落审计日志——
+    # 本地 git 没有 GitHub 那样的服务端历史可查，daemon 日志就是唯一的事后线索。
+
+    # 查询工作区状态（git.status：分支 + ahead/behind + 文件三态表，无网络）
+    async def _git_status_handler(self, params: dict[str, Any]) -> GitStatusResult:
+        cmd = GitStatusCommand.model_validate(params)
+        data = await core_git.status(cmd.cwd)
+        return GitStatusResult.model_validate(data)
+
+    # 查询本地分支表（git.branches：当前分支置顶，无网络）
+    async def _git_branches_handler(self, params: dict[str, Any]) -> GitBranchesResult:
+        cmd = GitBranchesCommand.model_validate(params)
+        data = await core_git.branches(cmd.cwd)
+        return GitBranchesResult.model_validate(data)
+
+    # 查询提交历史（git.log：limit 由服务端钳位，无网络）
+    async def _git_log_handler(self, params: dict[str, Any]) -> GitLogResult:
+        cmd = GitLogCommand.model_validate(params)
+        data = await core_git.log(cmd.cwd, cmd.limit)
+        return GitLogResult.model_validate(data)
+
+    # 暂存/退暂存（git.stage / git.unstage：paths 白名单进 git add / reset HEAD）
+    # GitPathsCommand 的 type 无默认值（一类三判别值，任何默认都可能选错动作），
+    # 由注册方法名注入——方法名是权威，模型只做形状收口
+    async def _git_stage_handler(self, params: dict[str, Any]) -> GitOpResult:
+        return await self._git_paths_op(params, "git.stage")
+
+    # 退暂存（git.unstage：与 stage 同壳不同 kind）
+    async def _git_unstage_handler(self, params: dict[str, Any]) -> GitOpResult:
+        return await self._git_paths_op(params, "git.unstage")
+
+    # 按路径三操作共用的收口壳：注入 type → 校验 → 分派 core_git 对应编排
+    async def _git_paths_op(self, params: dict[str, Any], kind: str) -> GitOpResult:
+        cmd = GitPathsCommand.model_validate({**params, "type": kind})
+        fn = {"git.stage": core_git.stage, "git.unstage": core_git.unstage}[kind]
+        data = await fn(cmd.cwd, cmd.paths)
+        return GitOpResult.model_validate(data)
+
+    # 丢弃工作区改动（git.discard：破坏性，GUI 双确认兜底，这里落审计含路径清单）
+    async def _git_discard_handler(self, params: dict[str, Any]) -> GitOpResult:
+        cmd = GitPathsCommand.model_validate({**params, "type": "git.discard"})
+        logger.info("audit git.discard: cwd=%s paths=%r", cmd.cwd, cmd.paths)
+        data = await core_git.discard(cmd.cwd, cmd.paths)
+        return GitOpResult.model_validate(data)
+
+    # 提交暂存区（git.commit：message 原文入审计——提交信息本身就是最好的日志载荷）
+    async def _git_commit_handler(self, params: dict[str, Any]) -> GitOpResult:
+        cmd = GitCommitCommand.model_validate(params)
+        logger.info("audit git.commit: cwd=%s message=%r", cmd.cwd, cmd.message)
+        data = await core_git.commit(cmd.cwd, cmd.message)
+        return GitOpResult.model_validate(data)
+
+    # 切换分支（git.checkout：脏树被 git 拒时 error 原文回显，不预检不加工）
+    async def _git_checkout_handler(self, params: dict[str, Any]) -> GitOpResult:
+        cmd = GitCheckoutCommand.model_validate(params)
+        logger.info("audit git.checkout: cwd=%s name=%r", cmd.cwd, cmd.name)
+        data = await core_git.checkout(cmd.cwd, cmd.name)
+        return GitOpResult.model_validate(data)
+
+    # 拉取（git.pull：--ff-only 确定性策略；网络动作，120s 超时在编排层兜着）
+    async def _git_pull_handler(self, params: dict[str, Any]) -> GitOpResult:
+        cmd = GitPullCommand.model_validate(params)
+        logger.info("audit git.pull: cwd=%s", cmd.cwd)
+        data = await core_git.pull(cmd.cwd)
+        return GitOpResult.model_validate(data)
+
+    # 推送（git.push：-u origin HEAD；与 pr.create 的推送同级审计）
+    async def _git_push_handler(self, params: dict[str, Any]) -> GitOpResult:
+        cmd = GitPushCommand.model_validate(params)
+        logger.info("audit git.push: cwd=%s", cmd.cwd)
+        data = await core_git.push(cmd.cwd)
+        return GitOpResult.model_validate(data)
+
+    # ==================== M4a 功能面：SSH 连接库与密钥 ====================
+    # 【设计】连接表校验失败走 ValueError → ok=False 文案（业务性拒绝不是
+    # 协议错误，不该让 GUI 去 catch JSON-RPC 异常）；改动连接登记、生成密钥、
+    # 信任主机全部落审计——这三类都是"以后连不上要找原因"的高频嫌疑人。
+
+    # 列出全部 SSH 连接（ssh.conn_list：读缓存表，按名称排序）
+    async def _ssh_conn_list_handler(self, params: dict[str, Any]) -> SshConnListResult:
+        assert self._ssh_store is not None
+        SshConnListCommand.model_validate(params)
+        return SshConnListResult(connections=[
+            SshConnInfo.model_validate(c) for c in self._ssh_store.list()
+        ])
+
+    # 新建连接（ssh.conn_add：服务端校验 + 查重；不做连通性探测）
+    async def _ssh_conn_add_handler(self, params: dict[str, Any]) -> SshConnOpResult:
+        assert self._ssh_store is not None
+        cmd = SshConnAddCommand.model_validate(params)
+        try:
+            row = self._ssh_store.add(cmd.name, cmd.host, cmd.user, cmd.port, cmd.key_file)
+        except ValueError as e:
+            return SshConnOpResult(ok=False, error=str(e))
+        logger.info("audit ssh.conn_add: id=%s name=%r host=%s user=%s port=%d",
+                    row["id"], row["name"], row["host"], row["user"], row["port"])
+        return SshConnOpResult(id=str(row["id"]))
+
+    # 更新连接（ssh.conn_update：None 字段不动；未知 id → ok=False）
+    async def _ssh_conn_update_handler(self, params: dict[str, Any]) -> SshConnOpResult:
+        assert self._ssh_store is not None
+        cmd = SshConnUpdateCommand.model_validate(params)
+        try:
+            row = self._ssh_store.update(cmd.id, {
+                "name": cmd.name, "host": cmd.host, "user": cmd.user,
+                "port": cmd.port, "key_file": cmd.key_file,
+            })
+        except ValueError as e:
+            return SshConnOpResult(ok=False, id=cmd.id, error=str(e))
+        if row is None:
+            return SshConnOpResult(ok=False, id=cmd.id, error=f"连接不存在：{cmd.id}")
+        logger.info("audit ssh.conn_update: id=%s", cmd.id)
+        return SshConnOpResult(id=cmd.id)
+
+    # 删除连接（ssh.conn_delete：只删登记，不碰密钥与 known_hosts）
+    async def _ssh_conn_delete_handler(self, params: dict[str, Any]) -> SshConnOpResult:
+        assert self._ssh_store is not None
+        cmd = SshConnDeleteCommand.model_validate(params)
+        if not self._ssh_store.delete(cmd.id):
+            return SshConnOpResult(ok=False, id=cmd.id, error=f"连接不存在：{cmd.id}")
+        logger.info("audit ssh.conn_delete: id=%s", cmd.id)
+        return SshConnOpResult(id=cmd.id)
+
+    # 查询本机密钥现状（ssh.key_status：纯本地检查，无网络）
+    async def _ssh_key_status_handler(self, params: dict[str, Any]) -> SshKeyStatusResult:
+        SshKeyStatusCommand.model_validate(params)
+        data = await ssh_keys.key_status()
+        return SshKeyStatusResult.model_validate(data)
+
+    # 生成密钥对（ssh.key_generate：已存在拒绝不覆盖；失败原因原文回显）
+    async def _ssh_key_generate_handler(self, params: dict[str, Any]) -> SshKeyOpResult:
+        SshKeyGenerateCommand.model_validate(params)
+        data = await ssh_keys.key_generate()
+        if data["ok"]:
+            logger.info("audit ssh.key_generate: fingerprint=%s", data["fingerprint"])
+        return SshKeyOpResult.model_validate(data)
+
+    # 信任主机（ssh.host_trust：keyscan + 指纹回显；追加 known_hosts 落审计）
+    async def _ssh_host_trust_handler(self, params: dict[str, Any]) -> SshTrustResult:
+        cmd = SshHostTrustCommand.model_validate(params)
+        logger.info("audit ssh.host_trust: host=%s port=%d", cmd.host, cmd.port)
+        data = await ssh_keys.host_trust(cmd.host, cmd.port)
+        return SshTrustResult.model_validate(data)
+
+    # ==================== M4c 功能面：SSH 终端会话 ====================
+    # 【设计】终端 RPC 是"会话寻址"的一组：open 返回 session_id，之后
+    # write/resize/close 都以它为键。会话不存在/已死的错误统一文案——
+    # GUI 拿 ok=False 就标页签断开，不需要区分"从来不存在"和"刚死"。
+
+    # 开终端会话（ssh.term_open：目的地锁连接库 id；审计记录目标主机）
+    async def _ssh_term_open_handler(self, params: dict[str, Any]) -> SshTermOpenResult:
+        assert self._ssh_mgr is not None and self._ssh_store is not None
+        cmd = SshTermOpenCommand.model_validate(params)
+        conn = self._ssh_store.get(cmd.conn_id)
+        if conn is None:
+            return SshTermOpenResult(ok=False, error=f"未知 SSH 连接：{cmd.conn_id}")
+        sid, err = await self._ssh_mgr.open(conn, cmd.rows, cmd.cols)
+        if err:
+            return SshTermOpenResult(ok=False, error=err)
+        logger.info("audit ssh.term_open: sid=%s conn=%s host=%s %dx%d",
+                    sid, cmd.conn_id, conn.get("host"), cmd.cols, cmd.rows)
+        return SshTermOpenResult(session_id=sid)
+
+    # 终端输入（ssh.term_write：b64 解码后原样进远端 pty）
+    async def _ssh_term_write_handler(self, params: dict[str, Any]) -> SshTermOpResult:
+        assert self._ssh_mgr is not None
+        cmd = SshTermWriteCommand.model_validate(params)
+        import base64 as _b64
+        try:
+            data = _b64.b64decode(cmd.data_b64, validate=True)
+        except Exception:
+            return SshTermOpResult(ok=False, error="data_b64 不是合法 base64")
+        s = self._ssh_mgr.get(cmd.session_id)
+        if s is None:
+            return SshTermOpResult(ok=False, error="会话不存在或已结束")
+        err = await s.write(data)
+        return SshTermOpResult(ok=err is None, error=err or "")
+
+    # 尺寸调整（ssh.term_resize：v1 只确认收到，不向远端传播——协议占位）
+    async def _ssh_term_resize_handler(self, params: dict[str, Any]) -> SshTermOpResult:
+        assert self._ssh_mgr is not None
+        cmd = SshTermResizeCommand.model_validate(params)
+        if self._ssh_mgr.get(cmd.session_id) is None:
+            return SshTermOpResult(ok=False, error="会话不存在或已结束")
+        return SshTermOpResult()
+
+    # 关闭会话（ssh.term_close：用户主动关页签；幂等）
+    async def _ssh_term_close_handler(self, params: dict[str, Any]) -> SshTermOpResult:
+        assert self._ssh_mgr is not None
+        cmd = SshTermCloseCommand.model_validate(params)
+        if not await self._ssh_mgr.close(cmd.session_id, "用户关闭"):
+            return SshTermOpResult(ok=False, error="会话不存在或已结束")
+        logger.info("audit ssh.term_close: sid=%s", cmd.session_id)
+        return SshTermOpResult()
+
+    # ==================== W1 功能面：工作流（DAG 编排） ====================
+    # 【设计】与 M2/M3 同构的薄壳：参数校验 → WorkflowStore/WorkflowEngine →
+    # 结果模型收口。唯一的适配点是 store 的 nodes 记账用哈希表（就地更新 O(1)）、
+    # 线上传输用数组（GUI 直接 map 渲染），_wf_run_wire 是两种形态的翻译官。
+
+    # store run 行（nodes 为 dict）→ 线上模型 WorkflowRunInfo（nodes 为 list）
+    @staticmethod
+    def _wf_run_wire(row: dict[str, Any]) -> WorkflowRunInfo:
+        data = dict(row)
+        nodes = data.pop("nodes", None) or {}
+        data["nodes"] = [
+            WorkflowNodeRunInfo.model_validate({"node": k, **v}) for k, v in nodes.items()
+        ]
+        return WorkflowRunInfo.model_validate(data)
+
+    # 工作流定义列表（workflow.list：定义行自带服务端现算的 layers 分层）
+    async def _workflow_list_handler(self, params: dict[str, Any]) -> WorkflowListResult:
+        WorkflowListCommand.model_validate(params)
+        assert self._workflow_store is not None
+        rows = self._workflow_store.list_defs()
+        return WorkflowListResult(workflows=[WorkflowInfo.model_validate(r) for r in rows])
+
+    # 工作流详情（workflow.get：定义+最近 20 次运行一次拉齐，详情页免往返）
+    async def _workflow_get_handler(self, params: dict[str, Any]) -> WorkflowGetResult:
+        cmd = WorkflowGetCommand.model_validate(params)
+        assert self._workflow_store is not None
+        row = self._workflow_store.get(cmd.id)
+        if row is None:
+            return WorkflowGetResult(ok=False, error=f"工作流不存在：{cmd.id}")
+        runs = self._workflow_store.list_runs(cmd.id, 20)
+        return WorkflowGetResult(
+            workflow=WorkflowInfo.model_validate(row),
+            runs=[self._wf_run_wire(r) for r in runs],
+        )
+
+    # 保存工作流（workflow.save：id 空新建/非空整图覆盖；坏图 ok=False 绝不落盘）
+    async def _workflow_save_handler(self, params: dict[str, Any]) -> WorkflowOpResult:
+        cmd = WorkflowSaveCommand.model_validate(params)
+        assert self._workflow_store is not None
+        try:
+            row = self._workflow_store.upsert(
+                cmd.id, cmd.name, cmd.description, [t.model_dump() for t in cmd.tasks],
+            )
+        except ValueError as e:
+            return WorkflowOpResult(ok=False, error=str(e))
+        wf_id = str(row["id"])
+        logger.info(
+            "audit workflow.save: id=%s name=%r nodes=%d", wf_id, row["name"], len(cmd.tasks),
+        )
+        return WorkflowOpResult(ok=True, id=wf_id)
+
+    # 删除工作流定义（workflow.delete：运行历史保留不级联；未命中 ok=False，幂等）
+    async def _workflow_delete_handler(self, params: dict[str, Any]) -> WorkflowOpResult:
+        cmd = WorkflowDeleteCommand.model_validate(params)
+        assert self._workflow_store is not None
+        if not self._workflow_store.delete(cmd.id):
+            return WorkflowOpResult(ok=False, error=f"工作流不存在：{cmd.id}")
+        logger.info("audit workflow.delete: id=%s", cmd.id)
+        return WorkflowOpResult(ok=True, id=cmd.id)
+
+    # 启动一次运行（workflow.run：GUI 显式点击即授权，同 schedule.run_now；即发即返）
+    async def _workflow_run_handler(self, params: dict[str, Any]) -> WorkflowOpResult:
+        cmd = WorkflowRunCommand.model_validate(params)
+        assert self._workflow_engine is not None
+        run_id, err = self._workflow_engine.start_run(cmd.id)
+        if err:
+            return WorkflowOpResult(ok=False, id=cmd.id, error=err)
+        logger.info("audit workflow.run: id=%s run_id=%s", cmd.id, run_id)
+        return WorkflowOpResult(ok=True, id=cmd.id, run_id=run_id)
+
+    # 运行历史（workflow.runs：id 空=全部工作流混排，新→旧）
+    async def _workflow_runs_handler(self, params: dict[str, Any]) -> WorkflowRunsResult:
+        cmd = WorkflowRunsCommand.model_validate(params)
+        assert self._workflow_store is not None
+        rows = self._workflow_store.list_runs(cmd.id, cmd.limit)
+        return WorkflowRunsResult(runs=[self._wf_run_wire(r) for r in rows])
+
+    # 引擎 launch 回调：懒建本 run 共享的 one_shot 会话与 SpawnAgentTool，后台启动节点子 Agent
+    async def _workflow_launch(self, ctx: NodeLaunchCtx) -> tuple[str, str]:
+        assert self._sessions is not None and self._config is not None
+        assert self._workflow_store is not None and self._subagent_registry is not None
+        run_row = self._workflow_store.get_run(ctx.run_id)
+        if run_row is None:
+            return "", "运行记录不存在（可能已被裁剪）"
+        # 【学习要点】双检锁：同层兄弟节点并发 launch，都不持锁先查表 →
+        # 双双看到会话还没建 → 开出两条 one_shot 会话，第二次 attach 覆盖
+        # 第一条，落在孤儿会话里的审批卡没人能批（黑洞卡=节点挂死到超时）。
+        # 一把全局锁就够：贵的是 create()，每个 run 只发生一次，不必按 run 分锁。
+        session_id = self._wf_sessions.get(ctx.run_id, "")
+        if not session_id:
+            async with self._wf_sess_lock:
+                session_id = self._wf_sessions.get(ctx.run_id, "")
+                if not session_id:
+                    try:
+                        session = await self._sessions.create(
+                            mode="one_shot",
+                            title=f"工作流·{run_row.get('workflow_name', '')}"[:40],
+                            cwd=os.getcwd(),
+                        )
+                    except Exception as e:
+                        return "", f"创建会话失败：{type(e).__name__}: {e}"
+                    session_id = session.id
+                    self._wf_sessions[ctx.run_id] = session_id
+                    self._workflow_store.attach_session(ctx.run_id, session_id)
+        tool = self._wf_tools.get(ctx.run_id)
+        if tool is None:
+            # 构造参数照抄 runner.py 的子 Agent 注册处；parent_run_id 用工作流 run id，
+            # 子 Agent 的 started/finished 事件挂在它下面，审计链不断
+            tool = SpawnAgentTool(
+                provider=create_provider_from_config(self._config.llm),
+                parent_bus=self._bus,
+                parent_run_id=ctx.run_id,
+                permission_manager=self._permission_manager,
+                max_steps=self._config.agent.max_steps,
+                task_registry=self._subagent_registry,
+                runs_dir=resolve_sessions_root().parent / "workflow_runs",
+                session_id=session_id,
+                llm_model_name=self._config.llm.default_model,
+                depth=0,
+            )
+            self._wf_tools[ctx.run_id] = tool
+        child, err = await tool.spawn_background(
+            description=ctx.node, prompt=ctx.prompt, subagent_type="",
+            timeout_sec=0.0, gate=None,
+        )
+        if child is None:
+            return "", str(err or "spawn failed")
+        return child, ""
+
+    # 引擎 await_child 回调：等注册表里的子任务收尾，读后台包装器写好的终态
+    async def _workflow_await(self, child_run_id: str) -> tuple[bool, str]:
+        assert self._subagent_registry is not None
+        entry = self._subagent_registry.get(child_run_id)
+        if entry is None:
+            return False, f"子任务不存在或已被回收：{child_run_id}"
+        task, context = entry
+        try:
+            await task
+        except asyncio.CancelledError:
+            return False, "子 Agent 被取消"
+        except Exception as e:
+            return False, f"{type(e).__name__}: {e}"
+        if context.status == "success":
+            return True, context.result or "（子 Agent 无文本输出）"
+        return False, context.reason or f"子 Agent 状态={context.status}"
+
+    # 引擎 on_node 回调：节点状态上总线（GUI 详情页即时上色的唯一驱动源）
+    async def _workflow_on_node(self, tr: NodeTransition) -> None:
+        from iwan_claude.core.bus.events import WorkflowNodeEvent
+        await self._bus.publish(WorkflowNodeEvent(
+            run_id=tr.run_id, workflow_id=tr.workflow_id, node=tr.node,
+            status=tr.status, child_run_id=tr.child_run_id, detail=tr.detail, ts=_now(),
+        ))
+
+    # 引擎 on_run_finished 回调：定义行记账 + run 级缓存清退 + 终局事件上总线
+    async def _workflow_on_finished(self, tr: RunTransition) -> None:
+        from iwan_claude.core.bus.events import WorkflowRunFinishedEvent
+        assert self._workflow_store is not None
+        self._workflow_store.touch_last_run(tr.workflow_id, tr.run_id, tr.status)
+        self._wf_tools.pop(tr.run_id, None)
+        self._wf_sessions.pop(tr.run_id, None)
+        await self._bus.publish(WorkflowRunFinishedEvent(
+            run_id=tr.run_id, workflow_id=tr.workflow_id, workflow_name=tr.workflow_name,
+            session_id=tr.session_id, status=tr.status, error=tr.error,
+            finished_at=tr.finished_at, ts=_now(),
+        ))
+
+    # 调度器的触发入口：复刻 agent.run 的即发即返路径，返回 "run_id|说明" 或 "|失败原因"
+    async def _schedule_fire(self, task: dict[str, Any]) -> tuple[bool, str]:
+        assert self._sessions is not None
+        try:
+            session = await self._sessions.create(
+                mode="one_shot",
+                title=f"定时·{task.get('name', '')}"[:40],
+                cwd=str(task.get("cwd", "")),
+            )
+        except Exception as e:
+            return False, f"|创建会话失败：{type(e).__name__}: {e}"
+        run_id = new_run_id()
+        run_task = asyncio.create_task(
+            self._sessions.send_message(session.id, str(task.get("prompt", "")), run_id=run_id)
+        )
+        self._running_runs.add(run_task)
+        run_task.add_done_callback(self._running_runs.discard)
+        self._sched_last_fire[str(task.get("id", ""))] = (run_id, session.id)
+        return True, f"{run_id}|已触发（会话 {session.id}）"
+
+    # 调度器记账后的广播：发 schedule.fired，GUI 借此刷新任务表并发现新会话
+    async def _schedule_notified(
+        self, task: dict[str, Any], ok: bool, run_id: str, detail: str,
+    ) -> None:
+        from iwan_claude.core.bus.events import ScheduleFiredEvent
+        sid = self._sched_last_fire.get(str(task.get("id", "")), ("", ""))[1]
+        await self._bus.publish(
+            ScheduleFiredEvent(
+                task_id=str(task.get("id", "")), run_id=run_id, session_id=sid,
+                ok=ok, detail=detail, ts=_now(),
+            )
+        )
 
     # 创建 chat 或 one_shot session，并返回 session_id
     async def _session_create_handler(self, params: dict[str, Any]) -> SessionCreateResult:
@@ -1454,6 +2037,55 @@ class CoreApp:
         if recovered > 0:
             logger.info("crash recovery: %d interrupted session(s) detected", recovered)
 
+        # ===== 初始化定时任务调度器（M2）=====
+        # 存储落在会话根的父目录（~/.iwan/scheduled.json）：与信任/影子快照同一驻址
+        self._schedule_store = ScheduleStore()
+        self._scheduler = Scheduler(
+            self._schedule_store,
+            fire=self._schedule_fire,
+            on_fired=self._schedule_notified,
+        )
+        # start() 内部先做"补跑跳过"（过期排期推到下一班）再挂 30s tick 循环；
+        # 放在 server.start() 前：客户端一连上就能 schedule.list 到完整任务表
+        await self._scheduler.start()
+
+        # ===== 初始化 SSH 连接库（M4a）=====
+        # 存储路径 ~/.iwan/ssh/connections.json 由 store 自己锚定；构造不读盘，
+        # 首个 ssh.conn_list 才懒载入——目录不存在不该在启动期制造任何噪音
+        self._ssh_store = SshConnStore()
+
+        # ===== 初始化 SSH 终端会话池（M4c）=====
+        # 发射器是会话→bus 的唯一出口：输出帧与关闭通知都从这里走
+        async def _ssh_emit_output(session_id: str, data_b64: str) -> None:
+            from iwan_claude.core.bus.events import SshOutputEvent
+            await self._bus.publish(
+                SshOutputEvent(session_id=session_id, data_b64=data_b64, ts=_now())
+            )
+
+        async def _ssh_emit_closed(session_id: str, exit_code: int, reason: str) -> None:
+            from iwan_claude.core.bus.events import SshClosedEvent
+            await self._bus.publish(
+                SshClosedEvent(session_id=session_id, exit_code=exit_code, reason=reason, ts=_now())
+            )
+
+        self._ssh_mgr = SshSessionManager(_ssh_emit_output, _ssh_emit_closed)
+
+        # ===== 初始化工作流（W1）=====
+        # 定义/流水两份 JSON 与 scheduled.json 同址；引擎四个协作者全走
+        # CoreApp 方法注入（launch/await 桥 subagent，on_* 桥总线），装配层
+        # 与调度层就此解耦——engine.py 单测给 fake 回调即可，不碰这套真实现。
+        # 孤儿清算必须在 server.start 前：客户端一连上 workflow.runs 就该看到
+        # 上次进程死亡留下的 running 行已变成 interrupted，而不是永远转圈
+        self._workflow_store = WorkflowStore()
+        self._workflow_store.mark_orphans_interrupted()
+        self._workflow_engine = WorkflowEngine(
+            self._workflow_store,
+            launch=self._workflow_launch,
+            await_child=self._workflow_await,
+            on_node=self._workflow_on_node,
+            on_run_finished=self._workflow_on_finished,
+        )
+
         # ===== 创建 Socket 服务器 =====
         # SocketServer 是基于 TCP Socket 的 RPC 服务端
         server = SocketServer(
@@ -1491,6 +2123,45 @@ class CoreApp:
         server.register("session.engine_info", self._session_engine_info_handler)
         server.register("run.cancel", self._run_cancel_handler)
         server.register("run.steer", self._run_steer_handler)
+        server.register("mcp.status", self._mcp_status_handler)
+        server.register("pr.context", self._pr_context_handler)
+        server.register("pr.list", self._pr_list_handler)
+        server.register("pr.create", self._pr_create_handler)
+        server.register("schedule.list", self._schedule_list_handler)
+        server.register("schedule.create", self._schedule_create_handler)
+        server.register("schedule.update", self._schedule_update_handler)
+        server.register("schedule.delete", self._schedule_delete_handler)
+        server.register("schedule.run_now", self._schedule_run_now_handler)
+        server.register("git.status", self._git_status_handler)
+        server.register("git.branches", self._git_branches_handler)
+        server.register("git.log", self._git_log_handler)
+        server.register("git.stage", self._git_stage_handler)
+        server.register("git.unstage", self._git_unstage_handler)
+        server.register("git.discard", self._git_discard_handler)
+        server.register("git.commit", self._git_commit_handler)
+        server.register("git.checkout", self._git_checkout_handler)
+        server.register("git.pull", self._git_pull_handler)
+        server.register("git.push", self._git_push_handler)
+        # M4a：SSH 连接库与密钥（7 个方法；终端 RPC 在 M4c 另开一段）
+        server.register("ssh.conn_list", self._ssh_conn_list_handler)
+        server.register("ssh.conn_add", self._ssh_conn_add_handler)
+        server.register("ssh.conn_update", self._ssh_conn_update_handler)
+        server.register("ssh.conn_delete", self._ssh_conn_delete_handler)
+        server.register("ssh.key_status", self._ssh_key_status_handler)
+        server.register("ssh.key_generate", self._ssh_key_generate_handler)
+        server.register("ssh.host_trust", self._ssh_host_trust_handler)
+        # M4c：SSH 终端会话（输入/输出经 b64，输出与关闭走事件流）
+        server.register("ssh.term_open", self._ssh_term_open_handler)
+        server.register("ssh.term_write", self._ssh_term_write_handler)
+        server.register("ssh.term_resize", self._ssh_term_resize_handler)
+        server.register("ssh.term_close", self._ssh_term_close_handler)
+        # W1：工作流（定义 CRUD + 即发即返 run + 运行历史）
+        server.register("workflow.list", self._workflow_list_handler)
+        server.register("workflow.get", self._workflow_get_handler)
+        server.register("workflow.save", self._workflow_save_handler)
+        server.register("workflow.delete", self._workflow_delete_handler)
+        server.register("workflow.run", self._workflow_run_handler)
+        server.register("workflow.runs", self._workflow_runs_handler)
 
         # ===== 启动服务器 =====
         # start() 方法会启动 TCP 监听并返回绑定的地址
@@ -1539,7 +2210,17 @@ class CoreApp:
 
         # ===== 优雅关闭 =====
         logger.info("shutting down")
-        
+
+        # 先停调度器：避免关停半途还有任务被触发、抓着半拆好的子系统不放
+        if self._scheduler is not None:
+            await self._scheduler.stop()
+
+        # 停工作流引擎：cancel 活跃 run 协程并等收口（_execute 里各自标
+        # interrupted）；放在 registry.shutdown 前——run 协程还在 await 子任务，
+        # 先把调度侧解散，子 Agent 再统一回收
+        if self._workflow_engine is not None:
+            await self._workflow_engine.shutdown()
+
         # 取消所有正在运行的任务
         for run_task in list(self._running_runs):
             run_task.cancel()
@@ -1562,6 +2243,11 @@ class CoreApp:
         # 停止所有 MCP 服务器
         if self._mcp_manager is not None:
             await self._mcp_manager.stop_all()
+
+        # 击杀全部 SSH 终端会话（M4c）：Job Object 连坐 ssh.exe 进程树，
+        # 放在 server.stop 前——订阅者还活着时把 ssh.closed 发出去
+        if self._ssh_mgr is not None:
+            await self._ssh_mgr.kill_all()
         
         # 停止 Socket 服务器
         await server.stop()

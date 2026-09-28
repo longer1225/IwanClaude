@@ -313,6 +313,20 @@ _DEFAULT_ENV_SCRUB_PATTERNS: tuple[str, ...] = (
 
 
 @dataclass
+class GitHubConfig:
+    """
+    GitHub 集成配置类 - 对应 [github] section（M2 PR 面板）
+
+    属性：
+        token: GitHub API 令牌（fine-grained PAT 或 classic）；空 = 匿名只读
+            公开仓库（受限流），任何写操作（建 PR/push）直接报缺 token
+        base_url: API 根地址；自建 GitHub Enterprise 时改这里
+    """
+    token: str = ""
+    base_url: str = "https://api.github.com"
+
+
+@dataclass
 class SandboxConfig:
     """
     沙箱配置类 - 对应 [sandbox] section
@@ -489,6 +503,7 @@ class IwanConfig:
         permission: 权限配置
         compaction: 压缩配置
         mcp: MCP 配置
+        github: GitHub 集成配置（PR 面板）
         sandbox: 沙箱配置
         rag: RAG 配置
     """
@@ -501,6 +516,7 @@ class IwanConfig:
     permission: PermissionConfig = field(default_factory=PermissionConfig)
     compaction: CompactionConfig = field(default_factory=CompactionConfig)
     mcp: McpConfig = field(default_factory=McpConfig)
+    github: GitHubConfig = field(default_factory=GitHubConfig)
     sandbox: SandboxConfig = field(default_factory=SandboxConfig)
     rag: RagConfig = field(default_factory=RagConfig)
     tools: ToolsConfig = field(default_factory=ToolsConfig)
@@ -580,7 +596,7 @@ def _apply_toml(config: IwanConfig, data: dict[str, Any]) -> None:
     # 已知顶层小节（写成常量集合便于换行审查；未知小节 = 笔误，当场退出）
     known_sections = {
         "core", "logging", "agent", "llm", "trace", "permission",
-        "compaction", "mcp", "sandbox", "rag", "tools", "hooks",
+        "compaction", "mcp", "github", "sandbox", "rag", "tools", "hooks",
     }
     unknown = set(data.keys()) - known_sections
     if unknown:
@@ -908,6 +924,24 @@ def _apply_toml(config: IwanConfig, data: dict[str, Any]) -> None:
                     )
                 s.timeout_sec = float(val)
             config.mcp.servers.append(s)
+
+    if "github" in data:
+        gh = data["github"]
+        if not isinstance(gh, dict):
+            raise SystemExit("Config error: [github] must be a table")
+        unknown_gh: set[str] = set(gh.keys()) - {"token", "base_url"}
+        if unknown_gh:
+            raise SystemExit(f"Unknown [github] keys: {', '.join(sorted(unknown_gh))}")
+        if "token" in gh:
+            val = gh["token"]
+            if not isinstance(val, str):
+                raise SystemExit("Config error: github.token must be a string")
+            config.github.token = val
+        if "base_url" in gh:
+            val = gh["base_url"]
+            if not isinstance(val, str) or not val:
+                raise SystemExit("Config error: github.base_url must be a non-empty string")
+            config.github.base_url = val.rstrip("/")
 
     if "sandbox" in data:
         sb = data["sandbox"]
@@ -1417,3 +1451,8 @@ def _apply_env(config: IwanConfig) -> None:
                 f" got: {model_preset!r}"
             )
         config.agent.model_preset = model_preset
+
+    # GitHub 令牌环境变量覆盖（不落盘的首选方式）
+    gh_token = os.environ.get("IWAN_GITHUB_TOKEN")
+    if gh_token is not None:
+        config.github.token = gh_token

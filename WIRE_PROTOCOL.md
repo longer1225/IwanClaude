@@ -2185,6 +2185,3491 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
 }
 ```
 
+### McpStatusCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+
+```json
+{
+  "description": "MCP 状态命令 - 客户端查询各 MCP 服务器的运行时连接状态\n\n【字段说明】\n- type: Literal[\"mcp.status\"] - 命令类型\n\n【设计目的】\n配置文件只能展示\"打算启动什么\"，本命令给出运行时真相：连上没有、\n挂过什么错、每个服务器实际注册了哪些工具——配置是意图，状态是事实。\n\n【响应】\nMcpStatusResult - 以配置表为准逐行报告（启动失败的服务器也会出现）",
+  "properties": {
+    "type": {
+      "const": "mcp.status",
+      "default": "mcp.status",
+      "title": "Type",
+      "type": "string"
+    }
+  },
+  "title": "McpStatusCommand",
+  "type": "object"
+}
+```
+
+### McpServerStatus
+
+| Field | Type | Required |
+|---|---|---|
+| `name` | `string` | yes |
+| `transport` | `string` | no |
+| `connected` | `boolean` | no |
+| `tools` | `array` | no |
+| `last_error` | `string` | no |
+
+```json
+{
+  "description": "单个 MCP 服务器的状态行\n\n【字段说明】\n- name: str - 服务器名（以 [[mcp.servers]] 配置为准）\n- transport: str - \"stdio\" | \"tcp\"\n- connected: bool - 客户端存活且未断线（无实例或已 offline 时为 False）\n- tools: list[str] - 该服务器注册的工具名（mcp__server__tool 形态）\n- last_error: str - 最近一次启动/握手失败的摘要（空串=无失败记录）",
+  "properties": {
+    "name": {
+      "title": "Name",
+      "type": "string"
+    },
+    "transport": {
+      "default": "",
+      "title": "Transport",
+      "type": "string"
+    },
+    "connected": {
+      "default": false,
+      "title": "Connected",
+      "type": "boolean"
+    },
+    "tools": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Tools",
+      "type": "array"
+    },
+    "last_error": {
+      "default": "",
+      "title": "Last Error",
+      "type": "string"
+    }
+  },
+  "required": [
+    "name"
+  ],
+  "title": "McpServerStatus",
+  "type": "object"
+}
+```
+
+### McpStatusResult
+
+| Field | Type | Required |
+|---|---|---|
+| `servers` | `array` | no |
+
+```json
+{
+  "$defs": {
+    "McpServerStatus": {
+      "description": "单个 MCP 服务器的状态行\n\n【字段说明】\n- name: str - 服务器名（以 [[mcp.servers]] 配置为准）\n- transport: str - \"stdio\" | \"tcp\"\n- connected: bool - 客户端存活且未断线（无实例或已 offline 时为 False）\n- tools: list[str] - 该服务器注册的工具名（mcp__server__tool 形态）\n- last_error: str - 最近一次启动/握手失败的摘要（空串=无失败记录）",
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "transport": {
+          "default": "",
+          "title": "Transport",
+          "type": "string"
+        },
+        "connected": {
+          "default": false,
+          "title": "Connected",
+          "type": "boolean"
+        },
+        "tools": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Tools",
+          "type": "array"
+        },
+        "last_error": {
+          "default": "",
+          "title": "Last Error",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "McpServerStatus",
+      "type": "object"
+    }
+  },
+  "description": "MCP 状态响应\n\n【字段说明】\n- servers: list[McpServerStatus] - 每台服务器一行，顺序与配置一致",
+  "properties": {
+    "servers": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/McpServerStatus"
+      },
+      "title": "Servers",
+      "type": "array"
+    }
+  },
+  "title": "McpStatusResult",
+  "type": "object"
+}
+```
+
+### PrContextCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `cwd` | `string` | yes |
+
+```json
+{
+  "description": "PR 上下文命令 - 从某工作目录解析 git 远端与分支状态\n\n【字段说明】\n- type: Literal[\"pr.context\"] - 命令类型\n- cwd: str - 目标仓库目录\n\n【设计目的】\nPR 面板的地基：owner/repo 由 origin URL 解析（ssh/https 两形态），\nahead/behind 告诉你本地分支离推送还差几步——全部本地 git 操作，无网络。\n\n【响应】\nPrContextResult - ok=False 时 error 给出人类可读原因（非 git 仓库/无远端等）",
+  "properties": {
+    "type": {
+      "const": "pr.context",
+      "default": "pr.context",
+      "title": "Type",
+      "type": "string"
+    },
+    "cwd": {
+      "title": "Cwd",
+      "type": "string"
+    }
+  },
+  "required": [
+    "cwd"
+  ],
+  "title": "PrContextCommand",
+  "type": "object"
+}
+```
+
+### PrContextResult
+
+| Field | Type | Required |
+|---|---|---|
+| `ok` | `boolean` | no |
+| `owner` | `string` | no |
+| `repo` | `string` | no |
+| `branch` | `string` | no |
+| `default_branch` | `string` | no |
+| `ahead` | `integer` | no |
+| `behind` | `integer` | no |
+| `has_remote` | `boolean` | no |
+| `error` | `string` | no |
+
+```json
+{
+  "description": "PR 上下文响应\n\n【字段说明】\n- ok: bool - 是否成功解析出 owner/repo\n- owner / repo: str - GitHub 归属（解析失败为空串）\n- branch: str - 当前分支\n- default_branch: str - 远端 HEAD 指向的默认分支（探测不到为 \"main\" 猜测值）\n- ahead: int - 本地领先 origin/<branch> 的提交数（远端分支不存在时 = 本地全部提交数）\n- behind: int - 落后数\n- has_remote: bool - 是否配置了 origin 且能解析出 GitHub 坐标\n- error: str - 失败原因",
+  "properties": {
+    "ok": {
+      "default": false,
+      "title": "Ok",
+      "type": "boolean"
+    },
+    "owner": {
+      "default": "",
+      "title": "Owner",
+      "type": "string"
+    },
+    "repo": {
+      "default": "",
+      "title": "Repo",
+      "type": "string"
+    },
+    "branch": {
+      "default": "",
+      "title": "Branch",
+      "type": "string"
+    },
+    "default_branch": {
+      "default": "",
+      "title": "Default Branch",
+      "type": "string"
+    },
+    "ahead": {
+      "default": 0,
+      "title": "Ahead",
+      "type": "integer"
+    },
+    "behind": {
+      "default": 0,
+      "title": "Behind",
+      "type": "integer"
+    },
+    "has_remote": {
+      "default": false,
+      "title": "Has Remote",
+      "type": "boolean"
+    },
+    "error": {
+      "default": "",
+      "title": "Error",
+      "type": "string"
+    }
+  },
+  "title": "PrContextResult",
+  "type": "object"
+}
+```
+
+### PrListCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `cwd` | `string` | yes |
+| `state` | `string` | no |
+| `page` | `integer` | no |
+
+```json
+{
+  "description": "PR 列表命令 - 拉取某仓库的 Pull Request 清单\n\n【字段说明】\n- type: Literal[\"pr.list\"] - 命令类型\n- cwd: str - 目标仓库目录（owner/repo 由它的 origin 远端决定）\n- state: str - \"open\" | \"closed\" | \"all\"\n- page: int - 页码（每页 30 条，GitHub 约定）\n\n【设计目的】\ndaemon 端用 httpx 直连 api.github.com（本机无 gh CLI 也走得通）。\ntoken 缺省时公开仓库只读仍可用（受限流），私有仓库返回明确错误。\n\n【响应】\nPrListResult - 归一化行 + 失败原文摘要",
+  "properties": {
+    "type": {
+      "const": "pr.list",
+      "default": "pr.list",
+      "title": "Type",
+      "type": "string"
+    },
+    "cwd": {
+      "title": "Cwd",
+      "type": "string"
+    },
+    "state": {
+      "default": "open",
+      "title": "State",
+      "type": "string"
+    },
+    "page": {
+      "default": 1,
+      "title": "Page",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "cwd"
+  ],
+  "title": "PrListCommand",
+  "type": "object"
+}
+```
+
+### PrInfo
+
+| Field | Type | Required |
+|---|---|---|
+| `number` | `integer` | yes |
+| `title` | `string` | no |
+| `author` | `string` | no |
+| `state` | `string` | no |
+| `updated_at` | `string` | no |
+| `url` | `string` | no |
+| `head_ref` | `string` | no |
+| `base_ref` | `string` | no |
+| `draft` | `boolean` | no |
+
+```json
+{
+  "description": "PR 列表行（GitHub API 归一化）\n\n【字段说明】\n- number: int - PR 编号\n- title / author / state / url - 基本盘\n- updated_at: str - 最后更新时间（ISO 8601）\n- head_ref / base_ref: str - 源分支 / 目标分支\n- draft: bool - 草稿标记",
+  "properties": {
+    "number": {
+      "title": "Number",
+      "type": "integer"
+    },
+    "title": {
+      "default": "",
+      "title": "Title",
+      "type": "string"
+    },
+    "author": {
+      "default": "",
+      "title": "Author",
+      "type": "string"
+    },
+    "state": {
+      "default": "",
+      "title": "State",
+      "type": "string"
+    },
+    "updated_at": {
+      "default": "",
+      "title": "Updated At",
+      "type": "string"
+    },
+    "url": {
+      "default": "",
+      "title": "Url",
+      "type": "string"
+    },
+    "head_ref": {
+      "default": "",
+      "title": "Head Ref",
+      "type": "string"
+    },
+    "base_ref": {
+      "default": "",
+      "title": "Base Ref",
+      "type": "string"
+    },
+    "draft": {
+      "default": false,
+      "title": "Draft",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "number"
+  ],
+  "title": "PrInfo",
+  "type": "object"
+}
+```
+
+### PrListResult
+
+| Field | Type | Required |
+|---|---|---|
+| `ok` | `boolean` | no |
+| `error` | `string` | no |
+| `pulls` | `array` | no |
+
+```json
+{
+  "$defs": {
+    "PrInfo": {
+      "description": "PR 列表行（GitHub API 归一化）\n\n【字段说明】\n- number: int - PR 编号\n- title / author / state / url - 基本盘\n- updated_at: str - 最后更新时间（ISO 8601）\n- head_ref / base_ref: str - 源分支 / 目标分支\n- draft: bool - 草稿标记",
+      "properties": {
+        "number": {
+          "title": "Number",
+          "type": "integer"
+        },
+        "title": {
+          "default": "",
+          "title": "Title",
+          "type": "string"
+        },
+        "author": {
+          "default": "",
+          "title": "Author",
+          "type": "string"
+        },
+        "state": {
+          "default": "",
+          "title": "State",
+          "type": "string"
+        },
+        "updated_at": {
+          "default": "",
+          "title": "Updated At",
+          "type": "string"
+        },
+        "url": {
+          "default": "",
+          "title": "Url",
+          "type": "string"
+        },
+        "head_ref": {
+          "default": "",
+          "title": "Head Ref",
+          "type": "string"
+        },
+        "base_ref": {
+          "default": "",
+          "title": "Base Ref",
+          "type": "string"
+        },
+        "draft": {
+          "default": false,
+          "title": "Draft",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "number"
+      ],
+      "title": "PrInfo",
+      "type": "object"
+    }
+  },
+  "description": "PR 列表响应\n\n【字段说明】\n- ok: bool - 请求是否成功（网络/权限/解析任一失败为 False）\n- error: str - 失败摘要（HTTP 状态 + GitHub message 字段）\n- pulls: list[PrInfo] - 归一化列表",
+  "properties": {
+    "ok": {
+      "default": true,
+      "title": "Ok",
+      "type": "boolean"
+    },
+    "error": {
+      "default": "",
+      "title": "Error",
+      "type": "string"
+    },
+    "pulls": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/PrInfo"
+      },
+      "title": "Pulls",
+      "type": "array"
+    }
+  },
+  "title": "PrListResult",
+  "type": "object"
+}
+```
+
+### PrCreateCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `cwd` | `string` | yes |
+| `title` | `string` | yes |
+| `body` | `string` | no |
+| `base` | `string` | no |
+| `head` | `string` | no |
+| `draft` | `boolean` | no |
+
+```json
+{
+  "description": "PR 创建命令 - 推送当前分支并在 GitHub 开一个 Pull Request\n\n【字段说明】\n- type: Literal[\"pr.create\"] - 命令类型\n- cwd: str - 目标仓库\n- title: str - PR 标题（必填）\n- body: str - 描述（可空）\n- base: str - 目标分支；空 = 远端默认分支\n- head: str - 源分支；空 = 当前分支\n- draft: bool - 先开草稿（可后改正式）\n\n【设计目的与安全边界】\n会改变共享状态（push + 建 PR），因此 GUI 必须二次确认后才发本命令；\ndaemon 侧把动作与结果记入日志审计。push 走 `git push -u origin HEAD`，\n仅当本地有未推送提交时才执行。需要配置 [github] token 或 IWAN_GITHUB_TOKEN。",
+  "properties": {
+    "type": {
+      "const": "pr.create",
+      "default": "pr.create",
+      "title": "Type",
+      "type": "string"
+    },
+    "cwd": {
+      "title": "Cwd",
+      "type": "string"
+    },
+    "title": {
+      "title": "Title",
+      "type": "string"
+    },
+    "body": {
+      "default": "",
+      "title": "Body",
+      "type": "string"
+    },
+    "base": {
+      "default": "",
+      "title": "Base",
+      "type": "string"
+    },
+    "head": {
+      "default": "",
+      "title": "Head",
+      "type": "string"
+    },
+    "draft": {
+      "default": false,
+      "title": "Draft",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "cwd",
+    "title"
+  ],
+  "title": "PrCreateCommand",
+  "type": "object"
+}
+```
+
+### PrCreateResult
+
+| Field | Type | Required |
+|---|---|---|
+| `ok` | `boolean` | no |
+| `number` | `integer` | no |
+| `url` | `string` | no |
+| `pushed` | `boolean` | no |
+| `error` | `string` | no |
+
+```json
+{
+  "description": "PR 创建响应\n\n【字段说明】\n- ok: bool - 是否成功建出 PR\n- number: int - 新 PR 编号\n- url: str - GitHub 页面链接\n- pushed: bool - 本次是否真的推送过提交（False=分支已在远端）\n- error: str - 失败摘要（push 失败/无 token/API 拒绝）",
+  "properties": {
+    "ok": {
+      "default": false,
+      "title": "Ok",
+      "type": "boolean"
+    },
+    "number": {
+      "default": 0,
+      "title": "Number",
+      "type": "integer"
+    },
+    "url": {
+      "default": "",
+      "title": "Url",
+      "type": "string"
+    },
+    "pushed": {
+      "default": false,
+      "title": "Pushed",
+      "type": "boolean"
+    },
+    "error": {
+      "default": "",
+      "title": "Error",
+      "type": "string"
+    }
+  },
+  "title": "PrCreateResult",
+  "type": "object"
+}
+```
+
+### ScheduleListCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+
+```json
+{
+  "description": "定时任务列表命令 - 查询全部任务定义（含下次到期时间）\n\n【字段说明】\n- type: Literal[\"schedule.list\"] - 命令类型\n\n【响应】\nScheduleListResult - 任务行列表（读 ~/.iwan/scheduled.json + 内存态）",
+  "properties": {
+    "type": {
+      "const": "schedule.list",
+      "default": "schedule.list",
+      "title": "Type",
+      "type": "string"
+    }
+  },
+  "title": "ScheduleListCommand",
+  "type": "object"
+}
+```
+
+### ScheduleTaskInfo
+
+| Field | Type | Required |
+|---|---|---|
+| `id` | `string` | yes |
+| `name` | `string` | no |
+| `cwd` | `string` | no |
+| `prompt` | `string` | no |
+| `kind` | `string` | no |
+| `spec` | `string` | no |
+| `enabled` | `boolean` | no |
+| `last_run` | `string` | no |
+| `last_result` | `string` | no |
+| `next_due` | `string` | no |
+
+```json
+{
+  "description": "定时任务行\n\n【字段说明】\n- id: str - 任务 ID（服务端生成）\n- name / cwd / prompt: str - 名称、目标工作目录、到点执行的指令\n- kind: str - 调度档：\"every_minutes\" | \"daily\" | \"weekly\"\n- spec: str - 档参数：\"N\"（分钟）| \"HH:MM\"（每天）| \"WEEKDAY@HH:MM\"（每周，0=周一）\n- enabled: bool - 开关（False 时调度器跳过）\n- last_run: str - 上次触发时刻（ISO 8601，空=从未）\n- last_result: str - 上次结果摘要\n- next_due: str - 下次到期时刻（服务端算好；空=未排/停用）",
+  "properties": {
+    "id": {
+      "title": "Id",
+      "type": "string"
+    },
+    "name": {
+      "default": "",
+      "title": "Name",
+      "type": "string"
+    },
+    "cwd": {
+      "default": "",
+      "title": "Cwd",
+      "type": "string"
+    },
+    "prompt": {
+      "default": "",
+      "title": "Prompt",
+      "type": "string"
+    },
+    "kind": {
+      "default": "every_minutes",
+      "title": "Kind",
+      "type": "string"
+    },
+    "spec": {
+      "default": "",
+      "title": "Spec",
+      "type": "string"
+    },
+    "enabled": {
+      "default": true,
+      "title": "Enabled",
+      "type": "boolean"
+    },
+    "last_run": {
+      "default": "",
+      "title": "Last Run",
+      "type": "string"
+    },
+    "last_result": {
+      "default": "",
+      "title": "Last Result",
+      "type": "string"
+    },
+    "next_due": {
+      "default": "",
+      "title": "Next Due",
+      "type": "string"
+    }
+  },
+  "required": [
+    "id"
+  ],
+  "title": "ScheduleTaskInfo",
+  "type": "object"
+}
+```
+
+### ScheduleListResult
+
+| Field | Type | Required |
+|---|---|---|
+| `tasks` | `array` | no |
+
+```json
+{
+  "$defs": {
+    "ScheduleTaskInfo": {
+      "description": "定时任务行\n\n【字段说明】\n- id: str - 任务 ID（服务端生成）\n- name / cwd / prompt: str - 名称、目标工作目录、到点执行的指令\n- kind: str - 调度档：\"every_minutes\" | \"daily\" | \"weekly\"\n- spec: str - 档参数：\"N\"（分钟）| \"HH:MM\"（每天）| \"WEEKDAY@HH:MM\"（每周，0=周一）\n- enabled: bool - 开关（False 时调度器跳过）\n- last_run: str - 上次触发时刻（ISO 8601，空=从未）\n- last_result: str - 上次结果摘要\n- next_due: str - 下次到期时刻（服务端算好；空=未排/停用）",
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "default": "",
+          "title": "Name",
+          "type": "string"
+        },
+        "cwd": {
+          "default": "",
+          "title": "Cwd",
+          "type": "string"
+        },
+        "prompt": {
+          "default": "",
+          "title": "Prompt",
+          "type": "string"
+        },
+        "kind": {
+          "default": "every_minutes",
+          "title": "Kind",
+          "type": "string"
+        },
+        "spec": {
+          "default": "",
+          "title": "Spec",
+          "type": "string"
+        },
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "last_run": {
+          "default": "",
+          "title": "Last Run",
+          "type": "string"
+        },
+        "last_result": {
+          "default": "",
+          "title": "Last Result",
+          "type": "string"
+        },
+        "next_due": {
+          "default": "",
+          "title": "Next Due",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "ScheduleTaskInfo",
+      "type": "object"
+    }
+  },
+  "description": "定时任务列表响应\n\n【字段说明】\n- tasks: list[ScheduleTaskInfo] - 全部任务",
+  "properties": {
+    "tasks": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ScheduleTaskInfo"
+      },
+      "title": "Tasks",
+      "type": "array"
+    }
+  },
+  "title": "ScheduleListResult",
+  "type": "object"
+}
+```
+
+### ScheduleCreateCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `name` | `string` | yes |
+| `cwd` | `string` | yes |
+| `prompt` | `string` | yes |
+| `kind` | `string` | yes |
+| `spec` | `string` | yes |
+
+```json
+{
+  "description": "定时任务创建命令\n\n【字段说明】\n- type: Literal[\"schedule.create\"] - 命令类型\n- name / cwd / prompt / kind / spec - 见 ScheduleTaskInfo 字段说明\n\n【设计目的】\nkind/spec 的合法性在服务端校验（如 \"HH:MM\" 格式、N>=1），失败返回\nok=False + error 人类可读文案；成功则写盘（原子替换）并即时排期。\n\n【响应】\nScheduleOpResult - 携带新任务 id",
+  "properties": {
+    "type": {
+      "const": "schedule.create",
+      "default": "schedule.create",
+      "title": "Type",
+      "type": "string"
+    },
+    "name": {
+      "title": "Name",
+      "type": "string"
+    },
+    "cwd": {
+      "title": "Cwd",
+      "type": "string"
+    },
+    "prompt": {
+      "title": "Prompt",
+      "type": "string"
+    },
+    "kind": {
+      "title": "Kind",
+      "type": "string"
+    },
+    "spec": {
+      "title": "Spec",
+      "type": "string"
+    }
+  },
+  "required": [
+    "name",
+    "cwd",
+    "prompt",
+    "kind",
+    "spec"
+  ],
+  "title": "ScheduleCreateCommand",
+  "type": "object"
+}
+```
+
+### ScheduleUpdateCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `id` | `string` | yes |
+| `name` | `string | null` | no |
+| `cwd` | `string | null` | no |
+| `prompt` | `string | null` | no |
+| `kind` | `string | null` | no |
+| `spec` | `string | null` | no |
+| `enabled` | `boolean | null` | no |
+
+```json
+{
+  "description": "定时任务更新命令 - 字段为 None 表示不改该项\n\n【字段说明】\n- type: Literal[\"schedule.update\"] - 命令类型\n- id: str - 目标任务\n- name/cwd/prompt/kind/spec: str | None - 改哪个传哪个\n- enabled: bool | None - 开关（None=不动）",
+  "properties": {
+    "type": {
+      "const": "schedule.update",
+      "default": "schedule.update",
+      "title": "Type",
+      "type": "string"
+    },
+    "id": {
+      "title": "Id",
+      "type": "string"
+    },
+    "name": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Name"
+    },
+    "cwd": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Cwd"
+    },
+    "prompt": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Prompt"
+    },
+    "kind": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Kind"
+    },
+    "spec": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Spec"
+    },
+    "enabled": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Enabled"
+    }
+  },
+  "required": [
+    "id"
+  ],
+  "title": "ScheduleUpdateCommand",
+  "type": "object"
+}
+```
+
+### ScheduleDeleteCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `id` | `string` | yes |
+
+```json
+{
+  "description": "定时任务删除命令\n\n【字段说明】\n- type: Literal[\"schedule.delete\"] - 命令类型\n- id: str - 目标任务\n\n【响应】\nScheduleOpResult - ok=False 且 error=\"任务不存在\" 表示幂等未命中",
+  "properties": {
+    "type": {
+      "const": "schedule.delete",
+      "default": "schedule.delete",
+      "title": "Type",
+      "type": "string"
+    },
+    "id": {
+      "title": "Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "id"
+  ],
+  "title": "ScheduleDeleteCommand",
+  "type": "object"
+}
+```
+
+### ScheduleRunNowCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `id` | `string` | yes |
+
+```json
+{
+  "description": "定时任务立即执行命令 - 手动触发一次（不影响排期）\n\n【字段说明】\n- type: Literal[\"schedule.run_now\"] - 命令类型\n- id: str - 目标任务\n\n【设计目的】\n给\"验证任务写得对不对\"留个按钮：与到点触发走同一执行路径\n（one_shot 会话 + 异步运行），GUI 能立刻在会话列表看到新任务。",
+  "properties": {
+    "type": {
+      "const": "schedule.run_now",
+      "default": "schedule.run_now",
+      "title": "Type",
+      "type": "string"
+    },
+    "id": {
+      "title": "Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "id"
+  ],
+  "title": "ScheduleRunNowCommand",
+  "type": "object"
+}
+```
+
+### ScheduleOpResult
+
+| Field | Type | Required |
+|---|---|---|
+| `ok` | `boolean` | no |
+| `id` | `string` | no |
+| `run_id` | `string` | no |
+| `error` | `string` | no |
+
+```json
+{
+  "description": "定时任务写操作统一响应\n\n【字段说明】\n- ok: bool - 是否成功\n- id: str - 相关任务 ID（create 返回新 id）\n- run_id: str - 仅 run_now 非空：本次触发启动的运行 ID\n- error: str - 失败原因（校验文案/不存在/非法 kind）",
+  "properties": {
+    "ok": {
+      "default": true,
+      "title": "Ok",
+      "type": "boolean"
+    },
+    "id": {
+      "default": "",
+      "title": "Id",
+      "type": "string"
+    },
+    "run_id": {
+      "default": "",
+      "title": "Run Id",
+      "type": "string"
+    },
+    "error": {
+      "default": "",
+      "title": "Error",
+      "type": "string"
+    }
+  },
+  "title": "ScheduleOpResult",
+  "type": "object"
+}
+```
+
+### WorkflowTaskDef
+
+| Field | Type | Required |
+|---|---|---|
+| `name` | `string` | yes |
+| `prompt` | `string` | yes |
+| `depends_on` | `array` | no |
+
+```json
+{
+  "description": "工作流节点定义（编辑器与存储共用的最小三字段）\n\n【字段说明】\n- name: str - 节点名（图内唯一，兼作事件里的 node 键与依赖引用目标）\n- prompt: str - 该节点子 Agent 的完整指令（非空）\n- depends_on: list[str] - 前置节点名列表（空=入口节点）",
+  "properties": {
+    "name": {
+      "title": "Name",
+      "type": "string"
+    },
+    "prompt": {
+      "title": "Prompt",
+      "type": "string"
+    },
+    "depends_on": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Depends On",
+      "type": "array"
+    }
+  },
+  "required": [
+    "name",
+    "prompt"
+  ],
+  "title": "WorkflowTaskDef",
+  "type": "object"
+}
+```
+
+### WorkflowInfo
+
+| Field | Type | Required |
+|---|---|---|
+| `id` | `string` | yes |
+| `name` | `string` | no |
+| `description` | `string` | no |
+| `tasks` | `array` | no |
+| `layers` | `array` | no |
+| `created_at` | `string` | no |
+| `updated_at` | `string` | no |
+| `last_run_id` | `string` | no |
+| `last_status` | `string` | no |
+
+```json
+{
+  "$defs": {
+    "WorkflowTaskDef": {
+      "description": "工作流节点定义（编辑器与存储共用的最小三字段）\n\n【字段说明】\n- name: str - 节点名（图内唯一，兼作事件里的 node 键与依赖引用目标）\n- prompt: str - 该节点子 Agent 的完整指令（非空）\n- depends_on: list[str] - 前置节点名列表（空=入口节点）",
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "prompt": {
+          "title": "Prompt",
+          "type": "string"
+        },
+        "depends_on": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Depends On",
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "prompt"
+      ],
+      "title": "WorkflowTaskDef",
+      "type": "object"
+    }
+  },
+  "description": "工作流定义行\n\n【字段说明】\n- id: str - 工作流 ID（服务端生成，12 位 hex）\n- name / description: str - 名称与备注\n- tasks: list[WorkflowTaskDef] - 节点定义表\n- layers: list[list[str]] - 服务端现算的分层执行计划（GUI 直接按列渲染）\n- created_at / updated_at: str - ISO 时刻\n- last_run_id / last_status: str - 最近一次运行的反范式快照（列表页 chip 用）",
+  "properties": {
+    "id": {
+      "title": "Id",
+      "type": "string"
+    },
+    "name": {
+      "default": "",
+      "title": "Name",
+      "type": "string"
+    },
+    "description": {
+      "default": "",
+      "title": "Description",
+      "type": "string"
+    },
+    "tasks": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/WorkflowTaskDef"
+      },
+      "title": "Tasks",
+      "type": "array"
+    },
+    "layers": {
+      "default": [],
+      "items": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "title": "Layers",
+      "type": "array"
+    },
+    "created_at": {
+      "default": "",
+      "title": "Created At",
+      "type": "string"
+    },
+    "updated_at": {
+      "default": "",
+      "title": "Updated At",
+      "type": "string"
+    },
+    "last_run_id": {
+      "default": "",
+      "title": "Last Run Id",
+      "type": "string"
+    },
+    "last_status": {
+      "default": "",
+      "title": "Last Status",
+      "type": "string"
+    }
+  },
+  "required": [
+    "id"
+  ],
+  "title": "WorkflowInfo",
+  "type": "object"
+}
+```
+
+### WorkflowNodeRunInfo
+
+| Field | Type | Required |
+|---|---|---|
+| `node` | `string` | yes |
+| `status` | `string` | no |
+| `child_run_id` | `string` | no |
+| `detail` | `string` | no |
+| `output` | `string` | no |
+| `started_at` | `string` | no |
+| `finished_at` | `string` | no |
+
+```json
+{
+  "description": "单节点运行态\n\n【字段说明】\n- node: str - 节点名\n- status: str - \"pending\" | \"running\" | \"ok\" | \"fail\"（pending=run 行预置骨架的初始态）\n- child_run_id: str - 该节点子 Agent 的 run id（深链审计用）\n- detail: str - 失败原因/取消说明（≤200 字）\n- output: str - 成功产出快照（截断存储，≤400 字）\n- started_at / finished_at: str - ISO 时刻",
+  "properties": {
+    "node": {
+      "title": "Node",
+      "type": "string"
+    },
+    "status": {
+      "default": "pending",
+      "title": "Status",
+      "type": "string"
+    },
+    "child_run_id": {
+      "default": "",
+      "title": "Child Run Id",
+      "type": "string"
+    },
+    "detail": {
+      "default": "",
+      "title": "Detail",
+      "type": "string"
+    },
+    "output": {
+      "default": "",
+      "title": "Output",
+      "type": "string"
+    },
+    "started_at": {
+      "default": "",
+      "title": "Started At",
+      "type": "string"
+    },
+    "finished_at": {
+      "default": "",
+      "title": "Finished At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "node"
+  ],
+  "title": "WorkflowNodeRunInfo",
+  "type": "object"
+}
+```
+
+### WorkflowRunInfo
+
+| Field | Type | Required |
+|---|---|---|
+| `id` | `string` | yes |
+| `workflow_id` | `string` | yes |
+| `workflow_name` | `string` | no |
+| `session_id` | `string` | no |
+| `status` | `string` | no |
+| `started_at` | `string` | no |
+| `finished_at` | `string` | no |
+| `error` | `string` | no |
+| `nodes` | `array` | no |
+
+```json
+{
+  "$defs": {
+    "WorkflowNodeRunInfo": {
+      "description": "单节点运行态\n\n【字段说明】\n- node: str - 节点名\n- status: str - \"pending\" | \"running\" | \"ok\" | \"fail\"（pending=run 行预置骨架的初始态）\n- child_run_id: str - 该节点子 Agent 的 run id（深链审计用）\n- detail: str - 失败原因/取消说明（≤200 字）\n- output: str - 成功产出快照（截断存储，≤400 字）\n- started_at / finished_at: str - ISO 时刻",
+      "properties": {
+        "node": {
+          "title": "Node",
+          "type": "string"
+        },
+        "status": {
+          "default": "pending",
+          "title": "Status",
+          "type": "string"
+        },
+        "child_run_id": {
+          "default": "",
+          "title": "Child Run Id",
+          "type": "string"
+        },
+        "detail": {
+          "default": "",
+          "title": "Detail",
+          "type": "string"
+        },
+        "output": {
+          "default": "",
+          "title": "Output",
+          "type": "string"
+        },
+        "started_at": {
+          "default": "",
+          "title": "Started At",
+          "type": "string"
+        },
+        "finished_at": {
+          "default": "",
+          "title": "Finished At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "node"
+      ],
+      "title": "WorkflowNodeRunInfo",
+      "type": "object"
+    }
+  },
+  "description": "一次工作流运行\n\n【字段说明】\n- id: str - run id（服务端生成）\n- workflow_id / workflow_name: str - 归属工作流\n- session_id: str - 该 run 懒建的 one_shot 会话（子 Agent 审批卡的落点；\"\"=还没建）\n- status: str - \"running\" | \"success\" | \"failed\" | \"interrupted\"\n- started_at / finished_at / error: str - 收尾信息\n- nodes: list[WorkflowNodeRunInfo] - 各节点运行态",
+  "properties": {
+    "id": {
+      "title": "Id",
+      "type": "string"
+    },
+    "workflow_id": {
+      "title": "Workflow Id",
+      "type": "string"
+    },
+    "workflow_name": {
+      "default": "",
+      "title": "Workflow Name",
+      "type": "string"
+    },
+    "session_id": {
+      "default": "",
+      "title": "Session Id",
+      "type": "string"
+    },
+    "status": {
+      "default": "running",
+      "title": "Status",
+      "type": "string"
+    },
+    "started_at": {
+      "default": "",
+      "title": "Started At",
+      "type": "string"
+    },
+    "finished_at": {
+      "default": "",
+      "title": "Finished At",
+      "type": "string"
+    },
+    "error": {
+      "default": "",
+      "title": "Error",
+      "type": "string"
+    },
+    "nodes": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/WorkflowNodeRunInfo"
+      },
+      "title": "Nodes",
+      "type": "array"
+    }
+  },
+  "required": [
+    "id",
+    "workflow_id"
+  ],
+  "title": "WorkflowRunInfo",
+  "type": "object"
+}
+```
+
+### WorkflowListCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+
+```json
+{
+  "description": "工作流列表命令 - 查询全部工作流定义\n\n【字段说明】\n- type: Literal[\"workflow.list\"] - 命令类型\n\n【响应】\nWorkflowListResult - 定义行列表（layers 服务端算好）",
+  "properties": {
+    "type": {
+      "const": "workflow.list",
+      "default": "workflow.list",
+      "title": "Type",
+      "type": "string"
+    }
+  },
+  "title": "WorkflowListCommand",
+  "type": "object"
+}
+```
+
+### WorkflowListResult
+
+| Field | Type | Required |
+|---|---|---|
+| `workflows` | `array` | no |
+
+```json
+{
+  "$defs": {
+    "WorkflowInfo": {
+      "description": "工作流定义行\n\n【字段说明】\n- id: str - 工作流 ID（服务端生成，12 位 hex）\n- name / description: str - 名称与备注\n- tasks: list[WorkflowTaskDef] - 节点定义表\n- layers: list[list[str]] - 服务端现算的分层执行计划（GUI 直接按列渲染）\n- created_at / updated_at: str - ISO 时刻\n- last_run_id / last_status: str - 最近一次运行的反范式快照（列表页 chip 用）",
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "default": "",
+          "title": "Name",
+          "type": "string"
+        },
+        "description": {
+          "default": "",
+          "title": "Description",
+          "type": "string"
+        },
+        "tasks": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/WorkflowTaskDef"
+          },
+          "title": "Tasks",
+          "type": "array"
+        },
+        "layers": {
+          "default": [],
+          "items": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "title": "Layers",
+          "type": "array"
+        },
+        "created_at": {
+          "default": "",
+          "title": "Created At",
+          "type": "string"
+        },
+        "updated_at": {
+          "default": "",
+          "title": "Updated At",
+          "type": "string"
+        },
+        "last_run_id": {
+          "default": "",
+          "title": "Last Run Id",
+          "type": "string"
+        },
+        "last_status": {
+          "default": "",
+          "title": "Last Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "WorkflowInfo",
+      "type": "object"
+    },
+    "WorkflowTaskDef": {
+      "description": "工作流节点定义（编辑器与存储共用的最小三字段）\n\n【字段说明】\n- name: str - 节点名（图内唯一，兼作事件里的 node 键与依赖引用目标）\n- prompt: str - 该节点子 Agent 的完整指令（非空）\n- depends_on: list[str] - 前置节点名列表（空=入口节点）",
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "prompt": {
+          "title": "Prompt",
+          "type": "string"
+        },
+        "depends_on": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Depends On",
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "prompt"
+      ],
+      "title": "WorkflowTaskDef",
+      "type": "object"
+    }
+  },
+  "description": "工作流列表响应\n\n【字段说明】\n- workflows: list[WorkflowInfo] - 全部工作流",
+  "properties": {
+    "workflows": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/WorkflowInfo"
+      },
+      "title": "Workflows",
+      "type": "array"
+    }
+  },
+  "title": "WorkflowListResult",
+  "type": "object"
+}
+```
+
+### WorkflowGetCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `id` | `string` | yes |
+
+```json
+{
+  "description": "工作流详情命令 - 一次拉齐定义 + 最近运行（详情页免往返）\n\n【字段说明】\n- type: Literal[\"workflow.get\"] - 命令类型\n- id: str - 目标工作流\n\n【响应】\nWorkflowGetResult - workflow=None 且 ok=False 表示不存在",
+  "properties": {
+    "type": {
+      "const": "workflow.get",
+      "default": "workflow.get",
+      "title": "Type",
+      "type": "string"
+    },
+    "id": {
+      "title": "Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "id"
+  ],
+  "title": "WorkflowGetCommand",
+  "type": "object"
+}
+```
+
+### WorkflowGetResult
+
+| Field | Type | Required |
+|---|---|---|
+| `ok` | `boolean` | no |
+| `error` | `string` | no |
+| `workflow` | `? | null` | no |
+| `runs` | `array` | no |
+
+```json
+{
+  "$defs": {
+    "WorkflowInfo": {
+      "description": "工作流定义行\n\n【字段说明】\n- id: str - 工作流 ID（服务端生成，12 位 hex）\n- name / description: str - 名称与备注\n- tasks: list[WorkflowTaskDef] - 节点定义表\n- layers: list[list[str]] - 服务端现算的分层执行计划（GUI 直接按列渲染）\n- created_at / updated_at: str - ISO 时刻\n- last_run_id / last_status: str - 最近一次运行的反范式快照（列表页 chip 用）",
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "default": "",
+          "title": "Name",
+          "type": "string"
+        },
+        "description": {
+          "default": "",
+          "title": "Description",
+          "type": "string"
+        },
+        "tasks": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/WorkflowTaskDef"
+          },
+          "title": "Tasks",
+          "type": "array"
+        },
+        "layers": {
+          "default": [],
+          "items": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "title": "Layers",
+          "type": "array"
+        },
+        "created_at": {
+          "default": "",
+          "title": "Created At",
+          "type": "string"
+        },
+        "updated_at": {
+          "default": "",
+          "title": "Updated At",
+          "type": "string"
+        },
+        "last_run_id": {
+          "default": "",
+          "title": "Last Run Id",
+          "type": "string"
+        },
+        "last_status": {
+          "default": "",
+          "title": "Last Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "WorkflowInfo",
+      "type": "object"
+    },
+    "WorkflowNodeRunInfo": {
+      "description": "单节点运行态\n\n【字段说明】\n- node: str - 节点名\n- status: str - \"pending\" | \"running\" | \"ok\" | \"fail\"（pending=run 行预置骨架的初始态）\n- child_run_id: str - 该节点子 Agent 的 run id（深链审计用）\n- detail: str - 失败原因/取消说明（≤200 字）\n- output: str - 成功产出快照（截断存储，≤400 字）\n- started_at / finished_at: str - ISO 时刻",
+      "properties": {
+        "node": {
+          "title": "Node",
+          "type": "string"
+        },
+        "status": {
+          "default": "pending",
+          "title": "Status",
+          "type": "string"
+        },
+        "child_run_id": {
+          "default": "",
+          "title": "Child Run Id",
+          "type": "string"
+        },
+        "detail": {
+          "default": "",
+          "title": "Detail",
+          "type": "string"
+        },
+        "output": {
+          "default": "",
+          "title": "Output",
+          "type": "string"
+        },
+        "started_at": {
+          "default": "",
+          "title": "Started At",
+          "type": "string"
+        },
+        "finished_at": {
+          "default": "",
+          "title": "Finished At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "node"
+      ],
+      "title": "WorkflowNodeRunInfo",
+      "type": "object"
+    },
+    "WorkflowRunInfo": {
+      "description": "一次工作流运行\n\n【字段说明】\n- id: str - run id（服务端生成）\n- workflow_id / workflow_name: str - 归属工作流\n- session_id: str - 该 run 懒建的 one_shot 会话（子 Agent 审批卡的落点；\"\"=还没建）\n- status: str - \"running\" | \"success\" | \"failed\" | \"interrupted\"\n- started_at / finished_at / error: str - 收尾信息\n- nodes: list[WorkflowNodeRunInfo] - 各节点运行态",
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "workflow_id": {
+          "title": "Workflow Id",
+          "type": "string"
+        },
+        "workflow_name": {
+          "default": "",
+          "title": "Workflow Name",
+          "type": "string"
+        },
+        "session_id": {
+          "default": "",
+          "title": "Session Id",
+          "type": "string"
+        },
+        "status": {
+          "default": "running",
+          "title": "Status",
+          "type": "string"
+        },
+        "started_at": {
+          "default": "",
+          "title": "Started At",
+          "type": "string"
+        },
+        "finished_at": {
+          "default": "",
+          "title": "Finished At",
+          "type": "string"
+        },
+        "error": {
+          "default": "",
+          "title": "Error",
+          "type": "string"
+        },
+        "nodes": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/WorkflowNodeRunInfo"
+          },
+          "title": "Nodes",
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "workflow_id"
+      ],
+      "title": "WorkflowRunInfo",
+      "type": "object"
+    },
+    "WorkflowTaskDef": {
+      "description": "工作流节点定义（编辑器与存储共用的最小三字段）\n\n【字段说明】\n- name: str - 节点名（图内唯一，兼作事件里的 node 键与依赖引用目标）\n- prompt: str - 该节点子 Agent 的完整指令（非空）\n- depends_on: list[str] - 前置节点名列表（空=入口节点）",
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "prompt": {
+          "title": "Prompt",
+          "type": "string"
+        },
+        "depends_on": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Depends On",
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "prompt"
+      ],
+      "title": "WorkflowTaskDef",
+      "type": "object"
+    }
+  },
+  "description": "工作流详情响应\n\n【字段说明】\n- ok: bool - 是否命中\n- error: str - 未命中原因\n- workflow: WorkflowInfo | None - 定义行\n- runs: list[WorkflowRunInfo] - 该流程最近 20 次运行（新→旧）",
+  "properties": {
+    "ok": {
+      "default": true,
+      "title": "Ok",
+      "type": "boolean"
+    },
+    "error": {
+      "default": "",
+      "title": "Error",
+      "type": "string"
+    },
+    "workflow": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/WorkflowInfo"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "runs": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/WorkflowRunInfo"
+      },
+      "title": "Runs",
+      "type": "array"
+    }
+  },
+  "title": "WorkflowGetResult",
+  "type": "object"
+}
+```
+
+### WorkflowSaveCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `id` | `string` | no |
+| `name` | `string` | no |
+| `description` | `string` | no |
+| `tasks` | `array` | no |
+
+```json
+{
+  "$defs": {
+    "WorkflowTaskDef": {
+      "description": "工作流节点定义（编辑器与存储共用的最小三字段）\n\n【字段说明】\n- name: str - 节点名（图内唯一，兼作事件里的 node 键与依赖引用目标）\n- prompt: str - 该节点子 Agent 的完整指令（非空）\n- depends_on: list[str] - 前置节点名列表（空=入口节点）",
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "prompt": {
+          "title": "Prompt",
+          "type": "string"
+        },
+        "depends_on": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Depends On",
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "prompt"
+      ],
+      "title": "WorkflowTaskDef",
+      "type": "object"
+    }
+  },
+  "description": "工作流保存命令 - id 为空新建、非空整图覆盖更新\n\n【字段说明】\n- type: Literal[\"workflow.save\"] - 命令类型\n- id: str - 空=新建\n- name / description: str - 名称（空则服务端兜底）与备注\n- tasks: list[WorkflowTaskDef] - 完整节点表（整图替换，不做增量 diff）\n\n【设计目的】\n图合法性（非空/≤30 节点/重名/缺依赖/环）在此命令的服务端校验，\n非法即 ok=False + 中文文案，绝不持久化半张坏图。",
+  "properties": {
+    "type": {
+      "const": "workflow.save",
+      "default": "workflow.save",
+      "title": "Type",
+      "type": "string"
+    },
+    "id": {
+      "default": "",
+      "title": "Id",
+      "type": "string"
+    },
+    "name": {
+      "default": "",
+      "title": "Name",
+      "type": "string"
+    },
+    "description": {
+      "default": "",
+      "title": "Description",
+      "type": "string"
+    },
+    "tasks": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/WorkflowTaskDef"
+      },
+      "title": "Tasks",
+      "type": "array"
+    }
+  },
+  "title": "WorkflowSaveCommand",
+  "type": "object"
+}
+```
+
+### WorkflowDeleteCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `id` | `string` | yes |
+
+```json
+{
+  "description": "工作流删除命令 - 只删定义，运行历史保留（v1 不级联）\n\n【字段说明】\n- type: Literal[\"workflow.delete\"] - 命令类型\n- id: str - 目标工作流",
+  "properties": {
+    "type": {
+      "const": "workflow.delete",
+      "default": "workflow.delete",
+      "title": "Type",
+      "type": "string"
+    },
+    "id": {
+      "title": "Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "id"
+  ],
+  "title": "WorkflowDeleteCommand",
+  "type": "object"
+}
+```
+
+### WorkflowRunCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `id` | `string` | yes |
+
+```json
+{
+  "description": "工作流运行命令 - 即发即返，节点状态全靠 workflow.node 事件\n\n【字段说明】\n- type: Literal[\"workflow.run\"] - 命令类型\n- id: str - 目标工作流\n\n【设计目的】\nGUI 点击\"运行\"是用户显式授权（同 schedule.run_now，RPC 层不设审批门）；\n节点内子 Agent 的工具调用照常过 permission_manager，这里不新开任何洞。\n同一工作流已有进行中的运行时拒绝二次触发。",
+  "properties": {
+    "type": {
+      "const": "workflow.run",
+      "default": "workflow.run",
+      "title": "Type",
+      "type": "string"
+    },
+    "id": {
+      "title": "Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "id"
+  ],
+  "title": "WorkflowRunCommand",
+  "type": "object"
+}
+```
+
+### WorkflowRunsCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `id` | `string` | no |
+| `limit` | `integer` | no |
+
+```json
+{
+  "description": "工作流运行历史命令\n\n【字段说明】\n- type: Literal[\"workflow.runs\"] - 命令类型\n- id: str - 空=全部工作流的运行混排\n- limit: int - 返回条数上限（服务端钳位 1..100）",
+  "properties": {
+    "type": {
+      "const": "workflow.runs",
+      "default": "workflow.runs",
+      "title": "Type",
+      "type": "string"
+    },
+    "id": {
+      "default": "",
+      "title": "Id",
+      "type": "string"
+    },
+    "limit": {
+      "default": 20,
+      "title": "Limit",
+      "type": "integer"
+    }
+  },
+  "title": "WorkflowRunsCommand",
+  "type": "object"
+}
+```
+
+### WorkflowRunsResult
+
+| Field | Type | Required |
+|---|---|---|
+| `runs` | `array` | no |
+
+```json
+{
+  "$defs": {
+    "WorkflowNodeRunInfo": {
+      "description": "单节点运行态\n\n【字段说明】\n- node: str - 节点名\n- status: str - \"pending\" | \"running\" | \"ok\" | \"fail\"（pending=run 行预置骨架的初始态）\n- child_run_id: str - 该节点子 Agent 的 run id（深链审计用）\n- detail: str - 失败原因/取消说明（≤200 字）\n- output: str - 成功产出快照（截断存储，≤400 字）\n- started_at / finished_at: str - ISO 时刻",
+      "properties": {
+        "node": {
+          "title": "Node",
+          "type": "string"
+        },
+        "status": {
+          "default": "pending",
+          "title": "Status",
+          "type": "string"
+        },
+        "child_run_id": {
+          "default": "",
+          "title": "Child Run Id",
+          "type": "string"
+        },
+        "detail": {
+          "default": "",
+          "title": "Detail",
+          "type": "string"
+        },
+        "output": {
+          "default": "",
+          "title": "Output",
+          "type": "string"
+        },
+        "started_at": {
+          "default": "",
+          "title": "Started At",
+          "type": "string"
+        },
+        "finished_at": {
+          "default": "",
+          "title": "Finished At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "node"
+      ],
+      "title": "WorkflowNodeRunInfo",
+      "type": "object"
+    },
+    "WorkflowRunInfo": {
+      "description": "一次工作流运行\n\n【字段说明】\n- id: str - run id（服务端生成）\n- workflow_id / workflow_name: str - 归属工作流\n- session_id: str - 该 run 懒建的 one_shot 会话（子 Agent 审批卡的落点；\"\"=还没建）\n- status: str - \"running\" | \"success\" | \"failed\" | \"interrupted\"\n- started_at / finished_at / error: str - 收尾信息\n- nodes: list[WorkflowNodeRunInfo] - 各节点运行态",
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "workflow_id": {
+          "title": "Workflow Id",
+          "type": "string"
+        },
+        "workflow_name": {
+          "default": "",
+          "title": "Workflow Name",
+          "type": "string"
+        },
+        "session_id": {
+          "default": "",
+          "title": "Session Id",
+          "type": "string"
+        },
+        "status": {
+          "default": "running",
+          "title": "Status",
+          "type": "string"
+        },
+        "started_at": {
+          "default": "",
+          "title": "Started At",
+          "type": "string"
+        },
+        "finished_at": {
+          "default": "",
+          "title": "Finished At",
+          "type": "string"
+        },
+        "error": {
+          "default": "",
+          "title": "Error",
+          "type": "string"
+        },
+        "nodes": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/WorkflowNodeRunInfo"
+          },
+          "title": "Nodes",
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "workflow_id"
+      ],
+      "title": "WorkflowRunInfo",
+      "type": "object"
+    }
+  },
+  "description": "工作流运行历史响应\n\n【字段说明】\n- runs: list[WorkflowRunInfo] - 新→旧",
+  "properties": {
+    "runs": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/WorkflowRunInfo"
+      },
+      "title": "Runs",
+      "type": "array"
+    }
+  },
+  "title": "WorkflowRunsResult",
+  "type": "object"
+}
+```
+
+### WorkflowOpResult
+
+| Field | Type | Required |
+|---|---|---|
+| `ok` | `boolean` | no |
+| `id` | `string` | no |
+| `run_id` | `string` | no |
+| `error` | `string` | no |
+
+```json
+{
+  "description": "工作流写操作统一响应（save/delete/run 共用）\n\n【字段说明】\n- ok: bool - 是否成功\n- id: str - 相关工作流 id（save/delete/get 口径）\n- run_id: str - 仅 run 非空：本次启动的运行 id\n- error: str - 失败原因（校验文案/不存在/并发上限/重复运行）",
+  "properties": {
+    "ok": {
+      "default": true,
+      "title": "Ok",
+      "type": "boolean"
+    },
+    "id": {
+      "default": "",
+      "title": "Id",
+      "type": "string"
+    },
+    "run_id": {
+      "default": "",
+      "title": "Run Id",
+      "type": "string"
+    },
+    "error": {
+      "default": "",
+      "title": "Error",
+      "type": "string"
+    }
+  },
+  "title": "WorkflowOpResult",
+  "type": "object"
+}
+```
+
+### GitFile
+
+| Field | Type | Required |
+|---|---|---|
+| `path` | `string` | yes |
+| `index_status` | `string` | no |
+| `worktree_status` | `string` | no |
+| `staged` | `boolean` | no |
+| `untracked` | `boolean` | no |
+| `conflicted` | `boolean` | no |
+
+```json
+{
+  "description": "git 状态表的单行文件\n\n【字段说明】\n- path: str - 仓库相对路径（porcelain 原文，恒用 / 分隔）\n- index_status / worktree_status: str - porcelain XY 两列字符（M/A/D/R/?/U/空格）\n- staged: bool - X 列有内容 = 已进暂存区\n- untracked: bool - 双 ? = 未跟踪\n- conflicted: bool - 合并冲突未解决（discard/commit 前 GUI 应拦一道）",
+  "properties": {
+    "path": {
+      "title": "Path",
+      "type": "string"
+    },
+    "index_status": {
+      "default": "",
+      "title": "Index Status",
+      "type": "string"
+    },
+    "worktree_status": {
+      "default": "",
+      "title": "Worktree Status",
+      "type": "string"
+    },
+    "staged": {
+      "default": false,
+      "title": "Staged",
+      "type": "boolean"
+    },
+    "untracked": {
+      "default": false,
+      "title": "Untracked",
+      "type": "boolean"
+    },
+    "conflicted": {
+      "default": false,
+      "title": "Conflicted",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "path"
+  ],
+  "title": "GitFile",
+  "type": "object"
+}
+```
+
+### GitStatusCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `cwd` | `string` | yes |
+
+```json
+{
+  "description": "git 状态查询命令\n\n【字段说明】\n- type: Literal[\"git.status\"] - 命令类型\n- cwd: str - 仓库目录（允许是子目录，git 自己向上找根）\n\n【响应】\nGitStatusResult - 分支 + ahead/behind + 文件三态表",
+  "properties": {
+    "type": {
+      "const": "git.status",
+      "default": "git.status",
+      "title": "Type",
+      "type": "string"
+    },
+    "cwd": {
+      "title": "Cwd",
+      "type": "string"
+    }
+  },
+  "required": [
+    "cwd"
+  ],
+  "title": "GitStatusCommand",
+  "type": "object"
+}
+```
+
+### GitStatusResult
+
+| Field | Type | Required |
+|---|---|---|
+| `ok` | `boolean` | no |
+| `error` | `string` | no |
+| `branch` | `string` | no |
+| `ahead` | `integer` | no |
+| `behind` | `integer` | no |
+| `files` | `array` | no |
+
+```json
+{
+  "$defs": {
+    "GitFile": {
+      "description": "git 状态表的单行文件\n\n【字段说明】\n- path: str - 仓库相对路径（porcelain 原文，恒用 / 分隔）\n- index_status / worktree_status: str - porcelain XY 两列字符（M/A/D/R/?/U/空格）\n- staged: bool - X 列有内容 = 已进暂存区\n- untracked: bool - 双 ? = 未跟踪\n- conflicted: bool - 合并冲突未解决（discard/commit 前 GUI 应拦一道）",
+      "properties": {
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "index_status": {
+          "default": "",
+          "title": "Index Status",
+          "type": "string"
+        },
+        "worktree_status": {
+          "default": "",
+          "title": "Worktree Status",
+          "type": "string"
+        },
+        "staged": {
+          "default": false,
+          "title": "Staged",
+          "type": "boolean"
+        },
+        "untracked": {
+          "default": false,
+          "title": "Untracked",
+          "type": "boolean"
+        },
+        "conflicted": {
+          "default": false,
+          "title": "Conflicted",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "title": "GitFile",
+      "type": "object"
+    }
+  },
+  "description": "git 状态响应\n\n【字段说明】\n- ok: bool - False 时 error 为人话原因（非仓库/无 git）\n- branch: str - 当前分支（游离 HEAD 为空串）\n- ahead / behind: int - 相对上游的领先/落后提交数（无上游恒 0）\n- files: list[GitFile] - 工作区/暂存区全量差异行",
+  "properties": {
+    "ok": {
+      "default": true,
+      "title": "Ok",
+      "type": "boolean"
+    },
+    "error": {
+      "default": "",
+      "title": "Error",
+      "type": "string"
+    },
+    "branch": {
+      "default": "",
+      "title": "Branch",
+      "type": "string"
+    },
+    "ahead": {
+      "default": 0,
+      "title": "Ahead",
+      "type": "integer"
+    },
+    "behind": {
+      "default": 0,
+      "title": "Behind",
+      "type": "integer"
+    },
+    "files": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/GitFile"
+      },
+      "title": "Files",
+      "type": "array"
+    }
+  },
+  "title": "GitStatusResult",
+  "type": "object"
+}
+```
+
+### GitBranchInfo
+
+| Field | Type | Required |
+|---|---|---|
+| `name` | `string` | yes |
+| `current` | `boolean` | no |
+| `upstream` | `string` | no |
+
+```json
+{
+  "description": "分支行\n\n【字段说明】\n- name: str - 本地分支名\n- current: bool - 是否 HEAD 所指\n- upstream: str - 上游分支短名（无上游空串）",
+  "properties": {
+    "name": {
+      "title": "Name",
+      "type": "string"
+    },
+    "current": {
+      "default": false,
+      "title": "Current",
+      "type": "boolean"
+    },
+    "upstream": {
+      "default": "",
+      "title": "Upstream",
+      "type": "string"
+    }
+  },
+  "required": [
+    "name"
+  ],
+  "title": "GitBranchInfo",
+  "type": "object"
+}
+```
+
+### GitBranchesCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `cwd` | `string` | yes |
+
+```json
+{
+  "description": "git 分支列表命令\n\n【字段说明】\n- type: Literal[\"git.branches\"] - 命令类型\n- cwd: str - 仓库目录\n\n【响应】\nGitBranchesResult - 当前分支 + 本地分支表（当前置顶）",
+  "properties": {
+    "type": {
+      "const": "git.branches",
+      "default": "git.branches",
+      "title": "Type",
+      "type": "string"
+    },
+    "cwd": {
+      "title": "Cwd",
+      "type": "string"
+    }
+  },
+  "required": [
+    "cwd"
+  ],
+  "title": "GitBranchesCommand",
+  "type": "object"
+}
+```
+
+### GitBranchesResult
+
+| Field | Type | Required |
+|---|---|---|
+| `ok` | `boolean` | no |
+| `error` | `string` | no |
+| `current` | `string` | no |
+| `branches` | `array` | no |
+
+```json
+{
+  "$defs": {
+    "GitBranchInfo": {
+      "description": "分支行\n\n【字段说明】\n- name: str - 本地分支名\n- current: bool - 是否 HEAD 所指\n- upstream: str - 上游分支短名（无上游空串）",
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "current": {
+          "default": false,
+          "title": "Current",
+          "type": "boolean"
+        },
+        "upstream": {
+          "default": "",
+          "title": "Upstream",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "GitBranchInfo",
+      "type": "object"
+    }
+  },
+  "description": "git 分支列表响应\n\n【字段说明】\n- ok / error: 同上（非仓库时 ok=False）\n- current: str - 当前分支名（游离 HEAD 空串）\n- branches: list[GitBranchInfo]",
+  "properties": {
+    "ok": {
+      "default": true,
+      "title": "Ok",
+      "type": "boolean"
+    },
+    "error": {
+      "default": "",
+      "title": "Error",
+      "type": "string"
+    },
+    "current": {
+      "default": "",
+      "title": "Current",
+      "type": "string"
+    },
+    "branches": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/GitBranchInfo"
+      },
+      "title": "Branches",
+      "type": "array"
+    }
+  },
+  "title": "GitBranchesResult",
+  "type": "object"
+}
+```
+
+### GitLogCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `cwd` | `string` | yes |
+| `limit` | `integer` | no |
+
+```json
+{
+  "description": "git 提交历史命令\n\n【字段说明】\n- type: Literal[\"git.log\"] - 命令类型\n- cwd: str - 仓库目录\n- limit: int - 最多返回条数（服务端钳到 1..200）",
+  "properties": {
+    "type": {
+      "const": "git.log",
+      "default": "git.log",
+      "title": "Type",
+      "type": "string"
+    },
+    "cwd": {
+      "title": "Cwd",
+      "type": "string"
+    },
+    "limit": {
+      "default": 20,
+      "title": "Limit",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "cwd"
+  ],
+  "title": "GitLogCommand",
+  "type": "object"
+}
+```
+
+### GitLogEntry
+
+| Field | Type | Required |
+|---|---|---|
+| `sha` | `string` | no |
+| `short_sha` | `string` | no |
+| `author` | `string` | no |
+| `date` | `string` | no |
+| `subject` | `string` | no |
+
+```json
+{
+  "description": "提交行\n\n【字段说明】\n- sha / short_sha: str - 本实现只跑 --format=%h，两字段同值（预留全 sha 位）\n- author / date: str - 作者名 / \"YYYY-MM-DD HH:MM\" 本地时间\n- subject: str - 标题行",
+  "properties": {
+    "sha": {
+      "default": "",
+      "title": "Sha",
+      "type": "string"
+    },
+    "short_sha": {
+      "default": "",
+      "title": "Short Sha",
+      "type": "string"
+    },
+    "author": {
+      "default": "",
+      "title": "Author",
+      "type": "string"
+    },
+    "date": {
+      "default": "",
+      "title": "Date",
+      "type": "string"
+    },
+    "subject": {
+      "default": "",
+      "title": "Subject",
+      "type": "string"
+    }
+  },
+  "title": "GitLogEntry",
+  "type": "object"
+}
+```
+
+### GitLogResult
+
+| Field | Type | Required |
+|---|---|---|
+| `ok` | `boolean` | no |
+| `error` | `string` | no |
+| `entries` | `array` | no |
+
+```json
+{
+  "$defs": {
+    "GitLogEntry": {
+      "description": "提交行\n\n【字段说明】\n- sha / short_sha: str - 本实现只跑 --format=%h，两字段同值（预留全 sha 位）\n- author / date: str - 作者名 / \"YYYY-MM-DD HH:MM\" 本地时间\n- subject: str - 标题行",
+      "properties": {
+        "sha": {
+          "default": "",
+          "title": "Sha",
+          "type": "string"
+        },
+        "short_sha": {
+          "default": "",
+          "title": "Short Sha",
+          "type": "string"
+        },
+        "author": {
+          "default": "",
+          "title": "Author",
+          "type": "string"
+        },
+        "date": {
+          "default": "",
+          "title": "Date",
+          "type": "string"
+        },
+        "subject": {
+          "default": "",
+          "title": "Subject",
+          "type": "string"
+        }
+      },
+      "title": "GitLogEntry",
+      "type": "object"
+    }
+  },
+  "description": "git 提交历史响应\n\n【字段说明】\n- ok / error: 空仓库时 error=\"仓库还没有任何提交\"\n- entries: list[GitLogEntry] - 新→旧排序",
+  "properties": {
+    "ok": {
+      "default": true,
+      "title": "Ok",
+      "type": "boolean"
+    },
+    "error": {
+      "default": "",
+      "title": "Error",
+      "type": "string"
+    },
+    "entries": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/GitLogEntry"
+      },
+      "title": "Entries",
+      "type": "array"
+    }
+  },
+  "title": "GitLogResult",
+  "type": "object"
+}
+```
+
+### GitPathsCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | yes |
+| `cwd` | `string` | yes |
+| `paths` | `array` | no |
+
+```json
+{
+  "description": "git 按路径操作命令（stage/unstage/discard 共用形状，type 区分动作）\n\n【字段说明】\n- type: Literal - \"git.stage\" 暂存 | \"git.unstage\" 退暂存 | \"git.discard\" 丢弃改动\n- cwd: str - 仓库目录\n- paths: list[str] - 仓库相对路径白名单（discard 对未跟踪文件走 clean -fd -- <paths>，\n  路径限定是底线：参数再错也不该全仓清空）\n\n【设计目的】\ntype 无默认值：一个类骑三个判别值，任何默认值都会让\"忘带 type 的解析\"\n静默选错动作。协议规定 params 不含 type，故由 app 层 handler 按注册方法名\n注入——方法名就是权威，模型只做形状收口。\n\n【响应】\nGitOpResult",
+  "properties": {
+    "type": {
+      "enum": [
+        "git.stage",
+        "git.unstage",
+        "git.discard"
+      ],
+      "title": "Type",
+      "type": "string"
+    },
+    "cwd": {
+      "title": "Cwd",
+      "type": "string"
+    },
+    "paths": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Paths",
+      "type": "array"
+    }
+  },
+  "required": [
+    "type",
+    "cwd"
+  ],
+  "title": "GitPathsCommand",
+  "type": "object"
+}
+```
+
+### GitCommitCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `cwd` | `string` | yes |
+| `message` | `string` | yes |
+
+```json
+{
+  "description": "git 提交命令\n\n【字段说明】\n- type: Literal[\"git.commit\"] - 命令类型\n- cwd: str - 仓库目录\n- message: str - 提交信息（暂存区为空时服务端拒绝并回执提示）\n\n【响应】\nGitOpResult - 成功时 sha 携带新提交的短哈希",
+  "properties": {
+    "type": {
+      "const": "git.commit",
+      "default": "git.commit",
+      "title": "Type",
+      "type": "string"
+    },
+    "cwd": {
+      "title": "Cwd",
+      "type": "string"
+    },
+    "message": {
+      "title": "Message",
+      "type": "string"
+    }
+  },
+  "required": [
+    "cwd",
+    "message"
+  ],
+  "title": "GitCommitCommand",
+  "type": "object"
+}
+```
+
+### GitCheckoutCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `cwd` | `string` | yes |
+| `name` | `string` | yes |
+
+```json
+{
+  "description": "git 切分支命令\n\n【字段说明】\n- type: Literal[\"git.checkout\"] - 命令类型\n- cwd: str - 仓库目录\n- name: str - 目标分支（仅本地已有分支；无建分支语义）\n\n【设计目的】\n工作区脏时 git 会自己拒绝切换，error 原文回显——我们不预检，\n避免和 git 的判定规则赛跑。",
+  "properties": {
+    "type": {
+      "const": "git.checkout",
+      "default": "git.checkout",
+      "title": "Type",
+      "type": "string"
+    },
+    "cwd": {
+      "title": "Cwd",
+      "type": "string"
+    },
+    "name": {
+      "title": "Name",
+      "type": "string"
+    }
+  },
+  "required": [
+    "cwd",
+    "name"
+  ],
+  "title": "GitCheckoutCommand",
+  "type": "object"
+}
+```
+
+### GitPullCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `cwd` | `string` | yes |
+
+```json
+{
+  "description": "git 拉取命令（--ff-only：需要 merge/rebase 时让 git 报错，不替用户做主）\n\n【字段说明】\n- type: Literal[\"git.pull\"] - 命令类型\n- cwd: str - 仓库目录",
+  "properties": {
+    "type": {
+      "const": "git.pull",
+      "default": "git.pull",
+      "title": "Type",
+      "type": "string"
+    },
+    "cwd": {
+      "title": "Cwd",
+      "type": "string"
+    }
+  },
+  "required": [
+    "cwd"
+  ],
+  "title": "GitPullCommand",
+  "type": "object"
+}
+```
+
+### GitPushCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `cwd` | `string` | yes |
+
+```json
+{
+  "description": "git 推送命令（-u origin HEAD，首次自动建上游）\n\n【字段说明】\n- type: Literal[\"git.push\"] - 命令类型\n- cwd: str - 仓库目录",
+  "properties": {
+    "type": {
+      "const": "git.push",
+      "default": "git.push",
+      "title": "Type",
+      "type": "string"
+    },
+    "cwd": {
+      "title": "Cwd",
+      "type": "string"
+    }
+  },
+  "required": [
+    "cwd"
+  ],
+  "title": "GitPushCommand",
+  "type": "object"
+}
+```
+
+### GitOpResult
+
+| Field | Type | Required |
+|---|---|---|
+| `ok` | `boolean` | no |
+| `error` | `string` | no |
+| `output` | `string` | no |
+| `sha` | `string` | no |
+
+```json
+{
+  "description": "git 写操作统一响应\n\n【字段说明】\n- ok: bool - 失败时 error 为 git stderr 原文或兜底文案（GUI 直接上屏）\n- error / output: str - 失败原因 / git stdout（成功回执，GUI 可折叠）\n- sha: str - 仅 commit 成功时非空：新提交短哈希",
+  "properties": {
+    "ok": {
+      "default": true,
+      "title": "Ok",
+      "type": "boolean"
+    },
+    "error": {
+      "default": "",
+      "title": "Error",
+      "type": "string"
+    },
+    "output": {
+      "default": "",
+      "title": "Output",
+      "type": "string"
+    },
+    "sha": {
+      "default": "",
+      "title": "Sha",
+      "type": "string"
+    }
+  },
+  "title": "GitOpResult",
+  "type": "object"
+}
+```
+
+### SshConnInfo
+
+| Field | Type | Required |
+|---|---|---|
+| `id` | `string` | yes |
+| `name` | `string` | no |
+| `host` | `string` | no |
+| `user` | `string` | no |
+| `port` | `integer` | no |
+| `key_file` | `string` | no |
+
+```json
+{
+  "description": "SSH 连接行\n\n【字段说明】\n- id: str - 服务端生成 ID\n- name: str - 展示名（全表唯一）\n- host / user: str - 目标主机与登录用户（user 必填：留空 ssh 会静默用本地用户名）\n- port: int - 端口（1..65535，默认 22）\n- key_file: str - 私钥路径覆盖（空 = 用 ~/.iwan/ssh/id_ed25519）",
+  "properties": {
+    "id": {
+      "title": "Id",
+      "type": "string"
+    },
+    "name": {
+      "default": "",
+      "title": "Name",
+      "type": "string"
+    },
+    "host": {
+      "default": "",
+      "title": "Host",
+      "type": "string"
+    },
+    "user": {
+      "default": "",
+      "title": "User",
+      "type": "string"
+    },
+    "port": {
+      "default": 22,
+      "title": "Port",
+      "type": "integer"
+    },
+    "key_file": {
+      "default": "",
+      "title": "Key File",
+      "type": "string"
+    }
+  },
+  "required": [
+    "id"
+  ],
+  "title": "SshConnInfo",
+  "type": "object"
+}
+```
+
+### SshConnListCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+
+```json
+{
+  "description": "SSH 连接列表命令\n\n【字段说明】\n- type: Literal[\"ssh.conn_list\"] - 命令类型\n\n【响应】\nSshConnListResult - 按名称排序的连接表（读 ~/.iwan/ssh/connections.json）",
+  "properties": {
+    "type": {
+      "const": "ssh.conn_list",
+      "default": "ssh.conn_list",
+      "title": "Type",
+      "type": "string"
+    }
+  },
+  "title": "SshConnListCommand",
+  "type": "object"
+}
+```
+
+### SshConnListResult
+
+| Field | Type | Required |
+|---|---|---|
+| `connections` | `array` | no |
+
+```json
+{
+  "$defs": {
+    "SshConnInfo": {
+      "description": "SSH 连接行\n\n【字段说明】\n- id: str - 服务端生成 ID\n- name: str - 展示名（全表唯一）\n- host / user: str - 目标主机与登录用户（user 必填：留空 ssh 会静默用本地用户名）\n- port: int - 端口（1..65535，默认 22）\n- key_file: str - 私钥路径覆盖（空 = 用 ~/.iwan/ssh/id_ed25519）",
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "default": "",
+          "title": "Name",
+          "type": "string"
+        },
+        "host": {
+          "default": "",
+          "title": "Host",
+          "type": "string"
+        },
+        "user": {
+          "default": "",
+          "title": "User",
+          "type": "string"
+        },
+        "port": {
+          "default": 22,
+          "title": "Port",
+          "type": "integer"
+        },
+        "key_file": {
+          "default": "",
+          "title": "Key File",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "SshConnInfo",
+      "type": "object"
+    }
+  },
+  "description": "SSH 连接列表响应\n\n【字段说明】\n- connections: list[SshConnInfo] - 全部连接",
+  "properties": {
+    "connections": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/SshConnInfo"
+      },
+      "title": "Connections",
+      "type": "array"
+    }
+  },
+  "title": "SshConnListResult",
+  "type": "object"
+}
+```
+
+### SshConnAddCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `name` | `string` | yes |
+| `host` | `string` | yes |
+| `user` | `string` | yes |
+| `port` | `integer` | no |
+| `key_file` | `string` | no |
+
+```json
+{
+  "description": "SSH 连接新建命令\n\n【字段说明】\n- type: Literal[\"ssh.conn_add\"] - 命令类型\n- name / host / user / port / key_file - 见 SshConnInfo\n\n【设计目的】\n服务端校验：host/user 非空、host 无空白、port 区间、name 查重。\n不做连通性探测——存连接 ≠ 连得上，保存被慢主机卡住是反模式。\n\n【响应】\nSshConnOpResult - 成功携带新 id",
+  "properties": {
+    "type": {
+      "const": "ssh.conn_add",
+      "default": "ssh.conn_add",
+      "title": "Type",
+      "type": "string"
+    },
+    "name": {
+      "title": "Name",
+      "type": "string"
+    },
+    "host": {
+      "title": "Host",
+      "type": "string"
+    },
+    "user": {
+      "title": "User",
+      "type": "string"
+    },
+    "port": {
+      "default": 22,
+      "title": "Port",
+      "type": "integer"
+    },
+    "key_file": {
+      "default": "",
+      "title": "Key File",
+      "type": "string"
+    }
+  },
+  "required": [
+    "name",
+    "host",
+    "user"
+  ],
+  "title": "SshConnAddCommand",
+  "type": "object"
+}
+```
+
+### SshConnUpdateCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `id` | `string` | yes |
+| `name` | `string | null` | no |
+| `host` | `string | null` | no |
+| `user` | `string | null` | no |
+| `port` | `integer | null` | no |
+| `key_file` | `string | null` | no |
+
+```json
+{
+  "description": "SSH 连接更新命令 - 字段为 None 表示不改该项\n\n【字段说明】\n- type: Literal[\"ssh.conn_update\"] - 命令类型\n- id: str - 目标连接\n- name/host/user: str | None、port: int | None、key_file: str | None",
+  "properties": {
+    "type": {
+      "const": "ssh.conn_update",
+      "default": "ssh.conn_update",
+      "title": "Type",
+      "type": "string"
+    },
+    "id": {
+      "title": "Id",
+      "type": "string"
+    },
+    "name": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Name"
+    },
+    "host": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Host"
+    },
+    "user": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "User"
+    },
+    "port": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Port"
+    },
+    "key_file": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Key File"
+    }
+  },
+  "required": [
+    "id"
+  ],
+  "title": "SshConnUpdateCommand",
+  "type": "object"
+}
+```
+
+### SshConnDeleteCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `id` | `string` | yes |
+
+```json
+{
+  "description": "SSH 连接删除命令\n\n【字段说明】\n- type: Literal[\"ssh.conn_delete\"] - 命令类型\n- id: str - 目标连接（只删登记信息，不碰密钥与 known_hosts）",
+  "properties": {
+    "type": {
+      "const": "ssh.conn_delete",
+      "default": "ssh.conn_delete",
+      "title": "Type",
+      "type": "string"
+    },
+    "id": {
+      "title": "Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "id"
+  ],
+  "title": "SshConnDeleteCommand",
+  "type": "object"
+}
+```
+
+### SshConnOpResult
+
+| Field | Type | Required |
+|---|---|---|
+| `ok` | `boolean` | no |
+| `id` | `string` | no |
+| `error` | `string` | no |
+
+```json
+{
+  "description": "SSH 连接写操作统一响应\n\n【字段说明】\n- ok: bool - 失败时 error 为校验文案（重名/空字段/端口越界）\n- id: str - add 返回新 id；update/delete 回显入参 id\n- error: str - 失败原因（delete 未命中 = \"连接不存在\"）",
+  "properties": {
+    "ok": {
+      "default": true,
+      "title": "Ok",
+      "type": "boolean"
+    },
+    "id": {
+      "default": "",
+      "title": "Id",
+      "type": "string"
+    },
+    "error": {
+      "default": "",
+      "title": "Error",
+      "type": "string"
+    }
+  },
+  "title": "SshConnOpResult",
+  "type": "object"
+}
+```
+
+### SshKeyStatusCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+
+```json
+{
+  "description": "SSH 密钥现状查询命令（纯本地文件检查 + ssh-keygen 指纹，无网络）\n\n【字段说明】\n- type: Literal[\"ssh.key_status\"] - 命令类型\n\n【响应】\nSshKeyStatusResult",
+  "properties": {
+    "type": {
+      "const": "ssh.key_status",
+      "default": "ssh.key_status",
+      "title": "Type",
+      "type": "string"
+    }
+  },
+  "title": "SshKeyStatusCommand",
+  "type": "object"
+}
+```
+
+### SshKeyStatusResult
+
+| Field | Type | Required |
+|---|---|---|
+| `has_key` | `boolean` | no |
+| `pubkey_path` | `string` | no |
+| `fingerprint` | `string` | no |
+
+```json
+{
+  "description": "SSH 密钥现状响应\n\n【字段说明】\n- has_key: bool - 私钥+公钥同存才算有\n- pubkey_path: str - 公钥绝对路径（无私钥时空串）\n- fingerprint: str - \"SHA256:…\"（公钥可读时）",
+  "properties": {
+    "has_key": {
+      "default": false,
+      "title": "Has Key",
+      "type": "boolean"
+    },
+    "pubkey_path": {
+      "default": "",
+      "title": "Pubkey Path",
+      "type": "string"
+    },
+    "fingerprint": {
+      "default": "",
+      "title": "Fingerprint",
+      "type": "string"
+    }
+  },
+  "title": "SshKeyStatusResult",
+  "type": "object"
+}
+```
+
+### SshKeyGenerateCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+
+```json
+{
+  "description": "SSH 密钥生成命令 - ssh-keygen -t ed25519 无口令\n\n【字段说明】\n- type: Literal[\"ssh.key_generate\"] - 命令类型\n\n【设计目的】\n已存在时拒绝且不覆盖——密钥一旦被静默替换，所有部署过旧公钥的\n远端会同时\"莫名其妙连不上\"。重置的责任留给用户手动删文件。\n\n【响应】\nSshKeyOpResult - 成功携带公钥全文与指纹（公钥可贴 authorized_keys）",
+  "properties": {
+    "type": {
+      "const": "ssh.key_generate",
+      "default": "ssh.key_generate",
+      "title": "Type",
+      "type": "string"
+    }
+  },
+  "title": "SshKeyGenerateCommand",
+  "type": "object"
+}
+```
+
+### SshKeyOpResult
+
+| Field | Type | Required |
+|---|---|---|
+| `ok` | `boolean` | no |
+| `pubkey` | `string` | no |
+| `fingerprint` | `string` | no |
+| `error` | `string` | no |
+
+```json
+{
+  "description": "SSH 密钥操作响应\n\n【字段说明】\n- ok: bool / error: str - 失败原因（已存在不覆盖 / ssh-keygen 缺失）\n- pubkey: str - 公钥全文一行（\"ssh-ed25519 AAAA… comment\"）\n- fingerprint: str - \"SHA256:…\"",
+  "properties": {
+    "ok": {
+      "default": true,
+      "title": "Ok",
+      "type": "boolean"
+    },
+    "pubkey": {
+      "default": "",
+      "title": "Pubkey",
+      "type": "string"
+    },
+    "fingerprint": {
+      "default": "",
+      "title": "Fingerprint",
+      "type": "string"
+    },
+    "error": {
+      "default": "",
+      "title": "Error",
+      "type": "string"
+    }
+  },
+  "title": "SshKeyOpResult",
+  "type": "object"
+}
+```
+
+### SshHostTrustCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `host` | `string` | yes |
+| `port` | `integer` | no |
+
+```json
+{
+  "description": "SSH 主机信任命令 - keyscan 取回主机密钥并（目视比对后）写入 known_hosts\n\n【字段说明】\n- type: Literal[\"ssh.host_trust\"] - 命令类型\n- host: str / port: int - 目标\n\n【设计目的】\n指纹在返回体里，由 GUI 展示给用户【比对确认】后才算建立信任；known_hosts\n用 ~/.iwan/ssh 下我们自己的文件，与用户日常终端的互不污染。\n这是\"首连信任\"（trust-on-first-use）的显式化：TOFU 不询问=默认信任，\n我们把它改成 GUI 上的一次点击。",
+  "properties": {
+    "type": {
+      "const": "ssh.host_trust",
+      "default": "ssh.host_trust",
+      "title": "Type",
+      "type": "string"
+    },
+    "host": {
+      "title": "Host",
+      "type": "string"
+    },
+    "port": {
+      "default": 22,
+      "title": "Port",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "host"
+  ],
+  "title": "SshHostTrustCommand",
+  "type": "object"
+}
+```
+
+### SshTrustResult
+
+| Field | Type | Required |
+|---|---|---|
+| `ok` | `boolean` | no |
+| `fingerprints` | `string` | no |
+| `error` | `string` | no |
+
+```json
+{
+  "description": "SSH 主机信任响应\n\n【字段说明】\n- ok: bool / error: str - keyscan 失败（不可达/端口错）时给原因\n- fingerprints: str - 多行 \"SHA256:… [host]:port\"，GUI 原样展示供比对",
+  "properties": {
+    "ok": {
+      "default": true,
+      "title": "Ok",
+      "type": "boolean"
+    },
+    "fingerprints": {
+      "default": "",
+      "title": "Fingerprints",
+      "type": "string"
+    },
+    "error": {
+      "default": "",
+      "title": "Error",
+      "type": "string"
+    }
+  },
+  "title": "SshTrustResult",
+  "type": "object"
+}
+```
+
+### SshTermOpenCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `conn_id` | `string` | yes |
+| `cols` | `integer` | no |
+| `rows` | `integer` | no |
+
+```json
+{
+  "description": "SSH 终端开会话命令 - 对登记连接启动一条 ssh -tt 交互会话\n\n【字段说明】\n- type: Literal[\"ssh.term_open\"] - 命令类型\n- conn_id: str - 连接库 id（目的地锁定，同 ssh_exec）\n- cols / rows: int - 初始终端尺寸（经 stty 包装设定；后续 resize\n  v1 不传播——Windows 无 SIGWINCH 注入通道，属已知架构限制）\n\n【响应】\nSshTermOpenResult - 成功回 session_id，输出/关闭走 ssh.output/ssh.closed 事件",
+  "properties": {
+    "type": {
+      "const": "ssh.term_open",
+      "default": "ssh.term_open",
+      "title": "Type",
+      "type": "string"
+    },
+    "conn_id": {
+      "title": "Conn Id",
+      "type": "string"
+    },
+    "cols": {
+      "default": 80,
+      "title": "Cols",
+      "type": "integer"
+    },
+    "rows": {
+      "default": 24,
+      "title": "Rows",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "conn_id"
+  ],
+  "title": "SshTermOpenCommand",
+  "type": "object"
+}
+```
+
+### SshTermOpenResult
+
+| Field | Type | Required |
+|---|---|---|
+| `ok` | `boolean` | no |
+| `session_id` | `string` | no |
+| `error` | `string` | no |
+
+```json
+{
+  "description": "SSH 终端开会话响应\n\n【字段说明】\n- ok: bool / error: str - 连接不存在、ssh 缺失、立即失败时给原因\n- session_id: str - 新会话 id（后续 write/resize/close 的键）",
+  "properties": {
+    "ok": {
+      "default": true,
+      "title": "Ok",
+      "type": "boolean"
+    },
+    "session_id": {
+      "default": "",
+      "title": "Session Id",
+      "type": "string"
+    },
+    "error": {
+      "default": "",
+      "title": "Error",
+      "type": "string"
+    }
+  },
+  "title": "SshTermOpenResult",
+  "type": "object"
+}
+```
+
+### SshTermWriteCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `session_id` | `string` | yes |
+| `data_b64` | `string` | yes |
+
+```json
+{
+  "description": "SSH 终端输入命令 - 键盘字节写入远端 pty\n\n【字段说明】\n- type: Literal[\"ssh.term_write\"] - 命令类型\n- session_id: str - 目标会话\n- data_b64: str - 输入字节的 base64（与输出同理：整 NDJSON 行安全）\n\n【设计目的】\n输入是用户亲手敲的，不设大小闸门；分片责任在 GUI（≤4KB/帧），\n超限的畸形巨帧由 pydantic 之后的传输层自然消化。",
+  "properties": {
+    "type": {
+      "const": "ssh.term_write",
+      "default": "ssh.term_write",
+      "title": "Type",
+      "type": "string"
+    },
+    "session_id": {
+      "title": "Session Id",
+      "type": "string"
+    },
+    "data_b64": {
+      "title": "Data B64",
+      "type": "string"
+    }
+  },
+  "required": [
+    "session_id",
+    "data_b64"
+  ],
+  "title": "SshTermWriteCommand",
+  "type": "object"
+}
+```
+
+### SshTermResizeCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `session_id` | `string` | yes |
+| `cols` | `integer` | no |
+| `rows` | `integer` | no |
+
+```json
+{
+  "description": "SSH 终端尺寸调整命令 - v1 记录不发（协议占位），GUI 侧即点即应\n\n【字段说明】\n- type: Literal[\"ssh.term_resize\"] - 命令类型\n- session_id: str / cols / rows: int - 新尺寸",
+  "properties": {
+    "type": {
+      "const": "ssh.term_resize",
+      "default": "ssh.term_resize",
+      "title": "Type",
+      "type": "string"
+    },
+    "session_id": {
+      "title": "Session Id",
+      "type": "string"
+    },
+    "cols": {
+      "default": 80,
+      "title": "Cols",
+      "type": "integer"
+    },
+    "rows": {
+      "default": 24,
+      "title": "Rows",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "session_id"
+  ],
+  "title": "SshTermResizeCommand",
+  "type": "object"
+}
+```
+
+### SshTermCloseCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `session_id` | `string` | yes |
+
+```json
+{
+  "description": "SSH 终端关闭命令 - 用户点页签 ×；daemon 侧幂等收尸\n\n【字段说明】\n- type: Literal[\"ssh.term_close\"] - 命令类型\n- session_id: str - 目标会话",
+  "properties": {
+    "type": {
+      "const": "ssh.term_close",
+      "default": "ssh.term_close",
+      "title": "Type",
+      "type": "string"
+    },
+    "session_id": {
+      "title": "Session Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "session_id"
+  ],
+  "title": "SshTermCloseCommand",
+  "type": "object"
+}
+```
+
+### SshTermOpResult
+
+| Field | Type | Required |
+|---|---|---|
+| `ok` | `boolean` | no |
+| `error` | `string` | no |
+
+```json
+{
+  "description": "SSH 终端操作统一响应（write/resize/close）\n\n【字段说明】\n- ok: bool / error: str - 会话不存在或已断开时给原因",
+  "properties": {
+    "ok": {
+      "default": true,
+      "title": "Ok",
+      "type": "boolean"
+    },
+    "error": {
+      "default": "",
+      "title": "Error",
+      "type": "string"
+    }
+  },
+  "title": "SshTermOpResult",
+  "type": "object"
+}
+```
+
 ## Server Push
 
 Events pushed from daemon to subscribed clients over the same TCP connection.
@@ -4062,6 +7547,294 @@ Events sent over the IPC socket (daemon → client).
     "ts"
   ],
   "title": "HookEvaluatedEvent",
+  "type": "object"
+}
+```
+
+### ScheduleFiredEvent
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `task_id` | `string` | yes |
+| `run_id` | `string` | no |
+| `session_id` | `string` | no |
+| `ok` | `boolean` | no |
+| `detail` | `string` | no |
+| `ts` | `string` | yes |
+
+```json
+{
+  "description": "定时任务触发事件 - 调度器到点启动一次运行时发送\n\n【字段说明】\n- type: Literal[\"schedule.fired\"] - 事件类型\n- task_id: str - 被触发的任务 ID\n- run_id: str - 本次触发启动的运行 ID（启动失败时空串）\n- session_id: str - 为本次触发新建的 one_shot 会话 ID\n- ok: bool - 触发是否成功（False 时 detail 给出原因）\n- detail: str - 失败摘要或附加说明\n- ts: str - 时间戳（ISO 8601）\n\n【设计目的】\n调度器在没人盯着屏幕的时候干活，事件是它唯一的\"打过卡\"证明：\nGUI 订阅后刷新任务表（last_run/next_due），任何客户端离线也能\n靠 run 的既有事件链还原全过程。CRUD 不发事件——发起端自知。",
+  "properties": {
+    "type": {
+      "const": "schedule.fired",
+      "default": "schedule.fired",
+      "title": "Type",
+      "type": "string"
+    },
+    "task_id": {
+      "title": "Task Id",
+      "type": "string"
+    },
+    "run_id": {
+      "default": "",
+      "title": "Run Id",
+      "type": "string"
+    },
+    "session_id": {
+      "default": "",
+      "title": "Session Id",
+      "type": "string"
+    },
+    "ok": {
+      "default": true,
+      "title": "Ok",
+      "type": "boolean"
+    },
+    "detail": {
+      "default": "",
+      "title": "Detail",
+      "type": "string"
+    },
+    "ts": {
+      "title": "Ts",
+      "type": "string"
+    }
+  },
+  "required": [
+    "task_id",
+    "ts"
+  ],
+  "title": "ScheduleFiredEvent",
+  "type": "object"
+}
+```
+
+### SshOutputEvent
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `session_id` | `string` | yes |
+| `data_b64` | `string` | yes |
+| `ts` | `string` | yes |
+
+```json
+{
+  "description": "SSH 终端输出事件 - 远端会话的显示字节流（合帧后）推给订阅者\n\n【字段说明】\n- type: Literal[\"ssh.output\"] - 事件类型\n- session_id: str - 目标终端会话\n- data_b64: str - 输出字节的 base64（终端原始字节可能截断 UTF-8，\n  NDJSON 行必须整字符——二进制一律 b64 上链）\n- ts: str - 时间戳（ISO 8601）\n\n【设计目的】\n30ms/16KB 合帧（见 core/ssh/session.py）：帧率对总线友好，\n延迟对人眼不可感知。xterm.js 端解 b64 直接 write。",
+  "properties": {
+    "type": {
+      "const": "ssh.output",
+      "default": "ssh.output",
+      "title": "Type",
+      "type": "string"
+    },
+    "session_id": {
+      "title": "Session Id",
+      "type": "string"
+    },
+    "data_b64": {
+      "title": "Data B64",
+      "type": "string"
+    },
+    "ts": {
+      "title": "Ts",
+      "type": "string"
+    }
+  },
+  "required": [
+    "session_id",
+    "data_b64",
+    "ts"
+  ],
+  "title": "SshOutputEvent",
+  "type": "object"
+}
+```
+
+### SshClosedEvent
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `session_id` | `string` | yes |
+| `exit_code` | `integer` | no |
+| `reason` | `string` | no |
+| `ts` | `string` | yes |
+
+```json
+{
+  "description": "SSH 终端关闭事件 - 会话终结（远端 exit / 用户关闭 / 水位熔断 / 停机）\n\n【字段说明】\n- type: Literal[\"ssh.closed\"] - 事件类型\n- session_id: str - 结束的会话\n- exit_code: int - 远端 ssh 退出码（击杀/未知为 -1）\n- reason: str - 人类可读的死因（页签灰条原样展示）\n- ts: str - 时间戳（ISO 8601）\n\n【设计目的】\n死因必须有名字：exit 0（正常告别）、overflow（积压熔断）、\ndaemon 停机——GUI 和用户拿这一个字段就能分清\"我关的\"还是\"它死的\"。",
+  "properties": {
+    "type": {
+      "const": "ssh.closed",
+      "default": "ssh.closed",
+      "title": "Type",
+      "type": "string"
+    },
+    "session_id": {
+      "title": "Session Id",
+      "type": "string"
+    },
+    "exit_code": {
+      "default": -1,
+      "title": "Exit Code",
+      "type": "integer"
+    },
+    "reason": {
+      "default": "",
+      "title": "Reason",
+      "type": "string"
+    },
+    "ts": {
+      "title": "Ts",
+      "type": "string"
+    }
+  },
+  "required": [
+    "session_id",
+    "ts"
+  ],
+  "title": "SshClosedEvent",
+  "type": "object"
+}
+```
+
+### WorkflowNodeEvent
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `run_id` | `string` | yes |
+| `workflow_id` | `string` | yes |
+| `node` | `string` | yes |
+| `status` | `string` | yes |
+| `child_run_id` | `string` | no |
+| `detail` | `string` | no |
+| `ts` | `string` | yes |
+
+```json
+{
+  "description": "工作流节点状态事件 - 单个节点进入 running/ok/fail 时各发一条\n\n【字段说明】\n- type: Literal[\"workflow.node\"] - 事件类型\n- run_id: str - 本次工作流运行 ID\n- workflow_id: str - 归属工作流（GUI 判断是否在详情页，决定要不要上色）\n- node: str - 节点名\n- status: str - \"running\" | \"ok\" | \"fail\"\n- child_run_id: str - 该节点子 Agent 的 run ID（running 起就有，深链审计）\n- detail: str - 失败原因摘要（仅 fail 非空，≤200 字）\n- ts: str - 时间戳（ISO 8601）\n\n【设计目的】\nrun 即发即返，节点进度全靠这条事件推——GUI 详情页按\nrun_id==当前查看的 run 做不可变节点补丁即时上色。终态写穿\nworkflow_runs.json，错过事件也能靠 workflow.get 对账补画。",
+  "properties": {
+    "type": {
+      "const": "workflow.node",
+      "default": "workflow.node",
+      "title": "Type",
+      "type": "string"
+    },
+    "run_id": {
+      "title": "Run Id",
+      "type": "string"
+    },
+    "workflow_id": {
+      "title": "Workflow Id",
+      "type": "string"
+    },
+    "node": {
+      "title": "Node",
+      "type": "string"
+    },
+    "status": {
+      "title": "Status",
+      "type": "string"
+    },
+    "child_run_id": {
+      "default": "",
+      "title": "Child Run Id",
+      "type": "string"
+    },
+    "detail": {
+      "default": "",
+      "title": "Detail",
+      "type": "string"
+    },
+    "ts": {
+      "title": "Ts",
+      "type": "string"
+    }
+  },
+  "required": [
+    "run_id",
+    "workflow_id",
+    "node",
+    "status",
+    "ts"
+  ],
+  "title": "WorkflowNodeEvent",
+  "type": "object"
+}
+```
+
+### WorkflowRunFinishedEvent
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `run_id` | `string` | yes |
+| `workflow_id` | `string` | yes |
+| `workflow_name` | `string` | no |
+| `session_id` | `string` | no |
+| `status` | `string` | yes |
+| `error` | `string` | no |
+| `finished_at` | `string` | no |
+| `ts` | `string` | yes |
+
+```json
+{
+  "description": "工作流运行收尾事件 - 一次 run 到达终态时发一条\n\n【字段说明】\n- type: Literal[\"workflow.finished\"] - 事件类型\n- run_id: str - 结束的运行 ID\n- workflow_id / workflow_name: str - 归属工作流\n- session_id: str - 该 run 的 one_shot 会话（\"\"=没建过会话=零节点起跑即失败）\n- status: str - \"success\" | \"failed\" | \"interrupted\"\n- error: str - 失败摘要（fail-fast 时是最先炸掉的节点信息）\n- finished_at: str - 收尾时刻（ISO）\n- ts: str - 事件时间戳（ISO 8601）\n\n【设计目的】\n与 workflow.node 分工：node 管过程上色，finished 管终局对账——\nGUI 收到后刷新列表页 last_status chip 与详情抽屉，事件里带足\n行字段快照，订阅端不必再补一次 RPC。",
+  "properties": {
+    "type": {
+      "const": "workflow.finished",
+      "default": "workflow.finished",
+      "title": "Type",
+      "type": "string"
+    },
+    "run_id": {
+      "title": "Run Id",
+      "type": "string"
+    },
+    "workflow_id": {
+      "title": "Workflow Id",
+      "type": "string"
+    },
+    "workflow_name": {
+      "default": "",
+      "title": "Workflow Name",
+      "type": "string"
+    },
+    "session_id": {
+      "default": "",
+      "title": "Session Id",
+      "type": "string"
+    },
+    "status": {
+      "title": "Status",
+      "type": "string"
+    },
+    "error": {
+      "default": "",
+      "title": "Error",
+      "type": "string"
+    },
+    "finished_at": {
+      "default": "",
+      "title": "Finished At",
+      "type": "string"
+    },
+    "ts": {
+      "title": "Ts",
+      "type": "string"
+    }
+  },
+  "required": [
+    "run_id",
+    "workflow_id",
+    "status",
+    "ts"
+  ],
+  "title": "WorkflowRunFinishedEvent",
   "type": "object"
 }
 ```

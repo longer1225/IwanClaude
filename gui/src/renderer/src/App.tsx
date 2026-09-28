@@ -5,7 +5,9 @@
 // 并刷新会话列表。订阅不放在 App mount 一次搞定，是因为 daemon 重启后旧
 // subscription 已随连接死亡，这跟 TUI 重连语义同源。2) topics 是 daemon 侧的
 // 发布过滤清单：多订不误伤（不存在的 topic 无事件可推），漏订才是 bug——
-// 所以 S9 全部用户可见面（subagent/skill/context/model_selected）一次订齐。
+// 所以 S9 全部用户可见面（subagent/skill/context/model_selected）一次订齐；
+// M4c 补订 ssh.*——漏订的后果是"终端能开能敲却零输出"：字节流事件被 daemon
+// 在广播前按 fnmatch 静默过滤，GUI 侧完全无感知，排查时最容易怀疑错方向。
 import { useEffect, useState } from 'react'
 import { useStore, handleBusEvent, refreshSessionList } from './store'
 import { onConnStatus, onDaemonEvent, rpc, getStatus } from './rpc'
@@ -15,6 +17,12 @@ import { ThreadView } from './components/ThreadView'
 import { Composer } from './components/Composer'
 import { RightPanel, FileViewer } from './components/RightPanel'
 import { SettingsView } from './components/SettingsView'
+import { PrView } from './components/PrView'
+import { ScheduleView } from './components/ScheduleView'
+import { McpView } from './components/McpView'
+import { GitPanel } from './components/GitPanel'
+import { SshView } from './components/SshView'
+import { WorkflowView } from './components/WorkflowView'
 import { Icon } from './components/Icon'
 
 // 空态插画：Codex 风格的云形轮廓（单色描边，不引图片资源）
@@ -47,6 +55,7 @@ export default function App() {
   const hydrated = useGui((s) => s.hydrated)
   const rightOpen = useGui((s) => s.rightOpen)
   const guiSet = useGui((s) => s.set)
+  const mainView = useGui((s) => s.mainView)
 
   // 启动拉一次 gui.json（主题/字号/项目表）——在应用样式后才渲染，避免闪白
   useEffect(() => {
@@ -61,7 +70,8 @@ export default function App() {
       void rpc('event.subscribe', {
         topics: [
           'session.*', 'run.*', 'step.*', 'tool.*', 'llm.*',
-          'permission.*', 'trust.*', 'subagent.*', 'skill.*', 'context.*'
+          'permission.*', 'trust.*', 'subagent.*', 'skill.*', 'context.*',
+          'schedule.*', 'ssh.*', 'workflow.*'
         ],
         scope: 'global'
       })
@@ -85,29 +95,41 @@ export default function App() {
 
   const empty = !activeSid || thread.length === 0
 
+  // 功能视图（M2/M3）：主区整体换脸，Composer/线程只属于 chat
+  const fnView =
+    mainView === 'pr' ? <PrView /> : mainView === 'git' ? <GitPanel />
+    : mainView === 'schedule' ? <ScheduleView /> : mainView === 'mcp' ? <McpView />
+    : mainView === 'ssh' ? <SshView /> : mainView === 'workflow' ? <WorkflowView /> : null
+
   return (
-    <div className={`shell status-${status}${rightOpen ? ' rp-open' : ''}`}>
+    <div className={`shell status-${status}${rightOpen && mainView === 'chat' ? ' rp-open' : ''}`}>
       <Sidebar />
       <main className="main">
-        <div className="main-inner">
-          {empty ? (
-            <div className="empty">
-              <EmptyCloud />
-              <div className="empty-title">我们要构建什么？</div>
-              <div className="empty-sub">先选项目目录，回车开一个新会话；运行中随时输入即转向</div>
+        {fnView ? (
+          <div className="fn-main">{fnView}</div>
+        ) : (
+          <>
+            <div className="main-inner">
+              {empty ? (
+                <div className="empty">
+                  <EmptyCloud />
+                  <div className="empty-title">我们要构建什么？</div>
+                  <div className="empty-sub">先选项目目录，回车开一个新会话；运行中随时输入即转向</div>
+                </div>
+              ) : (
+                <ThreadView sid={activeSid!} msgs={thread} />
+              )}
             </div>
-          ) : (
-            <ThreadView sid={activeSid!} msgs={thread} />
-          )}
-        </div>
-        <button
-          className={`panel-toggle${rightOpen ? ' on' : ''}`}
-          title={rightOpen ? '收起右侧面板' : '展开右侧面板：文件 / 变更 / 任务'}
-          onClick={() => guiSet({ rightOpen: !rightOpen })}
-        >
-          <Icon name="panelRight" size={15} />
-        </button>
-        <Composer booted={booted} />
+            <button
+              className={`panel-toggle${rightOpen ? ' on' : ''}`}
+              title={rightOpen ? '收起右侧面板' : '展开右侧面板：文件 / 变更 / 任务'}
+              onClick={() => guiSet({ rightOpen: !rightOpen })}
+            >
+              <Icon name="panelRight" size={15} />
+            </button>
+            <Composer booted={booted} />
+          </>
+        )}
         {status !== 'connected' && (
           <div className="conn-banner">
             {status === 'connecting' && '正在连接 iwan-core…（首次会自动启动 daemon，冷启动需要几十秒）'}
@@ -116,7 +138,7 @@ export default function App() {
           </div>
         )}
       </main>
-      {rightOpen && <RightPanel />}
+      {rightOpen && mainView === 'chat' && <RightPanel />}
       <FileViewer />
       {hydrated && <SettingsView />}
     </div>

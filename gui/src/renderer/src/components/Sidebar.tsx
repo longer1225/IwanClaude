@@ -62,6 +62,7 @@ function SessionRow({ s, projectRoot }: { s: SessionMeta; projectRoot?: string }
   const running = useStore((st) => st.runningSids.has(s.id))
   const pins = useGui((st) => st.pins)
   const guiSet = useGui((st) => st.set)
+  const mainView = useGui((st) => st.mainView)
   const sessionProject = useGui((st) => st.sessionProject)
   const projects = useGui((st) => st.projects)
   const metaCwd = useStore((st) => st.metaCwd)
@@ -110,7 +111,16 @@ function SessionRow({ s, projectRoot }: { s: SessionMeta; projectRoot?: string }
         />
       ) : (
         <>
-          <span className="sess-title" title={s.title} onClick={() => void openSession(s.id)}>
+          <span
+            className="sess-title"
+            title={s.title}
+            onClick={() => {
+              // 从 PR/调度/MCP 视图点会话＝回线程；mainView 复位放这里而非 openSession，
+              // 让"点标题"成为唯一需要改视图的路径（函数其余调用方语义不变）
+              if (mainView !== 'chat') guiSet({ mainView: 'chat' })
+              void openSession(s.id)
+            }}
+          >
             {pinned && <Icon name="pin" size={11} className="pin-mark" />}
             {s.title || '(未命名)'}
           </span>
@@ -285,10 +295,11 @@ export function Sidebar() {
     setActive(null)
   }
 
-  // 项目内新建任务：切默认目录 + 回空态
+  // 项目内新建任务：切默认目录 + 回空态（功能视图下也拉回对话）
   const newTaskIn = (root: string): void => {
     useStore.getState().setCwd(root)
     setActive(null)
+    gui.set({ mainView: 'chat' })
   }
 
   const toggleGroup = (root: string): void =>
@@ -306,10 +317,13 @@ export function Sidebar() {
       </div>
 
       <nav className="side-nav">
-        <Row item={{ key: 'new', label: '新对话', icon: 'pencil', active: activeSid === null, onClick: () => setActive(null) }} />
-        <Row item={{ key: 'pr', label: 'Pull Request', icon: 'branch', disabled: true }} />
-        <Row item={{ key: 'cron', label: '定时任务', icon: 'clock', disabled: true }} />
-        <Row item={{ key: 'plug', label: '插件 / MCP', icon: 'plug', disabled: true }} />
+        <Row item={{ key: 'new', label: '新对话', icon: 'pencil', active: activeSid === null && gui.mainView === 'chat', onClick: () => { gui.set({ mainView: 'chat' }); setActive(null) } }} />
+        <Row item={{ key: 'git', label: 'Git', icon: 'git', active: gui.mainView === 'git', onClick: () => gui.set({ mainView: 'git' }) }} />
+        <Row item={{ key: 'pr', label: 'Pull Request', icon: 'branch', active: gui.mainView === 'pr', onClick: () => gui.set({ mainView: 'pr' }) }} />
+        <Row item={{ key: 'cron', label: '定时任务', icon: 'clock', active: gui.mainView === 'schedule', onClick: () => gui.set({ mainView: 'schedule' }) }} />
+        <Row item={{ key: 'wf', label: '工作流', icon: 'workflow', active: gui.mainView === 'workflow', onClick: () => gui.set({ mainView: 'workflow' }) }} />
+        <Row item={{ key: 'plug', label: '插件 / MCP', icon: 'plug', active: gui.mainView === 'mcp', onClick: () => gui.set({ mainView: 'mcp' }) }} />
+        <Row item={{ key: 'ssh', label: 'SSH 终端', icon: 'monitor', active: gui.mainView === 'ssh', onClick: () => gui.set({ mainView: 'ssh' }) }} />
       </nav>
 
       <div className="side-search">

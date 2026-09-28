@@ -64,29 +64,48 @@ export class RpcTransport extends EventEmitter {
     await retry()
   }
 
-  // 建立 TCP 连接并挂上行读取/派发逻辑；连接错误只 reject 本次，不影响后续 request
+  // 建立 TCP 连接并挂上行读取/派发逻辑；error 监听只在"握手未完成"阶段负责
+  // reject 本次 dial，连上之后立刻摘除，换 readLoop 的常驻兜底
   private dial(): Promise<void> {
     return new Promise((resolve, reject) => {
       const sock = net.createConnection({ host: this.host, port: this.port })
+      let settled = false
       sock.once('connect', () => {
+        settled = true
+        sock.removeListener('error', onErr)
         this.sock = sock
         this.setStatus('connected')
         this.readLoop(sock)
         resolve()
       })
-      sock.once('error', (err) => {
+      const onErr = (err: Error): void => {
         sock.destroy()
-        reject(err)
-      })
+        if (!settled) reject(err)
+      }
+      sock.once('error', onErr)
     })
   }
 
   // readline 按行分帧 NDJSON；断线后清空 pending（渲染层收到 reconnecting 状态自行重订阅）
   private readLoop(sock: net.Socket): void {
+    // 【学习要点】error 兜底要挂【三个对象】，少一个就是一场冻结事故：
+    // taskkill 杀 daemon 以 RST 收尾时——①socket 层的 error 先由 no-op 吸收
+    // （node 对无监听者的流 error 直接 throw，沿 libuv 冒成未捕获异常，
+    // Electron 主进程默认弹原生错误对话框并阻塞整个主线程）；②readline 会把
+    // input 流的错误【代理再发一遍到它自己的 Interface 实例】（proxyEvents
+    // 机制），rl 无监听照样炸第二发；③最关键：错误被吸收后 readline 的
+    // 'close' 在 RST 路径上根本不来（实测），只挂 rl.on('close') 重连会永远
+    // 不触发——GUI 卡死 reconnecting 假活。重连触发点必须挂在 socket 的
+    // 'close' 上（EOF/RST 都必达），与 rl.close 用 done 标志去重。
+    sock.on('error', () => {})
     const rl = readline.createInterface({ input: sock })
+    rl.on('error', () => {})
     this.rl = rl
     rl.on('line', (line) => this.dispatch(line))
-    rl.on('close', () => {
+    let done = false
+    const onGone = (): void => {
+      if (done) return
+      done = true
       const hadPending = this.pending.size > 0
       for (const p of this.pending.values()) p.reject(new Error('connection lost'))
       this.pending.clear()
@@ -102,7 +121,9 @@ export class RpcTransport extends EventEmitter {
         }
         backoff(hadPending ? 500 : 1000)
       }
-    })
+    }
+    rl.on('close', onGone)
+    sock.on('close', onGone)
   }
 
   // 单行消息派发：有 jsonrpc → 回填 pending；kind=event → 发 'event' 给上层

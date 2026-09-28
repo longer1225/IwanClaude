@@ -273,6 +273,7 @@ _PREVIEW_KEY: dict[str, str] = {
     "write_file": "path",
     "list_dir":   "path",
     "note_save":  "content",
+    "ssh_exec":   "command",
 }
 # 参数预览的最大长度
 _PREVIEW_MAX = 60
@@ -317,6 +318,10 @@ def param_preview(tool_name: str, params: dict[str, Any]) -> str:
         # 如果值超过最大长度，截断并添加省略号
         if len(val) > _PREVIEW_MAX:
             val = val[:_PREVIEW_MAX] + "…"
+        # ssh_exec 的目的地是被批准决策的一半：只回显命令会让"批准跑在 lab"
+        # 和"批准跑在任何机器"看起来一模一样，前缀钉上 conn_id
+        if tool_name == "ssh_exec":
+            return f"conn={params.get('conn_id', '?')[:8]} {key}={val!r}"
         return f"{key}={val!r}"
     # 如果没有关键字段，使用整个参数字典
     snippet = str(params)
@@ -441,6 +446,10 @@ def param_fingerprint(tool_name: str, params: dict[str, Any]) -> str:
     raw: str
     if tool_name == "bash":
         raw = re.sub(r"\s+", " ", str(params.get("command", ""))).strip()
+    elif tool_name == "ssh_exec":
+        # 目的地+命令联合指纹：对 lab 的 always-allow 绝不泄漏成对其他主机的许可
+        cmd = re.sub(r"\s+", " ", str(params.get("command", ""))).strip()
+        raw = f"{params.get('conn_id', '')}\x1f{cmd}"
     elif tool_name == "run_python":
         raw = str(params.get("code", ""))
     elif tool_name == "git_diff":

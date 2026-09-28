@@ -47,8 +47,10 @@ results = await executor.execute(workflow, handler)
 前端和后端开发任务在设计方案完成后自动并行执行。"
 """
 
+from iwan_claude.core.workflow.engine import WorkflowEngine
 from iwan_claude.core.workflow.executor import WorkflowExecutor
 from iwan_claude.core.workflow.graph import Workflow
+from iwan_claude.core.workflow.store import WorkflowStore
 from iwan_claude.core.workflow.task import Task
 
-__all__ = ["Task", "Workflow", "WorkflowExecutor"]
+__all__ = ["Task", "Workflow", "WorkflowExecutor", "WorkflowStore", "WorkflowEngine"]

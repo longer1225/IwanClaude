@@ -114,10 +114,28 @@ const PATHS: Record<string, React.ReactNode> = {
       <path d="M7 8v8M17 11c0 3-3 4-6.5 4.5" />
     </>
   ),
+  // git 经典标：主干两节点 + 侧枝汇入（与 branch 区分：这个是"仓库"语义）
+  git: (
+    <>
+      <circle cx="7" cy="6.5" r="2" />
+      <circle cx="7" cy="17.5" r="2" />
+      <circle cx="17" cy="12" r="2" />
+      <path d="M7 8.5v7M9 6.5h2.5A2.5 2.5 0 0 1 14 9v.6M15 12h-1" />
+    </>
+  ),
   cpu: (
     <>
       <rect x="7.5" y="7.5" width="9" height="9" rx="1.4" />
       <path d="M10 4.5v3M14 4.5v3M10 16.5v3M14 16.5v3M4.5 10h3M4.5 14h3M16.5 10h3M16.5 14h3" />
+    </>
+  ),
+  // 工作流标：左两节点汇入右一节点（DAG 语义；与 branch 的区别是没有主干直线）
+  workflow: (
+    <>
+      <circle cx="6" cy="7" r="2.2" />
+      <circle cx="6" cy="17" r="2.2" />
+      <circle cx="18" cy="12" r="2.2" />
+      <path d="M8.1 7.9c3.2 1.2 5.6 2.3 7.7 3.3M8.1 16.1c3.2-1.2 5.6-2.3 7.7-3.3" />
     </>
   ),
   plug: <path d="M9 3.5v5M15 3.5v5M6.5 8.5h11v3a5.5 5.5 0 0 1-11 0v-3zM12 17v3.5" />,

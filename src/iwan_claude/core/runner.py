@@ -130,6 +130,7 @@ from iwan_claude.core.tools.builtin import (                   # 内置工具
     SkillInfoTool,
     SkillInstallTool,
     SkillListTool,
+    SshExecTool,
     TaskCreateTool,
     TaskGetTool,
     TaskListTool,
@@ -722,6 +723,7 @@ class AgentRunner:
         for t in [
             ProcessListTool(),        # 获取进程列表
             HttpRequestTool(),        # HTTP 请求
+            SshExecTool(),            # 远端命令执行（M4b：仅主注册表，子代理不给）
         ]:
             if _ok(t.name):
                 registry.register(t)

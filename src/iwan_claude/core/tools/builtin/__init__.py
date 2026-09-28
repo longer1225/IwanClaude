@@ -97,6 +97,7 @@ from iwan_claude.core.tools.builtin.skill import (
     SkillListTool,
 )
 from iwan_claude.core.tools.builtin.system import ProcessListTool
+from iwan_claude.core.tools.builtin.ssh_exec import SshExecTool  # M4b 远端命令
 from iwan_claude.core.tools.builtin.checkpoint import ListCheckpointsTool, RestoreCheckpointTool
 from iwan_claude.core.tools.builtin.task_create import TaskCreateTool
 from iwan_claude.core.tools.builtin.task_get import TaskGetTool
@@ -162,6 +163,7 @@ __all__ = [
     "SkillInfoTool",
     "SkillInstallTool",
     "SkillListTool",
+    "SshExecTool",
     "TaskCreateTool",
     "TaskGetTool",
     "TaskListTool",

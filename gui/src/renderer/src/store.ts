@@ -14,7 +14,10 @@ import type {
   SessionSendMessageResult,
   SessionGetHistoryResult,
   RunCancelResult,
-  RunSteerResult
+  RunSteerResult,
+  ScheduleTaskInfo,
+  WorkflowInfo,
+  WorkflowRunInfo
 } from './protocol/types'
 
 // 历史消息 content 块的松散形态（后端原样透传 Anthropic 消息结构，字段按需用）
@@ -66,6 +69,10 @@ interface State {
   sessionAttrs: Record<string, Partial<SessionAttrs>>
   metaCwd: Record<string, string>
   metaRunIds: Record<string, string[]>
+  scheduleTasks: ScheduleTaskInfo[]
+  workflows: WorkflowInfo[]
+  wfRuns: WorkflowRunInfo[]
+  wfLiveRunId: string
   setStatus(s: string): void
   setActive(sid: string | null): void
   setCwd(cwd: string | null): void
@@ -81,6 +88,12 @@ interface State {
   markHistoryLoaded(sid: string): void
   setAttrs(sid: string, patch: Partial<SessionAttrs>): void
   setMeta(map: Record<string, { cwd: string; created_at: string; run_ids: string[] }>): void
+  setScheduleTasks(list: ScheduleTaskInfo[]): void
+  setWorkflows(list: WorkflowInfo[]): void
+  setWfRuns(list: WorkflowRunInfo[]): void
+  setWfLiveRun(runId: string): void
+  patchWfNode(runId: string, node: string, patch: Record<string, string>): void
+  finishWfRun(runId: string, status: string, error: string): void
 }
 
 // 会话可调属性（Composer 各选择器的显示值）——来源：session.create 返回值 + *_changed 事件
@@ -132,6 +145,10 @@ export const useStore = create<State>((set, get) => ({
   sessionAttrs: {},
   metaCwd: {},
   metaRunIds: {},
+  scheduleTasks: [],
+  workflows: [],
+  wfRuns: [],
+  wfLiveRunId: '',
   setStatus: (s) => set({ status: s }),
   setActive: (sid) => set({ activeSid: sid }),
   setCwd: (cwd) => {
@@ -191,8 +208,64 @@ export const useStore = create<State>((set, get) => ({
     }
     set((st) => ({ metaCwd: { ...st.metaCwd, ...cwd }, metaRunIds: { ...st.metaRunIds, ...runs } }))
   },
-  setContextPct: (sid, pct) => set((st) => ({ contextPct: { ...st.contextPct, [sid]: pct } }))
+  setContextPct: (sid, pct) => set((st) => ({ contextPct: { ...st.contextPct, [sid]: pct } })),
+  setScheduleTasks: (list) => set({ scheduleTasks: list }),
+  setWorkflows: (list) => set({ workflows: list }),
+  setWfRuns: (list) => set({ wfRuns: list }),
+  setWfLiveRun: (runId) => set({ wfLiveRunId: runId }),
+  // 节点即时上色：整条链不可变更新（run 行换引用、nodes 数组里只换命中那一项）
+  patchWfNode: (runId, node, patch) =>
+    set((st) => ({
+      wfRuns: st.wfRuns.map((r) =>
+        r.id !== runId
+          ? r
+          : { ...r, nodes: (r.nodes ?? []).map((n) => (n.node === node ? { ...n, ...patch } : n)) }
+      )
+    })),
+  // 收尾上色：run 行落终态（finished 事件只带状态/error，节点细节留给下次 get 对账）
+  finishWfRun: (runId, status, error) =>
+    set((st) => ({
+      wfRuns: st.wfRuns.map((r) => (r.id === runId ? { ...r, status, error } : r))
+    }))
 }))
+
+// devtest 调试缝：仅 DEV 构建把 store 挂到 window，供注入脚本读取真实状态
+// （renderer 的 tsconfig 没有 vite/client 类型，这里就地声明最小形状）
+const viteEnv = (import.meta as unknown as { env?: { DEV?: boolean } }).env
+if (viteEnv?.DEV) {
+  (window as unknown as Record<string, unknown>).__iwanStore = useStore
+}
+
+// 拉取定时任务表（daemon 是事实源；schedule.fired 事件到达时也走这里刷新）
+export async function refreshSchedules(): Promise<void> {
+  try {
+    const r = await rpc<{ tasks: ScheduleTaskInfo[] }>('schedule.list')
+    useStore.getState().setScheduleTasks(r.tasks ?? [])
+  } catch {
+    // 未连接/daemon 无此方法时静默——与 refreshSessionList 同一容错纪律
+  }
+}
+
+// 拉取工作流定义表（daemon 是事实源；run 终局时列表页 last_status chip 靠它翻新）
+export async function refreshWorkflows(): Promise<void> {
+  try {
+    const r = await rpc<{ workflows?: WorkflowInfo[] }>('workflow.list')
+    useStore.getState().setWorkflows(r.workflows ?? [])
+  } catch {
+    // 未连接/daemon 无此方法时静默——与 refreshSchedules 同一容错纪律
+  }
+}
+
+// 拉取某工作流的运行历史（workflow.run 的 RPC 先于 create_run 落盘返回，
+// 所以紧随其后的这次拉取必然带回全 pending 骨架，事件上色才有可贴的行）
+export async function refreshWfRuns(wfId: string): Promise<void> {
+  try {
+    const r = await rpc<{ runs?: WorkflowRunInfo[] }>('workflow.runs', { id: wfId })
+    useStore.getState().setWfRuns(r.runs ?? [])
+  } catch {
+    /* 静默 */
+  }
+}
 
 // 拉取会话列表（daemon 是唯一事实源；客户端只补 cwd 归属账本）
 export async function refreshSessionList(): Promise<void> {
@@ -596,6 +669,48 @@ export function handleBusEvent(ev: BusEvent): void {
     case 'session.waiting_for_input': {
       st.markRunning(ev.session_id, false)
       st.setLastRun(ev.session_id, ev.last_run_id)
+      return
+    }
+    case 'schedule.fired': {
+      // 触发即记账：任务表 last_run/next_due 已在 daemon 侧更新，重拉拿新值；
+      // 同时刷新会话列表——每次触发都会开出一个 one_shot 新会话
+      void refreshSchedules()
+      void refreshSessionList()
+      return
+    }
+    case 'workflow.node': {
+      // 【学习要点】只认当前盯的 live run：别的 run 不许贴进这张列表——
+      // 事件驱动上色的全部风险就是串台（runOwner 表同理）。run 行由点
+      // 「运行」后的 refreshWfRuns 拉回（骨架在服务端同步落盘，必在事件前）
+      if (!st.wfLiveRunId || ev.run_id !== st.wfLiveRunId) return
+      if (st.wfRuns.some((r) => r.id === ev.run_id)) {
+        st.patchWfNode(ev.run_id, ev.node, {
+          status: ev.status,
+          child_run_id: ev.child_run_id ?? '',
+          detail: ev.detail ?? ''
+        })
+        return
+      }
+      // 事件抢在 runs 响应前落地（localhost 上两路同 socket 竞速，几 ms 窗口）：
+      // 当前账本确属这条流才回填对账；用户已在看别流时宁可不刷（防换脸）
+      if (!st.wfRuns.length || st.wfRuns.every((r) => r.workflow_id === ev.workflow_id)) {
+        void refreshWfRuns(ev.workflow_id)
+      }
+      return
+    }
+    case 'workflow.finished': {
+      // 列表页 chip 永远按 daemon 侧 last_status 翻新；运行中视图则就地给
+      // run 行落终态。事件补丁没有 output 字段（节点全文只在服务端行里），
+      // 所以终局还要补一次权威重拉——守卫同 node 回填：账本确属这条流才刷，
+      // 用户已切去看别流时宁可不刷（防换脸）
+      void refreshWorkflows()
+      if (ev.run_id === st.wfLiveRunId) {
+        st.setWfLiveRun('')
+        st.finishWfRun(ev.run_id, ev.status, ev.error ?? '')
+        if (!st.wfRuns.length || st.wfRuns.every((r) => r.workflow_id === ev.workflow_id)) {
+          void refreshWfRuns(ev.workflow_id)
+        }
+      }
       return
     }
     default:

@@ -128,6 +128,182 @@ export interface SessionCheckpointRestoreParams {
   checkpoint_id: string
 }
 
+export interface McpStatusParams {
+
+}
+
+export interface PrContextParams {
+  cwd: string
+}
+
+export interface PrListParams {
+  cwd: string
+  state?: string
+  page?: number
+}
+
+export interface PrCreateParams {
+  cwd: string
+  title: string
+  body?: string
+  base?: string
+  head?: string
+  draft?: boolean
+}
+
+export interface ScheduleListParams {
+
+}
+
+export interface ScheduleCreateParams {
+  name: string
+  cwd: string
+  prompt: string
+  kind: string
+  spec: string
+}
+
+export interface ScheduleUpdateParams {
+  id: string
+  name?: string | null
+  cwd?: string | null
+  prompt?: string | null
+  kind?: string | null
+  spec?: string | null
+  enabled?: boolean | null
+}
+
+export interface ScheduleDeleteParams {
+  id: string
+}
+
+export interface ScheduleRunNowParams {
+  id: string
+}
+
+export interface WorkflowListParams {
+
+}
+
+export interface WorkflowGetParams {
+  id: string
+}
+
+export interface WorkflowSaveParams {
+  id?: string
+  name?: string
+  description?: string
+  tasks?: Array<WorkflowTaskDef>
+}
+
+export interface WorkflowDeleteParams {
+  id: string
+}
+
+export interface WorkflowRunParams {
+  id: string
+}
+
+export interface WorkflowRunsParams {
+  id?: string
+  limit?: number
+}
+
+export interface GitStatusParams {
+  cwd: string
+}
+
+export interface GitBranchesParams {
+  cwd: string
+}
+
+export interface GitLogParams {
+  cwd: string
+  limit?: number
+}
+
+export interface GitPathsParams {
+  cwd: string
+  paths?: Array<string>
+}
+
+export interface GitCommitParams {
+  cwd: string
+  message: string
+}
+
+export interface GitCheckoutParams {
+  cwd: string
+  name: string
+}
+
+export interface GitPullParams {
+  cwd: string
+}
+
+export interface GitPushParams {
+  cwd: string
+}
+
+export interface SshConnListParams {
+
+}
+
+export interface SshConnAddParams {
+  name: string
+  host: string
+  user: string
+  port?: number
+  key_file?: string
+}
+
+export interface SshConnUpdateParams {
+  id: string
+  name?: string | null
+  host?: string | null
+  user?: string | null
+  port?: number | null
+  key_file?: string | null
+}
+
+export interface SshConnDeleteParams {
+  id: string
+}
+
+export interface SshKeyStatusParams {
+
+}
+
+export interface SshKeyGenerateParams {
+
+}
+
+export interface SshHostTrustParams {
+  host: string
+  port?: number
+}
+
+export interface SshTermOpenParams {
+  conn_id: string
+  cols?: number
+  rows?: number
+}
+
+export interface SshTermWriteParams {
+  session_id: string
+  data_b64: string
+}
+
+export interface SshTermResizeParams {
+  session_id: string
+  cols?: number
+  rows?: number
+}
+
+export interface SshTermCloseParams {
+  session_id: string
+}
+
 // ==================== 命令结果与数据结构 ====================
 export interface FileChangeInfo {
   path: string
@@ -159,6 +335,111 @@ export interface CheckpointInfo {
   summary: string
   node?: string | null
   run_id?: string
+}
+
+export interface McpServerStatus {
+  name: string
+  transport?: string
+  connected?: boolean
+  tools?: Array<string>
+  last_error?: string
+}
+
+export interface PrInfo {
+  number: number
+  title?: string
+  author?: string
+  state?: string
+  updated_at?: string
+  url?: string
+  head_ref?: string
+  base_ref?: string
+  draft?: boolean
+}
+
+export interface ScheduleTaskInfo {
+  id: string
+  name?: string
+  cwd?: string
+  prompt?: string
+  kind?: string
+  spec?: string
+  enabled?: boolean
+  last_run?: string
+  last_result?: string
+  next_due?: string
+}
+
+export interface WorkflowTaskDef {
+  name: string
+  prompt: string
+  depends_on?: Array<string>
+}
+
+export interface WorkflowInfo {
+  id: string
+  name?: string
+  description?: string
+  tasks?: Array<WorkflowTaskDef>
+  layers?: Array<Array<string>>
+  created_at?: string
+  updated_at?: string
+  last_run_id?: string
+  last_status?: string
+}
+
+export interface WorkflowNodeRunInfo {
+  node: string
+  status?: string
+  child_run_id?: string
+  detail?: string
+  output?: string
+  started_at?: string
+  finished_at?: string
+}
+
+export interface WorkflowRunInfo {
+  id: string
+  workflow_id: string
+  workflow_name?: string
+  session_id?: string
+  status?: string
+  started_at?: string
+  finished_at?: string
+  error?: string
+  nodes?: Array<WorkflowNodeRunInfo>
+}
+
+export interface GitFile {
+  path: string
+  index_status?: string
+  worktree_status?: string
+  staged?: boolean
+  untracked?: boolean
+  conflicted?: boolean
+}
+
+export interface GitBranchInfo {
+  name: string
+  current?: boolean
+  upstream?: string
+}
+
+export interface GitLogEntry {
+  sha?: string
+  short_sha?: string
+  author?: string
+  date?: string
+  subject?: string
+}
+
+export interface SshConnInfo {
+  id: string
+  name?: string
+  host?: string
+  user?: string
+  port?: number
+  key_file?: string
 }
 
 export interface PongResult {
@@ -283,16 +564,165 @@ export interface SessionCheckpointRestoreResult {
   message: string
 }
 
+export interface McpStatusResult {
+  servers?: Array<McpServerStatus>
+}
+
+export interface PrContextResult {
+  ok?: boolean
+  owner?: string
+  repo?: string
+  branch?: string
+  default_branch?: string
+  ahead?: number
+  behind?: number
+  has_remote?: boolean
+  error?: string
+}
+
+export interface PrListResult {
+  ok?: boolean
+  error?: string
+  pulls?: Array<PrInfo>
+}
+
+export interface PrCreateResult {
+  ok?: boolean
+  number?: number
+  url?: string
+  pushed?: boolean
+  error?: string
+}
+
+export interface ScheduleListResult {
+  tasks?: Array<ScheduleTaskInfo>
+}
+
+export interface ScheduleOpResult {
+  ok?: boolean
+  id?: string
+  run_id?: string
+  error?: string
+}
+
+export interface WorkflowListResult {
+  workflows?: Array<WorkflowInfo>
+}
+
+export interface WorkflowGetResult {
+  ok?: boolean
+  error?: string
+  workflow?: WorkflowInfo | null
+  runs?: Array<WorkflowRunInfo>
+}
+
+export interface WorkflowRunsResult {
+  runs?: Array<WorkflowRunInfo>
+}
+
+export interface WorkflowOpResult {
+  ok?: boolean
+  id?: string
+  run_id?: string
+  error?: string
+}
+
+export interface GitStatusResult {
+  ok?: boolean
+  error?: string
+  branch?: string
+  ahead?: number
+  behind?: number
+  files?: Array<GitFile>
+}
+
+export interface GitBranchesResult {
+  ok?: boolean
+  error?: string
+  current?: string
+  branches?: Array<GitBranchInfo>
+}
+
+export interface GitLogResult {
+  ok?: boolean
+  error?: string
+  entries?: Array<GitLogEntry>
+}
+
+export interface GitOpResult {
+  ok?: boolean
+  error?: string
+  output?: string
+  sha?: string
+}
+
+export interface SshConnListResult {
+  connections?: Array<SshConnInfo>
+}
+
+export interface SshConnOpResult {
+  ok?: boolean
+  id?: string
+  error?: string
+}
+
+export interface SshKeyStatusResult {
+  has_key?: boolean
+  pubkey_path?: string
+  fingerprint?: string
+}
+
+export interface SshKeyOpResult {
+  ok?: boolean
+  pubkey?: string
+  fingerprint?: string
+  error?: string
+}
+
+export interface SshTrustResult {
+  ok?: boolean
+  fingerprints?: string
+  error?: string
+}
+
+export interface SshTermOpenResult {
+  ok?: boolean
+  session_id?: string
+  error?: string
+}
+
+export interface SshTermOpResult {
+  ok?: boolean
+  error?: string
+}
+
 // ==================== 命令名联合 ====================
 export type CommandMethod =
+  | "PydanticUndefined"
   | "agent.run"
   | "core.ping"
   | "event.subscribe"
   | "files.changes"
   | "files.restore"
+  | "git.branches"
+  | "git.checkout"
+  | "git.commit"
+  | "git.log"
+  | "git.pull"
+  | "git.push"
+  | "git.status"
+  | "mcp.status"
   | "permission.respond"
+  | "pr.context"
+  | "pr.create"
+  | "pr.list"
   | "run.cancel"
   | "run.steer"
+  | "schedule.create"
+  | "schedule.delete"
+  | "schedule.list"
+  | "schedule.run_now"
+  | "schedule.update"
   | "session.checkpoint.list"
   | "session.checkpoint.restore"
   | "session.close"
@@ -307,9 +737,26 @@ export type CommandMethod =
   | "session.set_engine"
   | "session.set_model"
   | "session.set_permission_mode"
+  | "ssh.conn_add"
+  | "ssh.conn_delete"
+  | "ssh.conn_list"
+  | "ssh.conn_update"
+  | "ssh.host_trust"
+  | "ssh.key_generate"
+  | "ssh.key_status"
+  | "ssh.term_close"
+  | "ssh.term_open"
+  | "ssh.term_resize"
+  | "ssh.term_write"
   | "trust.list"
   | "trust.respond"
   | "trust.revoke"
+  | "workflow.delete"
+  | "workflow.get"
+  | "workflow.list"
+  | "workflow.run"
+  | "workflow.runs"
+  | "workflow.save"
 
 // ==================== 事件判别联合 ====================
 export type BusEvent =
@@ -549,5 +996,48 @@ export type BusEvent =
     decision: string;
     reason?: string;
     elapsed_ms?: number;
+    ts: string;
+  }
+  | {
+    type: 'schedule.fired';
+    task_id: string;
+    run_id?: string;
+    session_id?: string;
+    ok?: boolean;
+    detail?: string;
+    ts: string;
+  }
+  | {
+    type: 'ssh.output';
+    session_id: string;
+    data_b64: string;
+    ts: string;
+  }
+  | {
+    type: 'ssh.closed';
+    session_id: string;
+    exit_code?: number;
+    reason?: string;
+    ts: string;
+  }
+  | {
+    type: 'workflow.node';
+    run_id: string;
+    workflow_id: string;
+    node: string;
+    status: string;
+    child_run_id?: string;
+    detail?: string;
+    ts: string;
+  }
+  | {
+    type: 'workflow.finished';
+    run_id: string;
+    workflow_id: string;
+    workflow_name?: string;
+    session_id?: string;
+    status: string;
+    error?: string;
+    finished_at?: string;
     ts: string;
   }
