@@ -102,6 +102,8 @@ from iwan_claude.core.bus.commands import (
     PrCreateResult,                 # PR 创建结果
     PrListCommand,                  # PR 列表命令
     PrListResult,                   # PR 列表结果
+    PrReviewCommand,                # PR 评审命令（拉 diff + 起评审会话）
+    PrReviewResult,                 # PR 评审结果
     RunCancelCommand,               # 取消运行命令
     RunCancelResult,                # 取消运行结果
     RunSteerCommand,                # 运行中修正命令
@@ -114,6 +116,8 @@ from iwan_claude.core.bus.commands import (
     ScheduleRunNowCommand,          # 定时任务立即执行命令
     ScheduleTaskInfo,               # 定时任务行
     ScheduleUpdateCommand,          # 定时任务更新命令
+    SpeechTranscribeCommand,        # 语音转写命令
+    SpeechTranscribeResult,         # 语音转写结果
     SshConnAddCommand,              # SSH 连接新增命令
     SshConnDeleteCommand,           # SSH 连接删除命令
     SshConnInfo,                    # SSH 连接行
@@ -168,6 +172,7 @@ from iwan_claude.core.bus.commands import (
     TrustRespondResult,             # 信任响应结果
     TrustRevokeCommand,             # 信任撤销命令
     TrustRevokeResult,              # 信任撤销结果
+    WorkflowCancelCommand,          # 工作流取消命令
     WorkflowDeleteCommand,          # 工作流删除命令
     WorkflowGetCommand,             # 工作流详情命令
     WorkflowGetResult,              # 工作流详情结果
@@ -200,6 +205,7 @@ from iwan_claude.core.mcp.server import McpServerManager     # MCP 服务器管�
 from iwan_claude.core.permissions.manager import PermissionManager  # 权限管理
 from iwan_claude.core.permissions.storage import load_policy_file   # 加载权限策略
 from iwan_claude.core.schedule import ScheduleStore, Scheduler  # noqa: E402  定时任务（存储 + 调度循环）
+from iwan_claude.core.speech import SpeechTranscriber  # noqa: E402  本地语音转写器（V1）
 from iwan_claude.core.ssh import keys as ssh_keys  # noqa: E402  SSH 密钥与主机信任（M4a）
 from iwan_claude.core.ssh.connections import SshConnStore  # noqa: E402  SSH 连接表存储（M4a）
 from iwan_claude.core.ssh.session import SshSessionManager  # noqa: E402  SSH 终端会话池（M4c）
@@ -309,6 +315,12 @@ class CoreApp:
         self._scheduler: Scheduler | None = None
         # 最近一次触发的 (run_id, session_id) 映射：schedule.fired 事件补字段用
         self._sched_last_fire: dict[str, tuple[str, str]] = {}
+        # ④ PR 自动评审：已处理过的 PR 号（手动评审与轮询共享，防重复烧 LLM）
+        # + 首轮 seed 标记（上线即囤：存量 open PR 登记但不评审，只跟新号）
+        # + 轮询任务句柄（config.github.auto_review=False 时永远是 None）
+        self._pr_seen: set[int] = set()
+        self._pr_seen_seeded: bool = False
+        self._pr_poller_task: asyncio.Task[None] | None = None
         # M4a SSH 连接库（run() 里创建；懒载入，handler 访问时才读盘）
         self._ssh_store: SshConnStore | None = None
         # M4c SSH 终端会话池（run() 里创建；发射器绑 bus）
@@ -316,6 +328,8 @@ class CoreApp:
         # W1 工作流：定义/运行存储 + 运行引擎（run() 里创建并清算孤儿；None=未启动）
         self._workflow_store: WorkflowStore | None = None
         self._workflow_engine: WorkflowEngine | None = None
+        # V1 语音转写器（run() 里创建；模型本身懒加载，这里只是挂个空壳）
+        self._speech: SpeechTranscriber | None = None
         # run 级懒建缓存：workflow run_id → SpawnAgentTool / one_shot 会话 id；收尾时清空
         self._wf_tools: dict[str, SpawnAgentTool] = {}
         self._wf_sessions: dict[str, str] = {}
@@ -511,6 +525,98 @@ class CoreApp:
             self._config.github.base_url, self._config.github.token,
         )
         return PrCreateResult.model_validate(data)
+
+    # 【学习要点】_start_pr_review 是"一键评审"与"后台轮询评审"的唯一动会话点：
+    # 两条触发路径（RPC 按钮 / 轮询新号）在这里汇流，pr.reviewed 事件也只在这一
+    # 处广播——成败都发（对齐 schedule.fired 的"后台干活必留打卡"先例），GUI 订阅
+    # 一个事件就能看到全部评审动作，不用分别监听 RPC 回包和轮询日志。
+    # 失败不删 seen 登记（调用方 pr_new_numbers 已登记）：网络失败的 PR 不自动
+    # 重试，宁可用户手动再点，也不让轮询变成烧 token 的重试机器。
+    async def _start_pr_review(
+        self, cwd: str, number: int,
+    ) -> tuple[bool, str, str, str]:
+        """发起一次 PR 评审会话，返回 (ok, session_id, 标题, 错误文案)"""
+        from iwan_claude.core.bus.events import PrReviewedEvent
+        assert self._config is not None
+        assert self._sessions is not None
+        gh = self._config.github
+        data = await core_pr.fetch_pr_for_review(cwd, number, gh.base_url, gh.token)
+        title = str(data.get("title", ""))
+        if not data.get("ok"):
+            err = str(data.get("error", "")) or "拉取 PR 失败"
+            await self._bus.publish(PrReviewedEvent(
+                pr_number=number, title=title, session_id="", ok=False, error=err, ts=_now(),
+            ))
+            return False, "", title, err
+        goal = (
+            f"请评审 GitHub PR #{number}（标题：{title}）。以下是 PR 描述与完整 diff。\n\n"
+            f"【PR 描述】\n{str(data.get('body', ''))[:2000]}\n\n"
+            f"【diff】\n{data['diff']}\n\n"
+            "评审要求：这是只读评审，不要修改任何文件；"
+            "按 🔴严重 / 🟡建议 / 🟢可选 三级输出意见，每条注明涉及文件与位置。"
+        )
+        try:
+            session = await self._sessions.create(
+                mode="one_shot", title=f"评审·PR#{number} {title}"[:40], cwd=cwd,
+            )
+        except Exception as e:
+            err = f"创建评审会话失败：{type(e).__name__}: {e}"
+            await self._bus.publish(PrReviewedEvent(
+                pr_number=number, title=title, session_id="", ok=False, error=err, ts=_now(),
+            ))
+            return False, "", title, err
+        # 即发即返：评审内容在会话里慢慢跑，RPC 不等 LLM（_schedule_fire 同套路）
+        run_task = asyncio.create_task(
+            self._sessions.send_message(session.id, goal, run_id=new_run_id())
+        )
+        self._running_runs.add(run_task)
+        run_task.add_done_callback(self._running_runs.discard)
+        self._pr_seen.add(number)  # 手动评审也登记：轮询器下轮不再重复评审同号
+        await self._bus.publish(PrReviewedEvent(
+            pr_number=number, title=title, session_id=session.id, ok=True, error="", ts=_now(),
+        ))
+        return True, session.id, title, ""
+
+    # pr.review RPC：GUI「评审」按钮的一键入口；发起即烧 LLM，属授权动作，落审计
+    async def _pr_review_handler(self, params: dict[str, Any]) -> PrReviewResult:
+        cmd = PrReviewCommand.model_validate(params)
+        cwd = cmd.cwd or os.getcwd()
+        logger.info("audit pr.review: cwd=%s pr_number=%s", cwd, cmd.pr_number)
+        ok, sid, _title, err = await self._start_pr_review(cwd, cmd.pr_number)
+        return PrReviewResult(ok=ok, session_id=sid, error=err)
+
+    # PR 自动评审轮询（config [github] auto_review opt-in）：周期拉 open 列表，
+    # 新号走 _start_pr_review。首轮只 seed 不评审——daemon 重启不该把存量
+    # 历史 PR 全部回灌成评审会话；一切异常 log 后等下轮，轮询器永不因失败退出
+    async def _pr_review_poller(self) -> None:
+        assert self._config is not None
+        gh = self._config.github
+        interval = max(60, gh.auto_review_interval_min * 60)
+        cwd = gh.auto_review_cwd or os.getcwd()
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                data = await core_pr.list_pulls_for_cwd(
+                    cwd, "open", 1, gh.base_url, gh.token,
+                )
+                if not data["ok"]:
+                    logger.warning("pr 自动评审：拉取列表失败（%s），下轮重试", data["error"])
+                    continue
+                rows = data["pulls"]
+                if not self._pr_seen_seeded:
+                    core_pr.pr_new_numbers(rows, self._pr_seen)
+                    self._pr_seen_seeded = True
+                    logger.info("pr 自动评审：已囤积 %d 个存量 PR，只跟新号", len(self._pr_seen))
+                    continue
+                for number in core_pr.pr_new_numbers(rows, self._pr_seen):
+                    ok, _sid, _title, err = await self._start_pr_review(cwd, number)
+                    logger.info(
+                        "pr 自动评审：#%d %s", number, "已起评审会话" if ok else f"失败：{err}",
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.warning("pr 自动评审：轮询异常 %s: %s", type(e).__name__, e)
 
     # 定时任务列表（schedule.list：直读存储，存储层每次变更已落盘）
     async def _schedule_list_handler(self, params: dict[str, Any]) -> ScheduleListResult:
@@ -830,12 +936,41 @@ class CoreApp:
         logger.info("audit workflow.run: id=%s run_id=%s", cmd.id, run_id)
         return WorkflowOpResult(ok=True, id=cmd.id, run_id=run_id)
 
+    # 取消进行中的运行（workflow.cancel：显式点击=授权，同 workflow.run；id=工作流 id，
+    # 与 workflow.run 同口径经 active_run_for 解析——坐等到 cancelled 终态才回包，
+    # GUI 拿到 ok 时事件必已广播完，不必再靠轮询对账）
+    async def _workflow_cancel_handler(self, params: dict[str, Any]) -> WorkflowOpResult:
+        cmd = WorkflowCancelCommand.model_validate(params)
+        assert self._workflow_engine is not None
+        run_id = self._workflow_engine.active_run_for(cmd.id)
+        if not run_id:
+            return WorkflowOpResult(ok=False, id=cmd.id, error="该工作流没有进行中的运行，无需取消")
+        err = await self._workflow_engine.cancel_run(run_id)
+        if err:
+            return WorkflowOpResult(ok=False, id=cmd.id, error=err)
+        logger.info("audit workflow.cancel: id=%s run_id=%s", cmd.id, run_id)
+        return WorkflowOpResult(ok=True, id=cmd.id, run_id=run_id)
+
     # 运行历史（workflow.runs：id 空=全部工作流混排，新→旧）
     async def _workflow_runs_handler(self, params: dict[str, Any]) -> WorkflowRunsResult:
         cmd = WorkflowRunsCommand.model_validate(params)
         assert self._workflow_store is not None
         rows = self._workflow_store.list_runs(cmd.id, cmd.limit)
         return WorkflowRunsResult(runs=[self._wf_run_wire(r) for r in rows])
+
+    # 语音转文字（speech.transcribe）：模型加载+推理全在 worker 线程，循环不停摆
+    async def _speech_transcribe_handler(self, params: dict[str, Any]) -> SpeechTranscribeResult:
+        cmd = SpeechTranscribeCommand.model_validate(params)
+        assert self._speech is not None
+        try:
+            # to_thread 的动机：base 模型 int8 推理一段语音要数秒~十几秒，压在主
+            # 循环上会卡死同期所有审批卡/心跳/广播——线程可以牺牲，循环是大家的
+            text = await asyncio.to_thread(
+                self._speech.transcribe_sync, cmd.audio_b64, cmd.sample_rate
+            )
+        except (ValueError, RuntimeError) as e:
+            return SpeechTranscribeResult(ok=False, error=str(e))
+        return SpeechTranscribeResult(ok=True, text=text)
 
     # 引擎 launch 回调：懒建本 run 共享的 one_shot 会话与 SpawnAgentTool，后台启动节点子 Agent
     async def _workflow_launch(self, ctx: NodeLaunchCtx) -> tuple[str, str]:
@@ -899,7 +1034,14 @@ class CoreApp:
         try:
             await task
         except asyncio.CancelledError:
-            return False, "子 Agent 被取消"
+            # 【学习要点】分辨这个 CancelledError 是谁的（subagent/tool.py 批量
+            # await 同款契约）：子 task 自己被 registry.cancel 杀掉且没人冲本协程
+            # 来 → 收口成失败结果；冲本协程（引擎取消传导）来的必须原样上抛，
+            # 否则 workflow.cancel 会被吸收成"节点执行失败"而非 cancelled 终态
+            cur = asyncio.current_task()
+            if task.cancelled() and (cur is None or cur.cancelling() == 0):
+                return False, "子 Agent 被取消"
+            raise
         except Exception as e:
             return False, f"{type(e).__name__}: {e}"
         if context.status == "success":
@@ -2049,6 +2191,17 @@ class CoreApp:
         # 放在 server.start() 前：客户端一连上就能 schedule.list 到完整任务表
         await self._scheduler.start()
 
+        # ===== PR 自动评审轮询（④ opt-in）=====
+        # 默认关=零 token 消耗、零网络周期请求；显式打开 config 才算授权后台起会话。
+        # 任务句柄存 self，关停路径里 cancel——不接受"起了就停不掉"的后台进程
+        if self._config.github.auto_review:
+            self._pr_poller_task = asyncio.create_task(self._pr_review_poller())
+            logger.info(
+                "pr 自动评审已启用：间隔 %d 分钟，仓库目录 %s",
+                self._config.github.auto_review_interval_min,
+                self._config.github.auto_review_cwd or os.getcwd(),
+            )
+
         # ===== 初始化 SSH 连接库（M4a）=====
         # 存储路径 ~/.iwan/ssh/connections.json 由 store 自己锚定；构造不读盘，
         # 首个 ssh.conn_list 才懒载入——目录不存在不该在启动期制造任何噪音
@@ -2084,7 +2237,15 @@ class CoreApp:
             await_child=self._workflow_await,
             on_node=self._workflow_on_node,
             on_run_finished=self._workflow_on_finished,
+            # 取消传导第五线：引擎 task 被 cancel 只解开 await，注册表里的子
+            # Agent 是独立 task——不显式击杀就白烧 LLM 到自然终
+            cancel_child=self._subagent_registry.cancel,
         )
+
+        # ===== 初始化语音转写（V1）=====
+        # 构造零成本（不 import faster-whisper、不碰模型文件），放在装配区只是
+        # 让"daemon 具备哪些能力"在一处列全；真正的重活首次 RPC 才发生
+        self._speech = SpeechTranscriber()
 
         # ===== 创建 Socket 服务器 =====
         # SocketServer 是基于 TCP Socket 的 RPC 服务端
@@ -2127,6 +2288,7 @@ class CoreApp:
         server.register("pr.context", self._pr_context_handler)
         server.register("pr.list", self._pr_list_handler)
         server.register("pr.create", self._pr_create_handler)
+        server.register("pr.review", self._pr_review_handler)
         server.register("schedule.list", self._schedule_list_handler)
         server.register("schedule.create", self._schedule_create_handler)
         server.register("schedule.update", self._schedule_update_handler)
@@ -2161,7 +2323,9 @@ class CoreApp:
         server.register("workflow.save", self._workflow_save_handler)
         server.register("workflow.delete", self._workflow_delete_handler)
         server.register("workflow.run", self._workflow_run_handler)
+        server.register("workflow.cancel", self._workflow_cancel_handler)
         server.register("workflow.runs", self._workflow_runs_handler)
+        server.register("speech.transcribe", self._speech_transcribe_handler)
 
         # ===== 启动服务器 =====
         # start() 方法会启动 TCP 监听并返回绑定的地址
@@ -2214,6 +2378,11 @@ class CoreApp:
         # 先停调度器：避免关停半途还有任务被触发、抓着半拆好的子系统不放
         if self._scheduler is not None:
             await self._scheduler.stop()
+
+        # 再掐 PR 轮询：它和调度器同属"会自己起会话的手"，必须在子系统开拆前断源
+        if self._pr_poller_task is not None:
+            self._pr_poller_task.cancel()
+            self._pr_poller_task = None
 
         # 停工作流引擎：cancel 活跃 run 协程并等收口（_execute 里各自标
         # interrupted）；放在 registry.shutdown 前——run 协程还在 await 子任务，

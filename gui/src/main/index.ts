@@ -25,7 +25,10 @@ function createWindow(): void {
       preload: path.join(__dirname, '../preload/index.js'),
       nodeIntegration: false,
       contextIsolation: true,
-      sandbox: false
+      sandbox: false,
+      // devtest 截图链专供：窗口不在前台时 Chromium 会节流渲染，
+      // capturePage 拿到的可能是冻结的旧合成帧；生产窗口保持默认节流
+      backgroundThrottling: !process.env.IWAN_GUI_TEST_UI
     }
   })
 
@@ -108,6 +111,10 @@ function createWindow(): void {
           // 注入成功后定时抓页面：capturePage 走合成器，不受遮挡/焦点影响
           const snap = (n: number): void => {
             setTimeout(() => {
+              // 实测：窗口被最小化时合成器停摆，capturePage 连拍都是旧帧
+              // （UI=11 补拍链 cap-42 吃教训）。抓前一拍 showInactive 拉活
+              // 渲染管线——不抢焦点，不打扰用户
+              if (win && !win.isDestroyed()) win.showInactive()
               void win?.webContents
                 .capturePage()
                 .then((img) =>
@@ -225,25 +232,25 @@ function createWindow(): void {
             })()`, 90)
             snap(93)
             js('chip-perm-open', `(() => {
-              const chip = [...document.querySelectorAll('.chip')].find((c) => /默认|接受编辑|规划|自动|全部放行/.test(c.textContent || ''))
+              const chip = [...document.querySelectorAll('.chip')].find((c) => /谨慎|顺滑|全自动|高级·|默认|接受编辑|规划|自动/.test(c.textContent || ''))
               if (!chip) return 'no-perm-chip'
               chip.click(); return 'pop-open'
             })()`, 96)
             snap(98) // 弹层应【向上翻】可见（上一轮漏拍：96 开 101 关，中间只隔 5s 但截图滞后；补 97 紧贴）
             snap(97)
             js('chip-perm-switch', `(() => {
-              const it = [...document.querySelectorAll('.popover .menu-item')].find((x) => x.textContent.includes('接受编辑'))
+              const it = [...document.querySelectorAll('.popover .menu-item')].find((x) => x.textContent.includes('顺滑'))
               if (!it) return 'no-item-visible'
               it.click(); return 'switched-acceptEdits'
             })()`, 101)
             snap(104)
             js('chip-perm-back', `(() => {
-              const chip = [...document.querySelectorAll('.chip')].find((c) => /接受编辑/.test(c.textContent || ''))
+              const chip = [...document.querySelectorAll('.chip')].find((c) => /顺滑/.test(c.textContent || ''))
               if (!chip) return 'chip-not-acceptEdits'
               chip.click(); return 'reopened'
             })()`, 107)
             js('chip-default-back', `(() => {
-              const it = [...document.querySelectorAll('.popover .menu-item')].find((x) => (x.textContent || '').startsWith('默认'))
+              const it = [...document.querySelectorAll('.popover .menu-item')].find((x) => (x.textContent || '').startsWith('谨慎'))
               if (!it) return 'no-default-item'
               it.click(); return 'back-to-default'
             })()`, 110)
@@ -684,6 +691,389 @@ function createWindow(): void {
               b.click(); return 'chat-view'
             })()`, 138)
             snap(140)
+          } else if (uiMode === '8') {
+            // ===== v2 零段链路：语音输入（麦克风按钮存在→拒权报错→
+            // speech.transcribe RPC 真往返→无声流假麦克风→全程零人声段→
+            // 停止时走"没听清"分支且一个字都不进输入框）。物理麦克风在
+            // devtest 机不可用，用 getUserMedia 桩造"MediaStreamDestination 无声流"；
+            // v2 的零段路径根本不发 RPC（V1 要等真模型跑完无声流才回话，这里
+            // 秒级收敛）——断言点是 err=没听清 + inputLen=0 + 回 idle =====
+            js('mic-found', `(() => {
+              const b = [...document.querySelectorAll('.toolbar .chip')].find((x) => (x.title || '').startsWith('语音输入'))
+              return 'micBtn=' + !!b
+            })()`, 16)
+            js('stub-deny', `(() => {
+              navigator.mediaDevices.getUserMedia = () => Promise.reject(new Error('devtest：无麦克风'))
+              return 'stubbed-deny'
+            })()`, 17)
+            js('click-mic-deny', `(() => {
+              const b = [...document.querySelectorAll('.toolbar .chip')].find((x) => (x.title || '').startsWith('语音输入'))
+              if (!b) return 'no-mic-btn'
+              b.click(); return 'deny-clicked'
+            })()`, 18)
+            js('deny-echo', `(() => 'err=' + (document.querySelector('.voice-err')?.textContent || 'NONE').slice(0, 40))()`, 20)
+            js('rpc-probe', `(async () => {
+              const r = await window.iwan.request('speech.transcribe', { audio_b64: '', sample_rate: 16000 })
+              return 'probe=' + (r.ok ? JSON.stringify(r.result).slice(0, 80) : 'rpcerr:' + r.error)
+            })()`, 22)
+            js('stub-silent', `(() => {
+              navigator.mediaDevices.getUserMedia = async () => {
+                const c = new AudioContext()
+                const d = c.createMediaStreamDestination()
+                const o = c.createOscillator()
+                const g = c.createGain()
+                g.gain.value = 0
+                o.connect(g); g.connect(d); o.start()
+                return d.stream
+              }
+              return 'stubbed-silent'
+            })()`, 24)
+            js('click-mic-rec', `(() => {
+              const b = [...document.querySelectorAll('.toolbar .chip')].find((x) => (x.title || '').startsWith('语音输入'))
+              if (!b) return 'no-mic-btn'
+              b.click(); return 'rec-clicked'
+            })()`, 25)
+            js('rec-state', `(() => 'rec=' + !!document.querySelector('.mic-rec') + ' segbar=' + !!document.querySelector('.voice-seg'))()`, 27)
+            snap(28)
+            js('click-mic-stop', `(() => {
+              const b = [...document.querySelectorAll('.toolbar .chip')].find((x) => (x.title || '').startsWith('停止聆听'))
+              if (!b) return 'no-stop-btn'
+              b.click(); return 'stop-clicked'
+            })()`, 29)
+            js('zero-final', `(() => {
+              const idle = [...document.querySelectorAll('.toolbar .chip')].some((x) => (x.title || '').startsWith('语音输入'))
+              const typed = document.querySelector('.input')?.value || ''
+              return 'FINAL idle=' + idle + ' inputLen=' + typed.length + ' err=' + (document.querySelector('.voice-err')?.textContent || '').slice(0, 70)
+            })()`, 33)
+            js('restore-media', `(() => { delete navigator.mediaDevices.getUserMedia; return 'restored' })()`, 34)
+            snap(36)
+          } else if (uiMode === '9') {
+            // ===== v2 断句链路：假麦克风喂"AM 方波"——4 个 0.5s 有声窗 + 1s 间隔，
+            // 能量 VAD 应切成多段；每段走真 speech.transcribe。whisper 自带 VAD
+            // filter 很可能把纯音判非人声（text 空、静默丢弃）——这没关系：
+            // 判活锚点是 .voice-seg 的"已断 N 段"(N≥1，证 VAD+入队) + 停止后
+            // err 保持空（若 RPC 抛错或 daemon 回 ok:false，voiceErr 必有字；
+            // 空=每段都完成了一次真往返）。inputLen 有字算彩蛋，不硬断言。
+            // snap 留中段/终态各一张（README 画廊语音素材）=====
+            js('mic-found', `(() => {
+              const b = [...document.querySelectorAll('.toolbar .chip')].find((x) => (x.title || '').startsWith('语音输入'))
+              return 'micBtn=' + !!b
+            })()`, 16)
+            js('stub-am', `(() => {
+              navigator.mediaDevices.getUserMedia = async () => {
+                const c = new AudioContext()
+                const d = c.createMediaStreamDestination()
+                const o = c.createOscillator()
+                o.type = 'square'; o.frequency.value = 220
+                const g = c.createGain()
+                g.gain.value = 0
+                o.connect(g); g.connect(d); o.start()
+                // 有声窗 [0,0.5]s [1.5,2.0]s [3.0,3.5]s [4.5,5.0]s（自开听起算）：
+                // 0.5s 有声过 voiced≥350ms 闸，1s 静音过 tail≥650ms 闸 → 每窗切一段
+                const t0 = c.currentTime + 0.1
+                for (let k = 0; k < 4; k++) {
+                  g.gain.setValueAtTime(0.35, t0 + k * 1.5)
+                  g.gain.setValueAtTime(0, t0 + k * 1.5 + 0.5)
+                }
+                return d.stream
+              }
+              return 'stubbed-am'
+            })()`, 18)
+            // 开听点击放 26s：UI=8 实测 dev 冷启动要到 ~25s 才渲染出工具条，
+            // 更早点击会拿 no-mic-btn 整链空转
+            js('click-mic-rec', `(() => {
+              const b = [...document.querySelectorAll('.toolbar .chip')].find((x) => (x.title || '').startsWith('语音输入'))
+              if (!b) return 'no-mic-btn'
+              b.click(); return 'rec-clicked'
+            })()`, 26)
+            js('rec-state', `(() => 'rec=' + !!document.querySelector('.mic-rec') + ' segbar=' + !!document.querySelector('.voice-seg'))()`, 28)
+            // 首段约开听后 1.2s 断出 + 转写（tiny 已缓存，含模型载入给足富余）
+            js('seg-check-1', `(() => {
+              const seg = (document.querySelector('.voice-seg')?.textContent || 'NONE').slice(0, 30)
+              const typed = document.querySelector('.input')?.value || ''
+              return 'seg1=' + seg + ' inputLen=' + typed.length
+            })()`, 40)
+            snap(41)
+            js('seg-check-2', `(() => {
+              const seg = (document.querySelector('.voice-seg')?.textContent || 'NONE').slice(0, 30)
+              const typed = document.querySelector('.input')?.value || ''
+              return 'seg2=' + seg + ' inputLen=' + typed.length
+            })()`, 50)
+            js('click-mic-stop', `(() => {
+              const b = [...document.querySelectorAll('.toolbar .chip')].find((x) => (x.title || '').startsWith('停止聆听'))
+              if (!b) return 'no-stop-btn'
+              b.click(); return 'stop-clicked'
+            })()`, 52)
+            js('am-final', `(() => {
+              const idle = [...document.querySelectorAll('.toolbar .chip')].some((x) => (x.title || '').startsWith('语音输入'))
+              const typed = document.querySelector('.input')?.value || ''
+              const err = (document.querySelector('.voice-err')?.textContent || '').slice(0, 60)
+              return 'FINAL idle=' + idle + ' inputLen=' + typed.length + ' err=' + err
+            })()`, 60)
+            snap(62)
+            js('restore-media', `(() => { delete navigator.mediaDevices.getUserMedia; return 'restored' })()`, 64)
+          } else if (uiMode === '10') {
+            // ===== 工作流中途取消链：RPC 建流 → 详情运行 → 点「取消」→ 断节点
+            // 「已取消」/历史行 chip 转「取消」/运行按钮复位/取消 chip 消失；
+            // 再直发第二次 cancel 验幂等拒绝（"没有进行中的运行"）且零副作用。
+            // 节点 prompt 让子 Agent 去 WebFetch 不存在域名：该工具形态大概率
+            // 触审批卡 → 子 Agent 挂在待审批上，天然造出 ≥10s 的 running 窗口
+            // （快模型秒答会把窗口缩到点不着）；取消卡住的运行也正是真实用户场景。
+            // 诚实断言：若没挂住而是秒完/秒败，cancelled-state 打出 still-running
+            // 或节点回声 ok/fail——那是竞速输了不是链路断了，目测甄别。
+            // 【纪律】窗口点击一律放 ≥18s 且导航/开详情合成单步内 sleep（改过
+            // renderer 文件后首跑 dev 冷渲染可达 ~25s；同帧查不到 React 重渲染）=====
+            js('create-wf', `(async () => {
+              const r = await window.iwan.request('workflow.save', { id: '', name: '取消验证流', description: '', tasks: [{ name: '慢节点', prompt: '请用 web fetch 抓取 http://iwan-devtest-cancel.invalid 并总结首页内容', depends_on: [] }] })
+              if (r.ok && r.result?.ok) { window.__wfId = r.result.id || ''; return 'wf=' + window.__wfId }
+              return 'wf-ERR:' + String(r.error || r.result?.error || JSON.stringify(r).slice(0, 120))
+            })()`, 14)
+            js('open-detail', `(async () => {
+              const nav = [...document.querySelectorAll('.nav-row')].find((x) => (x.textContent || '').trim() === '工作流')
+              if (!nav) return 'no-nav'
+              nav.click()
+              await new Promise((r) => setTimeout(r, 600))
+              const c = [...document.querySelectorAll('.wf-card')].find((x) => (x.textContent || '').includes('取消验证流'))
+              if (!c) return 'no-card'
+              c.click()
+              await new Promise((r) => setTimeout(r, 400))
+              return 'detail=' + !!document.querySelector('.wf-run-btn')
+            })()`, 18)
+            js('click-run', `(() => {
+              const b = document.querySelector('.wf-run-btn')
+              if (!b) return 'no-run-btn'
+              if (b.disabled) return 'run-disabled'
+              b.click(); return 'run-clicked'
+            })()`, 24)
+            // 取消 chip 唯一出现条件 = runningHere；chip 在 + 节点 running 上色，
+            // 证明 store 事件管道与按钮态联动都活着（点 cancel 前的现场快照）
+            js('cancel-chip-shown', `(() => !![...document.querySelectorAll('.fn-head .chip')].find((x) => (x.textContent || '').includes('取消')))()`, 28)
+            js('node-running?', `(() => document.querySelector('.wf-node-running .wf-node-state')?.textContent || 'not-running')()`, 29)
+            snap(30)
+            js('click-cancel', `(() => {
+              const b = [...document.querySelectorAll('.fn-head .chip')].find((x) => (x.textContent || '').includes('取消'))
+              if (!b) return 'NO-CANCEL-CHIP'
+              b.click(); return 'cancel-clicked'
+            })()`, 31)
+            // cancel_run 坐等到账才回包：ok 到手时 cancelled 事件必已广播；
+            // cancel() 里的 refreshWfRuns 再把历史行拉成权威终态——6s 富余全给网络
+            js('cancelled-state', `(() => {
+              const el = document.querySelector('.wf-node-cancelled .wf-node-state')
+              return 'node=' + (el ? el.textContent : 'still-running')
+            })()`, 37)
+            js('row-tag', `(() => document.querySelector('.wf-run-row .fn-tag')?.textContent || 'NOROW')()`, 38)
+            js('reset-state', `(() => {
+              const run = document.querySelector('.wf-run-btn')
+              const cancel = [...document.querySelectorAll('.fn-head .chip')].find((x) => (x.textContent || '').includes('取消'))
+              return 'runBtn=' + (run ? (run.disabled ? 'disabled' : 'enabled') : 'none') + ' cancelChip=' + (cancel ? 'shown' : 'gone')
+            })()`, 39)
+            snap(40)
+            // 幂等拒绝走直发 RPC（chip 已消失，点击路径触达不了"无事可做的取消"）：
+            // 业务拒绝在 result.ok=false 信封里（不是 JSON-RPC error），文案必含
+            // "进行中的运行"；随后节点态不回退、历史行数不新增——拒绝是纯读
+            js('ghost-cancel', `(async () => {
+              if (!window.__wfId) return 'no-wf-id'
+              const r = await window.iwan.request('workflow.cancel', { id: window.__wfId })
+              if (!r.ok) return 'rpcerr:' + r.error
+              return r.result?.ok ? 'UNEXPECTED-OK' : 'ghost=' + String(r.result?.error || '')
+            })()`, 43)
+            js('ghost-harmless', `(() => {
+              const el = document.querySelector('.wf-node-cancelled .wf-node-state')
+              return 'node=' + (el ? el.textContent : 'changed!') + ' rows=' + document.querySelectorAll('.wf-run-row').length
+            })()`, 44)
+            snap(45)
+            // 清理现场：删除验证流（devtest 纪律=来过就要擦干净；运行历史按
+            // 既定语义留在 daemon 的 runs 文件里，列表不再打扰用户）
+            js('cleanup-wf', `(async () => {
+              if (!window.__wfId) return 'nothing-to-delete'
+              const r = await window.iwan.request('workflow.delete', { id: window.__wfId })
+              return 'deleted=' + (r.ok && r.result?.ok ? 'ok' : String(r.error || r.result?.error || '?'))
+            })()`, 47)
+            js('final-state', `(async () => {
+              const r = await window.iwan.request('workflow.list', {})
+              const left = (r.result?.workflows || []).filter((w) => (w.name || '') === '取消验证流').length
+              return 'FINAL residue=' + left
+            })()`, 50)
+          } else if (uiMode === '11') {
+            // ===== 画廊补拍链：Git / 定时任务 两视图各一张干净实况帧。
+            // 零动作零写入——只导航只截图，用用户真实 cwd 的真实状态；
+            // PR 帧由 UI=13 顺路产出，工作流/主界面/MCP/SSH 已有存帧 =====
+            js('nav-git', `(() => {
+              const b = [...document.querySelectorAll('.nav-row')].find((x) => (x.textContent || '').trim() === 'Git')
+              if (!b) return 'no-nav'
+              b.click(); return 'git-view'
+            })()`, 16)
+            js('git-shown', `(() => 'title=' + (document.querySelector('.fn-title')?.textContent || ''))()`, 24)
+            snap(26) // Git 面板实况帧
+            js('nav-cron', `(() => {
+              const b = [...document.querySelectorAll('.nav-row')].find((x) => (x.textContent || '').includes('定时任务'))
+              if (!b) return 'no-nav'
+              b.click(); return 'cron-view'
+            })()`, 32)
+            // capturePage 实测会返回合成器旧帧（窗口被遮挡时重绘节流）：
+            // 空列表帧"看不出变化"就截不到新态——点开新建表单制造大面积重绘，
+            // 顺带素材也从"0 行空态"升级成"表单实况"（比空态更有产品信息量）
+            js('open-cron-form', `(() => {
+              const b = [...document.querySelectorAll('.fn-head .chip')].find((x) => (x.textContent || '').includes('新建任务'))
+              if (!b) return 'no-new-btn'
+              b.click(); return 'form-open'
+            })()`, 37)
+            js('cron-shown', `(() => 'title=' + (document.querySelector('.fn-title')?.textContent || '') + ' rows=' + document.querySelectorAll('.fn-card-task').length)()`, 40)
+            snap(42) // 定时任务面板帧（含新建表单）
+            js('close-form', `(() => { window.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape'})); return 'closed' })()`, 45)
+            js('final-11', `(() => 'FINAL gallery-recap done')()`, 48)
+          } else if (uiMode === '12') {
+            // ===== ⑤ 权限三档链：下拉结构 → 拒绝路径（confirm=false 仍谨慎）
+            // → 放行路径（confirm=true 升全自动）→ 高级·规划 → 复位谨慎。
+            // confirm 必须打桩（原生模态挂 executeJavaScript）；两态桩各测一发，
+            // 证明"升档要点头、不点不升"这条安全叙事是真的走通而不是文案装饰。
+            // 注意：全自动→规划→谨慎的降级路径不弹确认（只有升 bypass 才弹）=====
+            js('stub-deny-open', `(async () => {
+              window.confirm = () => false
+              // 新建并用它做实验台：daemon 重启后持久化会话不进内存注册表，
+              // set_permission_mode 对历史会话回 not found（既成事实模型），
+              // devtest 因此不赌侧栏第一行是谁——自产自销一条干净会话
+              const cr = await window.iwan.request('session.create', { mode: 'chat', title: '⑫档位验证' })
+              if (!cr.ok) return 'create-ERR:' + cr.error
+              window.__permSid = cr.result?.session?.id || cr.result?.session_id || ''
+              if (!window.__permSid) return 'create-no-sid:' + JSON.stringify(cr.result).slice(0, 80)
+              await new Promise((r2) => setTimeout(r2, 400))
+              const row = [...document.querySelectorAll('.sess-row')].find((x) => (x.textContent || '').includes('⑫档位验证'))
+              if (!row) return 'no-fresh-row'
+              ;(row.querySelector('.sess-title') || row).click()
+              await new Promise((r2) => setTimeout(r2, 800))
+              const chip = [...document.querySelectorAll('.chip')].find((c) => /谨慎|顺滑|高级·|全自动|默认|接受编辑/.test(c.textContent || ''))
+              if (!chip) return 'no-perm-chip'
+              chip.click(); return 'pop-open sid=' + window.__permSid.slice(0, 12)
+            })()`, 14)
+            js('pop-structure', `(() => {
+              const items = [...document.querySelectorAll('.popover .menu-item')].map((x) => (x.textContent || '').slice(0, 6))
+              const sep = document.querySelectorAll('.popover .pop-sep').length
+              return 'items=' + items.join(',') + ' sep=' + sep
+            })()`, 16)
+            snap(17) // 三档 + 高级分隔线的完整下拉（画廊 ⑤ 素材）
+            js('click-bypass-denied', `(() => {
+              const it = [...document.querySelectorAll('.popover .menu-item')].find((x) => x.textContent.includes('全自动'))
+              if (!it) return 'no-bypass-item'
+              it.click(); return 'clicked-denied'
+            })()`, 20)
+            js('still-cautious', `(() => {
+              const chip = [...document.querySelectorAll('.chip')].find((c) => /谨慎|顺滑|全自动|高级·|默认|接受编辑/.test(c.textContent || ''))
+              return 'chip=' + (chip ? (chip.textContent || '').trim().slice(0, 6) : 'gone')
+            })()`, 23)
+            js('stub-allow-open', `(() => {
+              window.confirm = () => true
+              const chip = [...document.querySelectorAll('.chip')].find((c) => /谨慎|顺滑|全自动|高级·|默认|接受编辑/.test(c.textContent || ''))
+              chip?.click(); return 'reopened'
+            })()`, 26)
+            js('click-bypass-allowed', `(() => {
+              const it = [...document.querySelectorAll('.popover .menu-item')].find((x) => x.textContent.includes('全自动'))
+              if (!it) return 'no-bypass-item'
+              it.click(); return 'clicked-allowed'
+            })()`, 29)
+            js('chip-bypass', `(() => {
+              const chip = [...document.querySelectorAll('.chip')].find((c) => /全自动|谨慎|顺滑/.test(c.textContent || ''))
+              return 'chip=' + (chip ? (chip.textContent || '').trim().slice(0, 6) : 'gone')
+            })()`, 33)
+            js('probe-direct-rpc', `(async () => {
+              const st = window.__iwanStore.getState()
+              const sid = st.activeSid || ''
+              const before = st.sessionAttrs[sid]?.permissionMode
+              const r = await window.iwan.request('session.set_permission_mode', { session_id: sid, mode: 'bypassPermissions' })
+              await new Promise((x) => setTimeout(x, 600))
+              const after = window.__iwanStore.getState().sessionAttrs[sid]?.permissionMode
+              return 'probe sid=' + sid.slice(0, 14) + ' before=' + before + ' rpc=' + JSON.stringify(r).slice(0, 90) + ' after=' + after
+            })()`, 35)
+            snap(34) // 全自动档位的盾牌 chip
+            js('open-plan', `(() => {
+              const chip = [...document.querySelectorAll('.chip')].find((c) => /全自动|谨慎|顺滑|高级·/.test(c.textContent || ''))
+              chip?.click(); return 'opened'
+            })()`, 37)
+            js('click-plan', `(() => {
+              const it = [...document.querySelectorAll('.popover .menu-item')].find((x) => x.textContent.includes('高级·规划'))
+              if (!it) return 'no-plan-item'
+              it.click(); return 'plan-clicked'
+            })()`, 40)
+            js('chip-plan', `(() => {
+              const chip = [...document.querySelectorAll('.chip')].find((c) => /高级·|全自动|谨慎|顺滑/.test(c.textContent || ''))
+              return 'chip=' + (chip ? (chip.textContent || '').trim().slice(0, 8) : 'gone')
+            })()`, 44)
+            js('back-cautious-1', `(() => {
+              const chip = [...document.querySelectorAll('.chip')].find((c) => /高级·|全自动|谨慎|顺滑/.test(c.textContent || ''))
+              chip?.click(); return 'opened'
+            })()`, 47)
+            js('back-cautious-2', `(() => {
+              const it = [...document.querySelectorAll('.popover .menu-item')].find((x) => (x.textContent || '').startsWith('谨慎'))
+              if (!it) return 'no-cautious-item'
+              it.click(); return 'cautious-clicked'
+            })()`, 50)
+            js('final-12', `(async () => {
+              const chip = [...document.querySelectorAll('.chip')].find((c) => /谨慎|顺滑|全自动|高级·/.test(c.textContent || ''))
+              const label = chip ? (chip.textContent || '').trim().slice(0, 4) : 'gone'
+              // 来过就要擦干净：关掉实验会话（devtest 纪律）
+              let closed = 'n/a'
+              if (window.__permSid) {
+                const r = await window.iwan.request('session.close', { session_id: window.__permSid })
+                closed = r.ok ? 'ok' : String(r.error)
+              }
+              return 'FINAL chip=' + label + ' closed=' + closed
+            })()`, 54)
+          } else if (uiMode === '13') {
+            // ===== ④ PR 评审链：进 PR 视图 → 断言 .pr-review-btn 在场 → 点一发
+            // → 行内回显（成功=评审会话已开；失败=daemon 中文文案原样上屏）。
+            // 点击的是真仓库真 PR 的话会真起 one_shot 评审会话（用户已批准的
+            // 真实验证）；无令牌/无 PR 时链路打出诚实的拒绝态也算通过。
+            // window.open 陷阱：按钮在整行 onClick 内，React stopPropagation 已挡，
+            // 若外部浏览器被弹出说明拦截失效——目测甄别 =====
+            js('nav-pr', `(() => {
+              const b = [...document.querySelectorAll('.nav-row')].find((x) => (x.textContent || '').includes('Pull Request'))
+              if (!b) return 'no-nav'
+              b.click(); return 'pr-view'
+            })()`, 14)
+            // open 态常空（本仓库当下无进行中 PR）→ 列表短、重绘小，capturePage
+            // 会拿到旧帧；切"全部"态既制造重绘又大概率出真 PR 行（评审按钮素材）
+            js('state-all', `(() => {
+              const b = [...document.querySelectorAll('.fn-toolbar .chip')].find((x) => (x.textContent || '').includes('全部'))
+              if (!b) return 'no-all-chip'
+              b.click(); return 'all-state'
+            })()`, 19)
+            js('pr-state', `(() => {
+              const btns = document.querySelectorAll('.pr-review-btn').length
+              const err = document.querySelector('.fn-err')?.textContent || ''
+              return 'btns=' + btns + ' err=' + err.slice(0, 40)
+            })()`, 25)
+            snap(27) // PR 面板实况帧（画廊 PR 素材：列表 + 评审按钮）
+            js('click-review', `(() => {
+              const b = document.querySelector('.pr-review-btn')
+              if (!b) return 'no-review-btn'
+              if (b.disabled) return 'review-disabled'
+              window.__clickedReal = true
+              b.click(); return 'review-clicked'
+            })()`, 31)
+            // 空态（连 closed/merged 都没有=按钮不存在）时兜底直发不存在的 PR 号，
+            // 验 pr.review 全链（注册→坐标→GitHub 404→中文拒绝文案上信封）
+            js('ghost-review-rpc', `(async () => {
+              if (window.__clickedReal) return 'skipped-real-clicked'
+              const r = await window.iwan.request('pr.review', { cwd: '', pr_number: 99999999 })
+              if (!r.ok) return 'rpcerr:' + r.error
+              return 'ghost ok=' + r.result?.ok + ' err=' + String(r.result?.error || '').slice(0, 60)
+            })()`, 34)
+            js('review-echo', `(() => {
+              const ok = [...document.querySelectorAll('.fn-ok')].map((x) => (x.textContent || '').slice(0, 30))
+              const bad = [...document.querySelectorAll('.fn-err')].map((x) => (x.textContent || '').slice(0, 40))
+              return 'ok=' + ok.join('|') + ' err=' + bad.join('|')
+            })()`, 38)
+            snap(39)
+            js('final-13', `(async () => {
+              const st = window.__iwanStore.getState()
+              const sess = st.sessions.filter((s) => (s.title || '').includes('评审·PR#'))
+              let closed = 'n/a'
+              if (sess.length) {
+                const r = await window.iwan.request('session.close', { session_id: sess[0].id })
+                closed = r.ok ? 'ok' : String(r.error)
+              }
+              return 'FINAL review-sessions=' + sess.length + ' closed=' + closed
+            })()`, 44)
           } else {
             js('open-history', `(() => {
               const rows = document.querySelectorAll('.sess-row')

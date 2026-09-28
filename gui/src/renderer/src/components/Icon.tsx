@@ -93,6 +93,12 @@ const PATHS: Record<string, React.ReactNode> = {
   ),
   check: <path d="M5 12.5l4.5 4.5L19 7.5" />,
   send: <path d="M12 19.5V5M6 11l6-6 6 6" />,
+  mic: (
+    <>
+      <path d="M12 2.6a2.9 2.9 0 0 1 2.9 2.9v5a2.9 2.9 0 0 1-5.8 0v-5A2.9 2.9 0 0 1 12 2.6z" />
+      <path d="M5 10.6a7 7 0 0 0 14 0M12 17.6V21M8.5 21h7" />
+    </>
+  ),
   refresh: (
     <>
       <path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3" />

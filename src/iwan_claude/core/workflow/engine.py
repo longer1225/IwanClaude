@@ -10,12 +10,15 @@
    RuntimeError，同层兄弟结果虽已进它的局部 results 却随异常蒸发。
    所以每个节点的终态都在 handler 内当场写穿 store（record_node）——
    异常炸掉的是调度循环，不是记账。
-3. 四个协作者全是注入的回调（launch/await_child/on_node/on_run_finished）：
-   引擎本体不知道 subagent、总线、会话的存在，单测给四个 fake 就能把
-   全部时序断言跑完，零 LLM 零网络。app.py 负责把真实现拧上。
-4. CancelledError 单独收口：daemon 停机 cancel 活跃 run 时先 finish_run
+3. 五个协作者全是注入的回调（launch/await_child/cancel_child/on_node/
+   on_run_finished）：引擎本体不知道 subagent、总线、会话的存在，单测给
+   fake 回调就能把全部时序断言跑完，零 LLM 零网络。app.py 负责把真实现拧上。
+   cancel_child 有默认 no-op——旧四参构造调用照跑不误（停机路径不需要它）。
+4. CancelledError 分两种死法收口：daemon 停机（无用户标记）先 finish_run
    ("interrupted") 再 re-raise——记账必须完成，广播则不保证（事件循环正在
-   解散，订阅端靠 workflow.get 对账补画）。re-raise 是给 gather 的礼貌。
+   解散，订阅端靠 workflow.get 对账补画）；用户经 cancel_run 主动取消（打
+   _cancelling 标记）走 cancelled 终态且广播照常 awaited 送达。re-raise 是
+   给 gather 的礼貌，两种死法都要。
 """
 from __future__ import annotations
 
@@ -60,9 +63,9 @@ class NodeLaunchCtx:
 @dataclass(frozen=True)
 class NodeTransition:
     """
-    on_node 回调的载荷：一个节点进入 running/ok/fail 的事实快照
+    on_node 回调的载荷：一个节点进入 running/ok/fail/cancelled 的事实快照
 
-    - status: str - "running" | "ok" | "fail"
+    - status: str - "running" | "ok" | "fail" | "cancelled"（取消收口的补标）
     - detail: str - 失败摘要（仅 fail 非空）
     """
     run_id: str
@@ -89,6 +92,10 @@ class RunTransition:
 LaunchFn = Callable[[NodeLaunchCtx], Awaitable[tuple[str, str]]]
 # 等一个子 Agent 收尾：async (child_run_id) -> (是否成功, 产出全文或失败原因)
 AwaitFn = Callable[[str], Awaitable[tuple[bool, str]]]
+# 杀一个子 Agent 后台 task：(child_run_id) -> 是否真杀到（已完成/不存在=False）。
+# 引擎 task 被 cancel 只是解开了 await——子 Agent 是注册表里的独立 task，
+# 不显式击杀就白烧 LLM 到自然终；取消语义要求"同层兄弟全停"，全靠这根线
+CancelChildFn = Callable[[str], bool]
 # 节点状态广播 / 运行收尾广播（app.py 拧上总线发布 + 定义行 touch）
 OnNodeCb = Callable[[NodeTransition], Awaitable[None]]
 OnRunFinishedCb = Callable[[RunTransition], Awaitable[None]]
@@ -111,6 +118,7 @@ class WorkflowEngine:
         on_run_finished: OnRunFinishedCb,
         max_concurrency: int = 3,
         max_parallel_runs: int = 2,
+        cancel_child: CancelChildFn | None = None,
     ) -> None:
         self._store = store
         self._launch = launch
@@ -119,8 +127,16 @@ class WorkflowEngine:
         self._on_run_finished = on_run_finished
         self._max_concurrency = max_concurrency
         self._max_parallel_runs = max_parallel_runs
+        # 默认 no-op：cancel_child 未接线时取消只停引擎层（单测/旧调用不破）
+        self._cancel_child: CancelChildFn = cancel_child if cancel_child is not None else (
+            lambda _child: False
+        )
         # run_id -> (workflow_id, 执行协程)；协程未收尾前条目一直在=活跃判据
         self._active: dict[str, tuple[str, asyncio.Task[None]]] = {}
+        # 用户取消标记：_execute 的 CancelledError 分支据此分叉 cancelled/interrupted
+        self._cancelling: set[str] = set()
+        # run_id -> 该运行已 launch 的子 Agent child_run_id 集（取消时逐个击杀）
+        self._children: dict[str, set[str]] = {}
 
     # 某工作流是否已有进行中的 run；有则返回其 run_id，否则空串
     def active_run_for(self, wf_id: str) -> str:
@@ -164,6 +180,28 @@ class WorkflowEngine:
             if row is not None and row.get("status") == "running":
                 self._store.finish_run(rid, "interrupted", "运行被取消")
 
+    # 用户取消一次运行（workflow.cancel 的落点）：杀子 → cancel task → 坐等到账。
+    # 返回空串=已取消；非空=拒绝文案（无活跃 run 时 handler 层已挡，这里兜并发竞速）
+    async def cancel_run(self, run_id: str) -> str:
+        entry = self._active.get(run_id)
+        if entry is None:
+            return "该运行已结束或不存在，无需取消"
+        # 先打标记再扣扳机：_execute 的 CancelledError 分支读它分叉 cancelled
+        self._cancelling.add(run_id)
+        for child in list(self._children.get(run_id, ())):
+            self._cancel_child(child)
+        _, task = entry
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        # 同款尾扫（shutdown 形状）：task 从未获调度时 except 分支没机会跑，
+        # gather 之后按行状态补一次 cancelled 终局——状态守卫让双记账免疫
+        row = self._store.get_run(run_id)
+        if row is not None and row.get("status") == "running":
+            await self._finish_cancelled(run_id, str(row.get("workflow_id") or ""))
+        self._cancelling.discard(run_id)
+        self._children.pop(run_id, None)
+        return ""
+
     # 单次运行主体：构图 → 存量 executor 分层跑 → 三种终态各收尾一次
     async def _execute(self, run_id: str, wf_id: str) -> None:
         try:
@@ -183,9 +221,14 @@ class WorkflowEngine:
             await executor.execute(wf, self._make_handler(run_id, wf_id))
             await self._finish(run_id, "success", "")
         except asyncio.CancelledError:
-            # 停机/取消：账必须落地（同步写穿），广播不补——事件循环正在解散
-            self._store.finish_run(run_id, "interrupted", "运行被取消")
-            self._active.pop(run_id, None)
+            if run_id in self._cancelling:
+                # 用户取消：循环还活着，终局+节点上色+广播全部 awaited 送达，
+                # GUI 不必等 workflow.get 对账补画
+                await self._finish_cancelled(run_id, wf_id)
+            else:
+                # 停机：账必须落地（同步写穿），广播不补——事件循环正在解散
+                self._store.finish_run(run_id, "interrupted", "运行被取消")
+                self._active.pop(run_id, None)
             raise
         except Exception as e:
             # executor 的 fail-fast（RuntimeError）与一切意外都从这收口
@@ -193,6 +236,7 @@ class WorkflowEngine:
 
     # 终局收尾：finish_run 落账 → on_run_finished 广播 → 摘活跃登记（幂等保护）
     async def _finish(self, run_id: str, status: str, error: str) -> None:
+        self._children.pop(run_id, None)
         row = self._store.finish_run(run_id, status, error)
         self._active.pop(run_id, None)
         if row is None:
@@ -209,6 +253,37 @@ class WorkflowEngine:
             session_id=str(row.get("session_id") or ""),
             status=status,
             error=error,
+            finished_at=str(row.get("finished_at") or ""),
+        ))
+
+    # 取消收口（except 分支与尾扫共用，行状态守卫保证恰好一次）：run 落
+    # cancelled、running 节点补终态（pending 保持 pending——"没轮到"不该被
+    # 伪造成"被取消"）、node 先 finished 后逐个 awaited 广播（store 守卫时序）
+    async def _finish_cancelled(self, run_id: str, wf_id: str) -> None:
+        row = self._store.finish_run(run_id, "cancelled", "用户取消")
+        self._active.pop(run_id, None)
+        if row is None:
+            return
+        for name in list(row.get("nodes", {}).keys()):
+            nd = row["nodes"][name]
+            if nd.get("status") != "running":
+                continue
+            self._store.record_node(run_id, name, {
+                "status": "cancelled", "finished_at": _iso(datetime.now()),
+            })
+            await self._safe_emit_node(
+                run_id, wf_id, name, "cancelled", str(nd.get("child_run_id") or ""), "用户取消",
+            )
+        fresh = self._store.get_run(run_id)
+        if fresh is not None:
+            row["session_id"] = str(fresh.get("session_id") or "")
+        await self._safe_emit(self._on_run_finished, RunTransition(
+            run_id=run_id,
+            workflow_id=str(row.get("workflow_id") or wf_id),
+            workflow_name=str(row.get("workflow_name") or ""),
+            session_id=str(row.get("session_id") or ""),
+            status="cancelled",
+            error="用户取消",
             finished_at=str(row.get("finished_at") or ""),
         ))
 
@@ -237,7 +312,15 @@ class WorkflowEngine:
                 raise RuntimeError(f"节点「{task.name}」启动失败：{err}")
             # child_run_id 当场补记：哪怕子 Agent 挂到超时，历史行里也有深链可查
             self._store.record_node(run_id, task.name, {"child_run_id": child})
+            # 登记为可击杀的孩子；补刀检查焊死竞速窗——launch 期间用户点了
+            # 取消，cancel_run 迭代 _children 时这个孩子还没出生，漏杀就白烧 LLM
+            self._children.setdefault(run_id, set()).add(child)
+            if run_id in self._cancelling:
+                self._cancel_child(child)
             ok, text = await self._await_child(child)
+            # 孩子收尾即除名：_children 只装"还活着"的，取消时名单里没有尸体
+            # （生产里 registry 对已完成本就 no-op，这里要的是名单语义诚实）
+            self._children.get(run_id, set()).discard(child)
             if not ok:
                 await self._fail_node(run_id, wf_id, task.name, child, text)
                 raise RuntimeError(f"节点「{task.name}」执行失败：{text[:200]}")

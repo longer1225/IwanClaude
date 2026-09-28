@@ -151,6 +151,11 @@ export interface PrCreateParams {
   draft?: boolean
 }
 
+export interface PrReviewParams {
+  cwd: string
+  pr_number: number
+}
+
 export interface ScheduleListParams {
 
 }
@@ -204,9 +209,18 @@ export interface WorkflowRunParams {
   id: string
 }
 
+export interface WorkflowCancelParams {
+  id: string
+}
+
 export interface WorkflowRunsParams {
   id?: string
   limit?: number
+}
+
+export interface SpeechTranscribeParams {
+  audio_b64: string
+  sample_rate?: number
 }
 
 export interface GitStatusParams {
@@ -594,6 +608,12 @@ export interface PrCreateResult {
   error?: string
 }
 
+export interface PrReviewResult {
+  ok?: boolean
+  session_id?: string
+  error?: string
+}
+
 export interface ScheduleListResult {
   tasks?: Array<ScheduleTaskInfo>
 }
@@ -624,6 +644,12 @@ export interface WorkflowOpResult {
   ok?: boolean
   id?: string
   run_id?: string
+  error?: string
+}
+
+export interface SpeechTranscribeResult {
+  ok?: boolean
+  text?: string
   error?: string
 }
 
@@ -716,6 +742,7 @@ export type CommandMethod =
   | "pr.context"
   | "pr.create"
   | "pr.list"
+  | "pr.review"
   | "run.cancel"
   | "run.steer"
   | "schedule.create"
@@ -737,6 +764,7 @@ export type CommandMethod =
   | "session.set_engine"
   | "session.set_model"
   | "session.set_permission_mode"
+  | "speech.transcribe"
   | "ssh.conn_add"
   | "ssh.conn_delete"
   | "ssh.conn_list"
@@ -751,6 +779,7 @@ export type CommandMethod =
   | "trust.list"
   | "trust.respond"
   | "trust.revoke"
+  | "workflow.cancel"
   | "workflow.delete"
   | "workflow.get"
   | "workflow.list"
@@ -1039,5 +1068,14 @@ export type BusEvent =
     status: string;
     error?: string;
     finished_at?: string;
+    ts: string;
+  }
+  | {
+    type: 'pr.reviewed';
+    pr_number?: number;
+    title?: string;
+    session_id?: string;
+    ok?: boolean;
+    error?: string;
     ts: string;
   }

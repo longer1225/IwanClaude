@@ -837,14 +837,14 @@ class SshClosedEvent(BaseModel):
 
 class WorkflowNodeEvent(BaseModel):
     """
-    工作流节点状态事件 - 单个节点进入 running/ok/fail 时各发一条
+    工作流节点状态事件 - 单个节点进入 running/ok/fail/cancelled 时各发一条
 
     【字段说明】
     - type: Literal["workflow.node"] - 事件类型
     - run_id: str - 本次工作流运行 ID
     - workflow_id: str - 归属工作流（GUI 判断是否在详情页，决定要不要上色）
     - node: str - 节点名
-    - status: str - "running" | "ok" | "fail"
+    - status: str - "running" | "ok" | "fail" | "cancelled"
     - child_run_id: str - 该节点子 Agent 的 run ID（running 起就有，深链审计）
     - detail: str - 失败原因摘要（仅 fail 非空，≤200 字）
     - ts: str - 时间戳（ISO 8601）
@@ -873,8 +873,8 @@ class WorkflowRunFinishedEvent(BaseModel):
     - run_id: str - 结束的运行 ID
     - workflow_id / workflow_name: str - 归属工作流
     - session_id: str - 该 run 的 one_shot 会话（""=没建过会话=零节点起跑即失败）
-    - status: str - "success" | "failed" | "interrupted"
-    - error: str - 失败摘要（fail-fast 时是最先炸掉的节点信息）
+    - status: str - "success" | "failed" | "interrupted" | "cancelled"
+    - error: str - 失败摘要（fail-fast 时是最先炸掉的节点信息；取消为"用户取消"）
     - finished_at: str - 收尾时刻（ISO）
     - ts: str - 事件时间戳（ISO 8601）
 
@@ -891,6 +891,33 @@ class WorkflowRunFinishedEvent(BaseModel):
     status: str
     error: str = ""
     finished_at: str = ""
+    ts: str
+
+
+class PrReviewedEvent(BaseModel):
+    """
+    PR 评审发起事件 - pr.review 受理与否都广播一条（发起成功≠评审完成）
+
+    【字段说明】
+    - type: Literal["pr.reviewed"] - 事件类型
+    - pr_number: int - 被评审的 PR 编号
+    - title: str - PR 标题（拉取失败时空串）
+    - session_id: str - 新建的 one_shot 评审会话（失败时空串）
+    - ok: bool - 评审会话是否成功发起
+    - error: str - 失败摘要（无仓库坐标/拉 diff 失败/无 token）
+    - ts: str - 时间戳（ISO 8601）
+
+    【设计目的】
+    与 schedule.fired 同款"后台干活必留打卡"纪律：轮询 auto_review 在
+    没人盯着的时候发起评审，事件是唯一的即时可见性通道——GUI 订阅后
+    刷新会话列表并给一行提示；离线客户端靠会话标题"评审·PR#N"对账。
+    """
+    type: Literal["pr.reviewed"] = "pr.reviewed"
+    pr_number: int = 0
+    title: str = ""
+    session_id: str = ""
+    ok: bool = False
+    error: str = ""
     ts: str
 
 
@@ -934,6 +961,7 @@ Event = Annotated[
     | SshOutputEvent
     | SshClosedEvent
     | WorkflowNodeEvent
-    | WorkflowRunFinishedEvent,
+    | WorkflowRunFinishedEvent
+    | PrReviewedEvent,
     Discriminator("type"),
 ]

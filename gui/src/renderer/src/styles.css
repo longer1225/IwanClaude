@@ -301,6 +301,26 @@ input { font: inherit; color: inherit; }
 .menu-hint { font-size: 11px; color: var(--text-secondary); font-family: var(--code-font); }
 .menu-check { color: var(--accent); }
 .menu-sep { border-top: 1px solid var(--line); margin: 4px 6px; }
+/* 参数下拉的分组行：虚线上边框 + 小字说明（"高级 · 五态内核原样保留"） */
+.pop-sep {
+  font-size: 10.5px;
+  color: var(--text-secondary);
+  padding: 6px 10px 2px;
+  border-top: 1px dashed var(--line);
+  margin-top: 4px;
+  user-select: none;
+}
+/* 参数下拉的 hint 是行为描述中文句：收掉代码字体、允许换行并限宽，
+   长文案不再把弹层横向撑爆（其他菜单的短 hint 不受影响） */
+.chip-pop .menu-item { align-items: flex-start; }
+.chip-pop .menu-hint {
+  font-family: inherit;
+  margin-left: auto;
+  text-align: right;
+  max-width: 230px;
+  white-space: normal;
+  line-height: 1.35;
+}
 
 /* ---------------- 主区 ---------------- */
 .main {
@@ -1006,6 +1026,9 @@ input { font: inherit; color: inherit; }
 .wf-node-ok .wf-node-state { color: var(--status-run); }
 .wf-node-fail { border-color: color-mix(in srgb, var(--danger) 55%, var(--line)); background: color-mix(in srgb, var(--danger) 8%, var(--card-bg)); }
 .wf-node-fail .wf-node-state { color: var(--danger); }
+/* cancelled 用比 fail 低一档的 muted-danger：取消是善后不是事故，红不该抢戏 */
+.wf-node-cancelled { border-color: color-mix(in srgb, var(--danger) 35%, var(--line)); }
+.wf-node-cancelled .wf-node-state { color: color-mix(in srgb, var(--danger) 60%, var(--text-secondary)); }
 .wf-drawer { display: flex; flex-direction: column; gap: 6px; }
 .wf-drawer-head { font-weight: 600; color: var(--text-secondary); font-size: calc(var(--ui-font-px) - 1px); }
 .wf-run-row { display: flex; align-items: center; gap: 10px; background: var(--card-translucent); border: 1px solid var(--line); border-radius: var(--radius-item); padding: 7px 12px; cursor: pointer; }
@@ -1017,6 +1040,7 @@ input { font: inherit; color: inherit; }
 .wf-node-chip { align-self: flex-start; border: 1px solid var(--line); border-radius: 999px; padding: 1px 10px; font-size: calc(var(--ui-font-px) - 2px); }
 .wf-node-chip-ok { border-color: color-mix(in srgb, var(--status-run) 55%, var(--line)); color: var(--status-run); }
 .wf-node-chip-fail { border-color: color-mix(in srgb, var(--danger) 55%, var(--line)); color: var(--danger); }
+.wf-node-chip-cancelled { border-color: color-mix(in srgb, var(--danger) 35%, var(--line)); color: color-mix(in srgb, var(--danger) 60%, var(--text-secondary)); }
 .wf-node-chip-running { border-color: var(--warn); color: var(--warn); }
 .wf-out { margin: 0; background: var(--inline-code-bg); border-radius: 6px; padding: 6px 9px; font-family: var(--code-font); font-size: calc(var(--code-font-px) - 0.5px); white-space: pre-wrap; word-break: break-all; max-height: 180px; overflow-y: auto; }
 .wf-out-err { color: var(--danger); }
@@ -1025,3 +1049,10 @@ input { font: inherit; color: inherit; }
 .wf-dep-row { flex-wrap: wrap; }
 .wf-dep-check { accent-color: var(--accent); }
 .fn-meta.dim { opacity: 0.7; }
+
+/* ===== 语音输入（v2 会话式）：聆听中呼吸红光 / 计数条 / 错误小字条 ===== */
+.mic-rec { border-color: color-mix(in srgb, var(--danger) 60%, var(--line)); color: var(--danger); animation: pulse 1.2s infinite; }
+.voice-seg { display: flex; align-items: center; gap: 6px; padding: 4px 10px 2px; font-size: calc(var(--ui-font-px) - 2px); color: var(--text-secondary); opacity: 0.9; }
+.voice-seg-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--danger); animation: pulse 1.2s infinite; flex: none; }
+.voice-seg-busy { opacity: 0.7; }
+.voice-err { color: var(--danger); font-size: calc(var(--ui-font-px) - 2px); padding: 4px 10px 2px; }

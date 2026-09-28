@@ -882,7 +882,7 @@ class SessionManager:
 
     def _get_session(self, sid: str) -> Session:
         """
-        从内存字典获取会话对象
+        从内存字典获取会话对象，未命中时从磁盘 meta.json 惰性回灌
 
         【参数说明】
         - sid: str - 会话 ID
@@ -891,14 +891,42 @@ class SessionManager:
         - Session: 会话对象
 
         【错误处理】
-        - 如果会话不存在，抛出 HandlerError(SESSION_NOT_FOUND)
+        - 内存与磁盘都没有该会话（或 meta 损坏）时，抛出 HandlerError(SESSION_NOT_FOUND)
 
-        【设计目的】
-        统一的会话查找方法，确保错误处理一致
+        【惰性回灌的由来（bug 修复 2026-09-28）】
+        旧实现只查内存字典，而重启时仅 recover_interrupted_sessions() 会把
+        status="running" 的会话灌回内存——磁盘上其余几十上百个会话对
+        list_sessions 可见（它直读 store），对一切按 id 寻址的操作
+        （发消息/改权限/重命名…）却是 -32010 not found。GUI 侧栏点开重启前的
+        旧会话必踩。修法选"未命中才读盘"而非启动全量预载：
+        1) 会话数无上限，全量预载让冷启动线性变慢且绝大多数永远用不到；
+        2) meta.json 就是权威状态源，回灌语义与内存对象完全同构；
+        3) 回灌后常驻内存并补锁，与 create() 建的会话走同一生命周期，无特例分支。
         """
         session = self._sessions.get(sid)
-        if session is None:
+        if session is not None:
+            return session
+        # 路径消毒：sid 是客户端可控字符串，read_meta 会拼 session_dir(sid)/meta.json，
+        # 分隔符/.. 会指向会话根目录之外（Windows 下绝对路径 sid 甚至直接覆盖 join）——
+        # 含任何形态非法字符一律按 not found 处理，fail-closed
+        if not sid or any(sep in sid for sep in ("/", "\\", "..", "\x00")) or sid.startswith("."):
             raise HandlerError(SESSION_NOT_FOUND, "session not found")
+        # 未命中：读一次 meta.json 回灌（read_meta 内部走 Session.from_dict）
+        # 捕获面与 store.list_sessions 的坏数据容忍一致：文件缺失/JSON 坏/字段缺
+        try:
+            session = self._store.read_meta(sid)
+        except (OSError, ValueError, KeyError, TypeError):
+            raise HandlerError(SESSION_NOT_FOUND, "session not found") from None
+        # 防并发双读盘的回灌去重：若 await -free 的竞态让另一路已插入，以先到者为准
+        existing = self._sessions.get(sid)
+        if existing is not None:
+            return existing
+        self._sessions[sid] = session
+        if sid not in self._locks:
+            self._locks[sid] = asyncio.Lock()
+        log.info(
+            "hydrated persisted session=%s status=%s title=%s", sid, session.status, session.title
+        )
         return session
 
     def list_sessions(self) -> list[Session]:

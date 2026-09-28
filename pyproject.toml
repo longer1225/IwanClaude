@@ -18,6 +18,7 @@ dependencies = [
     "httpx[socks]>=0.28.1",
     "langgraph>=1.2.12",
     "langgraph-checkpoint-sqlite>=3.1.1",
+    "faster-whisper>=1.2.1",
 ]
 
 # 安装后可在 PATH 中执行的入口：`iwan` / `iwan-core` / `iwan-tui`
@@ -61,6 +62,11 @@ python_version = "3.12"
 strict = true                 # 启用严格模式
 mypy_path = "src"             # 将 src 加入模块搜索路径
 explicit_package_bases = true # 明确包根，减少隐式命名空间误判
+
+# faster-whisper 无 py.typed：本地懒加载只用到 transcribe()，按库放行缺失标记
+[[tool.mypy.overrides]]
+module = ["faster_whisper.*"]
+ignore_missing_imports = true
 
 # ---- Pytest：默认发现 tests/，异步用例自动管理 event loop ----
 [tool.pytest.ini_options]

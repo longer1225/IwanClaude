@@ -32,8 +32,8 @@ type Mode = 'list' | 'detail' | 'edit'
 const RUN_LABEL: Record<string, string> = {
   running: '运行中', success: '成功', failed: '失败', interrupted: '中断', cancelled: '取消'
 }
-// 节点态标签（骨架 pending → 事件推 running → 终态 ok/fail）
-const NODE_LABEL: Record<string, string> = { pending: '待跑', running: '运行中', ok: '完成', fail: '失败' }
+// 节点态标签（骨架 pending → 事件推 running → 终态 ok/fail/cancelled）
+const NODE_LABEL: Record<string, string> = { pending: '待跑', running: '运行中', ok: '完成', fail: '失败', cancelled: '已取消' }
 
 let draftSeq = 1
 
@@ -165,6 +165,15 @@ export function WorkflowView() {
     void refreshWfRuns(id)
   }
 
+  // 【学习要点】取消不弹 confirm：取消非破坏（历史行、已 ok 节点产出全保留），
+  // 且服务端幂等拒重复点击——确认框防的两种事故这里都不存在，弹窗只会打断心流。
+  // op 失败也要重拉：拒绝文案最常见的原因是行其实已结束（孤儿清算等），
+  // 按钮态必须跟着新现实复位，不能停在"看起来还能取消"的谎话上
+  const cancel = async (id: string): Promise<void> => {
+    await op('workflow.cancel', { id })
+    void refreshWfRuns(id)
+  }
+
   // 图区取色用行：live run 优先（正在上色），否则最新一条历史
   const shown: WorkflowRunInfo | undefined = wfRuns.find((r) => r.id === wfLiveRunId) ?? wfRuns[0]
   const nodeMap = new Map<string, WorkflowNodeRunInfo>()
@@ -266,6 +275,17 @@ export function WorkflowView() {
           >
             <Icon name="zap" size={13} /> 运行
           </button>
+          {/* 取消 chip 只在 runningHere 时出现；finished 事件一到就地消失，
+              天然防连点——不需要额外的禁用/确认机制 */}
+          {runningHere && (
+            <button
+              className="chip chip-danger wf-cancel-btn"
+              title="取消这次运行（正在执行的节点会被停下，未轮到的保持待跑）"
+              onClick={() => void cancel(sel.id)}
+            >
+              <Icon name="stop" size={13} /> 取消
+            </button>
+          )}
         </div>
         <div className="fn-body">
           {msg && <div className="fn-err">{msg}</div>}

@@ -321,9 +321,18 @@ class GitHubConfig:
         token: GitHub API 令牌（fine-grained PAT 或 classic）；空 = 匿名只读
             公开仓库（受限流），任何写操作（建 PR/push）直接报缺 token
         base_url: API 根地址；自建 GitHub Enterprise 时改这里
+        auto_review: PR 自动评审后台轮询开关（默认关=零 token 消耗；开=周期
+            拉当前仓库 open PR，发现新号自动起评审会话——发起即烧 LLM，
+            所以默认关闭，显式打开才算授权）
+        auto_review_cwd: 轮询锚定的仓库目录（空=daemon 工作目录）；PR 评审
+            是仓库级功能，轮询器得知道"盯哪个 repo"
+        auto_review_interval_min: 轮询周期（分钟，>=1）
     """
     token: str = ""
     base_url: str = "https://api.github.com"
+    auto_review: bool = False
+    auto_review_cwd: str = ""
+    auto_review_interval_min: int = 15
 
 
 @dataclass
@@ -929,7 +938,9 @@ def _apply_toml(config: IwanConfig, data: dict[str, Any]) -> None:
         gh = data["github"]
         if not isinstance(gh, dict):
             raise SystemExit("Config error: [github] must be a table")
-        unknown_gh: set[str] = set(gh.keys()) - {"token", "base_url"}
+        unknown_gh: set[str] = set(gh.keys()) - {
+            "token", "base_url", "auto_review", "auto_review_cwd", "auto_review_interval_min",
+        }
         if unknown_gh:
             raise SystemExit(f"Unknown [github] keys: {', '.join(sorted(unknown_gh))}")
         if "token" in gh:
@@ -942,6 +953,21 @@ def _apply_toml(config: IwanConfig, data: dict[str, Any]) -> None:
             if not isinstance(val, str) or not val:
                 raise SystemExit("Config error: github.base_url must be a non-empty string")
             config.github.base_url = val.rstrip("/")
+        if "auto_review" in gh:
+            val = gh["auto_review"]
+            if not isinstance(val, bool):
+                raise SystemExit("Config error: github.auto_review must be a boolean")
+            config.github.auto_review = val
+        if "auto_review_cwd" in gh:
+            val = gh["auto_review_cwd"]
+            if not isinstance(val, str):
+                raise SystemExit("Config error: github.auto_review_cwd must be a string")
+            config.github.auto_review_cwd = val
+        if "auto_review_interval_min" in gh:
+            val = gh["auto_review_interval_min"]
+            if not isinstance(val, int) or isinstance(val, bool) or val < 1:
+                raise SystemExit("Config error: github.auto_review_interval_min must be int >= 1")
+            config.github.auto_review_interval_min = val
 
     if "sandbox" in data:
         sb = data["sandbox"]

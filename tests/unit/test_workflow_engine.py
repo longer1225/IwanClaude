@@ -1,9 +1,10 @@
 """
-工作流引擎装配层单测 — 事件时序 / 上游传递 / fail-fast / 并发闸门 / 停机收口
+工作流引擎装配层单测 — 事件时序 / 上游传递 / fail-fast / 并发闸门 / 停机收口 / 用户取消
 
-【学习要点】launch/await_child/on_node/on_run_finished 四个协作者全部换成
-内存 fake：引擎对 subagent、总线、LLM 零感知，这一层能测的全部是"时序与
-记账"——恰好是它存在的唯一理由。
+【学习要点】launch/await_child/cancel_child/on_node/on_run_finished 五个协作者
+全部换成内存 fake：引擎对 subagent、总线、LLM 零感知，这一层能测的全部是
+"时序与记账"——恰好是它存在的唯一理由。cancel_child 的 fake 只记击杀名单
+（Rig 的"子 Agent"本就是一串文本，没有真 task 可杀），击杀时序=名单内容。
 """
 from __future__ import annotations
 
@@ -32,6 +33,12 @@ class Rig:
         self.prompts: dict[str, str] = {}
         self.launch_fail: str = ""       # 非空=命中节点启动失败
         self.await_result: dict[str, tuple[bool, str]] = {}  # 节点→(ok, text) 覆写
+        self.cancelled_children: list[str] = []  # cancel_child fake 的击杀名单
+
+    # 击杀 fake：只登记不真杀；恒返 True——"杀没杀到"是注册表的事，引擎侧只关心登记过
+    def cancel_child(self, child: str) -> bool:
+        self.cancelled_children.append(child)
+        return True
 
     # launch：登记 prompt，按覆写表决定启动成败
     async def launch(self, ctx: NodeLaunchCtx) -> tuple[str, str]:
@@ -56,10 +63,12 @@ class Rig:
         # 测试台照抄这条副作用，让"三层记账"断言在单测里也闭环
         self._st.touch_last_run(tr.workflow_id, tr.run_id, tr.status)
 
-    # 组装引擎；max_parallel_runs 等参数透传，个别协作者可在用例里换私有字段
+    # 组装引擎；max_parallel_runs 等参数透传，个别协作者可在用例里换私有字段。
+    # cancel_child 恒接线：普通用例本就不触发它，反证"没点取消就没有击杀"
     def build(self, **kw: Any) -> WorkflowEngine:
         return WorkflowEngine(
-            self._st, self.launch, self.await_child, self.on_node, self.on_finished, **kw,
+            self._st, self.launch, self.await_child, self.on_node, self.on_finished,
+            cancel_child=self.cancel_child, **kw,
         )
 
 
@@ -203,7 +212,8 @@ async def test_start_run_unknown_id(tmp_path: Path) -> None:
 # 设计：A 挂在 gate 上人为造"进行中"，shutdown 必须 ①等协程收尸（返回后
 # 断言即可见账落地，不需要再 sleep）②interrupted 而非 failed（停机与跑砸
 # 是两种历史，GUI 文案和排障方向完全不同）；广播在取消路径上不保证，
-# finished 列表为空是可接受语义——账比通知重要
+# finished 列表为空是可接受语义——账比通知重要。Rig 现已恒接 cancel_child：
+# 停机路径必须零击杀、零 cancelled 落账——"用户取消 vs 关停"的分叉焊死在这
 async def test_shutdown_marks_interrupted(tmp_path: Path) -> None:
     st, wf = _mk(tmp_path, [{"name": "A", "prompt": "a", "depends_on": []}])
     gate = asyncio.Event()
@@ -219,6 +229,8 @@ async def test_shutdown_marks_interrupted(tmp_path: Path) -> None:
     await eng.shutdown()
     assert st.get_run(run_id)["status"] == "interrupted"  # type: ignore[index]
     assert eng._active == {}
+    assert rig.cancelled_children == []  # 停机不杀子：击杀是用户取消的专属语义
+    assert rig.finished == []  # 且无 cancelled 广播泄漏进停机路径
     await eng.shutdown()  # 幂等：空表二次关停无事发生
     gate.set()
 
@@ -265,3 +277,148 @@ async def test_broken_listener_does_not_break_run(tmp_path: Path) -> None:
     await asyncio.sleep(0.2)
     assert st.get_run(run_id)["status"] == "success"  # type: ignore[index]
     assert rig.finished and rig.finished[0][0] == "success"
+
+
+# ==================== 用户取消（workflow.cancel 的引擎面） ====================
+
+# 功能：单节点运行中取消——事件序 running→cancelled→finished(cancelled)，行/节点/
+# 击杀名单/活跃表四方落账一致
+# 设计：A 挂 never-resolve gate 造确定"进行中"窗口，cancel_run 是 awaited 坐等到账，
+# 返回后零 sleep 直接断全表：①事件整表 ==（含 cancelled 补标在 finished 之前，
+# 这是 store 守卫时序的产品面）②child_run_id 在取消行里保留（深链不丢）
+# ③定义行 last_status 反范式同步（列表页 chip 的数据源）④击杀名单恰含 node-A
+async def test_cancel_single_node_full_sequence(tmp_path: Path) -> None:
+    st, wf = _mk(tmp_path, [{"name": "A", "prompt": "a", "depends_on": []}])
+    gate = asyncio.Event()
+    rig = Rig(st)
+    eng = rig.build()
+
+    async def hang(child: str) -> tuple[bool, str]:
+        await gate.wait()
+        return True, "late"
+    eng._await_child = hang  # type: ignore[method-assign]
+
+    run_id, _ = eng.start_run(wf["id"])
+    await asyncio.sleep(0.1)  # 让 A 走完 running 记账 + launch 登记，再进挂起
+    assert await eng.cancel_run(run_id) == ""
+    assert rig.events == [("A", "running"), ("A", "cancelled")]
+    assert rig.finished == [("cancelled", "用户取消", "")]
+    row = st.get_run(run_id)
+    assert row["status"] == "cancelled"  # type: ignore[index]
+    assert row["error"] == "用户取消"  # type: ignore[index]
+    assert row["nodes"]["A"]["status"] == "cancelled"  # type: ignore[index]
+    assert row["nodes"]["A"]["child_run_id"] == "node-A"  # type: ignore[index]
+    assert rig.cancelled_children == ["node-A"]
+    assert eng._active == {} and eng.active_run_for(wf["id"]) == ""
+    assert st.get(wf["id"])["last_status"] == "cancelled"
+    gate.set()
+
+
+# 功能：A→B 串行图取消——A 标 cancelled，B 保持 pending（"没轮到"不伪造"被取消"）
+# 设计：B 是否被动过有两处独立观测：事件表里零 B 条目（不假发 N 条取消事件是
+# 本决策的核心）、run 行骨架里 B 仍是 pending（GUI 灰显"待跑"的数据依据）。
+# 若实现者日后"好心"把 pending 翻 cancelled，这两处断言都会红
+async def test_cancel_keeps_pending_nodes_pending(tmp_path: Path) -> None:
+    tasks = [{"name": "A", "prompt": "a", "depends_on": []},
+             {"name": "B", "prompt": "b", "depends_on": ["A"]}]
+    st, wf = _mk(tmp_path, tasks)
+    gate = asyncio.Event()
+    rig = Rig(st)
+    eng = rig.build()
+
+    async def hang(child: str) -> tuple[bool, str]:
+        await gate.wait()
+        return True, "late"
+    eng._await_child = hang  # type: ignore[method-assign]
+
+    run_id, _ = eng.start_run(wf["id"])
+    await asyncio.sleep(0.1)
+    assert await eng.cancel_run(run_id) == ""
+    assert not any(n == "B" for n, _ in rig.events)
+    row = st.get_run(run_id)
+    assert row["nodes"]["A"]["status"] == "cancelled"  # type: ignore[index]
+    assert row["nodes"]["B"]["status"] == "pending"  # type: ignore[index]
+    assert rig.finished[0][0] == "cancelled"
+    gate.set()
+
+
+# 功能：同层双兄弟并行取消——两个都被击杀、都被标 cancelled，后继 D 绝不启动
+# 设计：A 速通、B/C 挂 gate 造并行 running；击杀名单用集合断言（并行无先后，
+# 钉顺序就是假 flaky）；"D 零事件"验证取消真的掐断了分层屏障的接力——只停
+# 当前节点不停调度的实现会在这里露馅。B/C 的 running 记账先后也不断，只断集合
+async def test_cancel_kills_all_running_siblings(tmp_path: Path) -> None:
+    tasks = [
+        {"name": "A", "prompt": "a", "depends_on": []},
+        {"name": "B", "prompt": "b", "depends_on": ["A"]},
+        {"name": "C", "prompt": "c", "depends_on": ["A"]},
+        {"name": "D", "prompt": "d", "depends_on": ["B", "C"]},
+    ]
+    st, wf = _mk(tmp_path, tasks)
+    gate = asyncio.Event()
+    rig = Rig(st)
+    eng = rig.build()
+
+    async def hang_bc(child: str) -> tuple[bool, str]:
+        if child == "node-A":
+            return True, "OUT-node-A"
+        await gate.wait()
+        return True, "late"
+    eng._await_child = hang_bc  # type: ignore[method-assign]
+
+    run_id, _ = eng.start_run(wf["id"])
+    await asyncio.sleep(0.15)  # A 速通 + B/C 完成 launch 登记后进挂起
+    assert await eng.cancel_run(run_id) == ""
+    assert set(rig.cancelled_children) == {"node-B", "node-C"}
+    row = st.get_run(run_id)
+    assert row["nodes"]["A"]["status"] == "ok"  # type: ignore[index]
+    assert row["nodes"]["B"]["status"] == "cancelled"  # type: ignore[index]
+    assert row["nodes"]["C"]["status"] == "cancelled"  # type: ignore[index]
+    assert ("D", "running") not in rig.events
+    assert rig.finished[0][0] == "cancelled"
+    gate.set()
+
+
+# 功能：二次取消与幽灵 run_id 均被文案拒绝且不二次记账——finished/节点事件恰好一次
+# 设计：第一次 cancel_run 坐等到账后 _active 已摘，第二次必然走"无活跃"早退分支；
+# 恰好一次用计数断言（len(finished)==1、cancelled 事件数==1）而非整表——本测试
+# 的敌人是"双收口"（尾扫与 except 分支重复落账），整表断言把时序噪音也算进敌营
+async def test_double_cancel_and_ghost_are_rejected(tmp_path: Path) -> None:
+    st, wf = _mk(tmp_path, [{"name": "A", "prompt": "a", "depends_on": []}])
+    gate = asyncio.Event()
+    rig = Rig(st)
+    eng = rig.build()
+
+    async def hang(child: str) -> tuple[bool, str]:
+        await gate.wait()
+        return True, "late"
+    eng._await_child = hang  # type: ignore[method-assign]
+
+    run_id, _ = eng.start_run(wf["id"])
+    await asyncio.sleep(0.1)
+    assert await eng.cancel_run(run_id) == ""
+    again = await eng.cancel_run(run_id)
+    assert again != "" and "无需取消" in again
+    ghost = await eng.cancel_run("ghost-run")
+    assert ghost != "" and "无需取消" in ghost
+    assert len(rig.finished) == 1
+    assert [s for _, s in rig.events].count("cancelled") == 1
+    gate.set()
+
+
+# 功能：cancel 抢在协程首帧调度前——尾扫补标 cancelled 且 finished 广播恰好一次
+# 设计：start_run 后零 sleep 直接 cancel_run：Task 从未启动，_execute 的
+# try/except 一行业务码都没执行（except 分支不存在），落账只能靠 cancel_run
+# 尾扫。行状态守卫让"尾扫 vs except 分支"互斥——len(finished)==1 就是对这条
+# 互斥的直接钉桩；节点全 pending（连 running 都没记过）是"从未启动"的旁证
+async def test_cancel_before_first_scheduling_tail_sweep(tmp_path: Path) -> None:
+    st, wf = _mk(tmp_path, [{"name": "A", "prompt": "a", "depends_on": []}])
+    rig = Rig(st)
+    eng = rig.build()
+    run_id, _ = eng.start_run(wf["id"])
+    assert await eng.cancel_run(run_id) == ""
+    assert rig.events == []  # 协程从未开跑：没有任何节点事件
+    assert rig.finished == [("cancelled", "用户取消", "")]  # 且恰好一次
+    row = st.get_run(run_id)
+    assert row["status"] == "cancelled"  # type: ignore[index]
+    assert row["nodes"]["A"]["status"] == "pending"  # type: ignore[index]
+    assert eng._active == {}

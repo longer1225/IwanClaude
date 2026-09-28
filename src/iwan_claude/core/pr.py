@@ -214,6 +214,39 @@ class GitHubClient:
             return False, "", err or "响应格式异常"
         return True, str(data.get("default_branch", "")), ""
 
+    # 拉单个 PR 元数据（标题/描述）——评审会话 prompt 的头信息
+    async def pull_meta(
+        self, owner: str, repo: str, number: int,
+    ) -> tuple[bool, dict[str, str], str]:
+        ok, data, err = await self._req("GET", f"/repos/{owner}/{repo}/pulls/{number}")
+        if not ok or not isinstance(data, dict):
+            return False, {}, err or "响应格式异常"
+        return True, {
+            "title": str(data.get("title", "")),
+            "body": str(data.get("body") or ""),
+        }, ""
+
+    # 【学习要点】拉 PR diff 不走 _req：那个封装假设响应是 JSON，而 GitHub 的
+    # diff media type（Accept: application/vnd.github.v3.diff）直出补丁纯文本
+    # ——与其把逐文件 JSON 手工拼成 diff，不如让 API 干拼接的活，我们只管截断。
+    # 代价是要复制一遍请求壳，换来的是零拼装代码、零转义坑
+    async def pull_diff(self, owner: str, repo: str, number: int) -> tuple[bool, str, str]:
+        headers = self._headers()
+        headers["Accept"] = "application/vnd.github.v3.diff"
+        try:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(30.0, connect=10.0),
+                limits=httpx.Limits(max_connections=10),
+            ) as client:
+                resp = await client.get(
+                    f"{self._base}/repos/{owner}/{repo}/pulls/{number}", headers=headers,
+                )
+        except httpx.HTTPError as e:
+            return False, "", f"网络失败：{type(e).__name__}: {e}"
+        if resp.status_code >= 400:
+            return False, "", self._api_error(resp)
+        return True, resp.text, ""
+
     # 建 PR：head/base 为 "分支名"（同仓库推送后 GitHub 自动识别 owner:repo 前缀）
     async def create_pull(
         self, owner: str, repo: str, title: str, body: str,
@@ -298,3 +331,48 @@ async def create_pull_for_cwd(
         ctx["owner"], ctx["repo"], data["number"], pushed,
     )
     return {"ok": True, "number": data["number"], "url": data["url"], "pushed": pushed, "error": ""}
+
+
+# 轮询差分：返回 rows 中未登记过的 PR 号（保持列表序、同批去重），并把它们
+# 当场登记进 seen——"判新+登记"一体是刻意的：拆两步会在两步之间留竞态窗口，
+# 同一 PR 被两个周期重复评审、白烧两次 LLM
+def pr_new_numbers(rows: list[dict[str, Any]], seen: set[int]) -> list[int]:
+    out: list[int] = []
+    batch: set[int] = set()
+    for r in rows:
+        try:
+            n = int(r.get("number", 0))
+        except (TypeError, ValueError):
+            continue
+        if n and n not in seen and n not in batch:
+            batch.add(n)
+            out.append(n)
+    seen.update(batch)
+    return out
+
+
+# 评审 prompt 里 diff 的截断上限（字符）——超大 PR 会炸评审子 Agent 的上下文
+# 预算；超限截尾并明示，让评审"知道自己只看了局部"而非假装看全
+REVIEW_DIFF_KEEP = 60000
+
+# pr.review 端到端取数编排：本地解析坐标 → 拉 PR 元数据 + diff 原文 → 截断；
+# 失败全部归一为 ok=False+中文 error（起会话的动作在 app 层 handler，这里纯取数）
+async def fetch_pr_for_review(
+    cwd: str, number: int, base_url: str, token: str,
+) -> dict[str, Any]:
+    ctx = await collect_context(cwd)
+    if not ctx["ok"]:
+        return {"ok": False, "title": "", "body": "", "diff": "", "error": ctx["error"]}
+    gh = GitHubClient(base_url, token)
+    ok_m, meta, err_m = await gh.pull_meta(ctx["owner"], ctx["repo"], number)
+    if not ok_m:
+        return {"ok": False, "title": "", "body": "", "diff": "",
+                "error": f"拉取 PR #{number} 失败：{err_m}"}
+    ok_d, diff, err_d = await gh.pull_diff(ctx["owner"], ctx["repo"], number)
+    if not ok_d:
+        return {"ok": False, "title": meta["title"], "body": "", "diff": "",
+                "error": f"拉取 PR #{number} diff 失败：{err_d}"}
+    truncated = len(diff) > REVIEW_DIFF_KEEP
+    if truncated:
+        diff = diff[:REVIEW_DIFF_KEEP] + "\n…（diff 超长已截断，仅评审前 6 万字符）"
+    return {"ok": True, "title": meta["title"], "body": meta["body"], "diff": diff, "error": ""}

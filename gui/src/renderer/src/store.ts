@@ -678,6 +678,17 @@ export function handleBusEvent(ev: BusEvent): void {
       void refreshSessionList()
       return
     }
+    case 'pr.reviewed': {
+      // 评审发起的 UI 回声：轮询 auto_review 在没人盯着时也会发起，事件是
+      // 唯一通道——提示行推进"评审·PR#N"会话头部；发起失败（session_id 空）
+      // 不硬塞别处：手动路径 PrView 已行内报错，轮询失败留在 daemon 日志
+      void refreshSessionList()
+      if (ev.ok && ev.session_id)
+        st.pushMsg(ev.session_id, {
+          id: nextId(), role: 'notice', text: `🔍 评审发起：PR#${ev.pr_number} ${ev.title}`,
+        })
+      return
+    }
     case 'workflow.node': {
       // 【学习要点】只认当前盯的 live run：别的 run 不许贴进这张列表——
       // 事件驱动上色的全部风险就是串台（runOwner 表同理）。run 行由点

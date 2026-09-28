@@ -2729,6 +2729,75 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
 }
 ```
 
+### PrReviewCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `cwd` | `string` | yes |
+| `pr_number` | `integer` | yes |
+
+```json
+{
+  "description": "PR 评审命令 - 拉取指定 PR 的 diff 并起一个 one_shot 评审会话\n\n【字段说明】\n- type: Literal[\"pr.review\"] - 命令类型\n- cwd: str - 目标仓库（解析 owner/repo 坐标）\n- pr_number: int - 要评审的 PR 编号\n\n【设计目的与安全边界】\n只读拉 diff（GitHub media type 直出补丁文本）+ 新建 one_shot 会话\n跑评审——diff 是喂给模型的文本、不被执行；评审会话工具链照常过\n审批门。发起 = GUI 显式点击或 config [github] auto_review 显式打开，\n两条路都是授权动作（workflow.run 同口径）。",
+  "properties": {
+    "type": {
+      "const": "pr.review",
+      "default": "pr.review",
+      "title": "Type",
+      "type": "string"
+    },
+    "cwd": {
+      "title": "Cwd",
+      "type": "string"
+    },
+    "pr_number": {
+      "title": "Pr Number",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "cwd",
+    "pr_number"
+  ],
+  "title": "PrReviewCommand",
+  "type": "object"
+}
+```
+
+### PrReviewResult
+
+| Field | Type | Required |
+|---|---|---|
+| `ok` | `boolean` | no |
+| `session_id` | `string` | no |
+| `error` | `string` | no |
+
+```json
+{
+  "description": "PR 评审响应\n\n【字段说明】\n- ok: bool - 评审会话是否成功发起（True=diff 已到手、评审已在跑）\n- session_id: str - \"评审·PR#N\" one_shot 会话 ID\n- error: str - 失败摘要（非 git 仓库/无远端/拉 PR 失败/无 token 权限）",
+  "properties": {
+    "ok": {
+      "default": false,
+      "title": "Ok",
+      "type": "boolean"
+    },
+    "session_id": {
+      "default": "",
+      "title": "Session Id",
+      "type": "string"
+    },
+    "error": {
+      "default": "",
+      "title": "Error",
+      "type": "string"
+    }
+  },
+  "title": "PrReviewResult",
+  "type": "object"
+}
+```
+
 ### ScheduleListCommand
 
 | Field | Type | Required |
@@ -3335,7 +3404,7 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
 
 ```json
 {
-  "description": "单节点运行态\n\n【字段说明】\n- node: str - 节点名\n- status: str - \"pending\" | \"running\" | \"ok\" | \"fail\"（pending=run 行预置骨架的初始态）\n- child_run_id: str - 该节点子 Agent 的 run id（深链审计用）\n- detail: str - 失败原因/取消说明（≤200 字）\n- output: str - 成功产出快照（截断存储，≤400 字）\n- started_at / finished_at: str - ISO 时刻",
+  "description": "单节点运行态\n\n【字段说明】\n- node: str - 节点名\n- status: str - \"pending\" | \"running\" | \"ok\" | \"fail\" | \"cancelled\"\n  （pending=run 行预置骨架的初始态；cancelled=取消收口时正在跑的节点）\n- child_run_id: str - 该节点子 Agent 的 run id（深链审计用）\n- detail: str - 失败原因/取消说明（≤200 字）\n- output: str - 成功产出快照（截断存储，≤400 字）\n- started_at / finished_at: str - ISO 时刻",
   "properties": {
     "node": {
       "title": "Node",
@@ -3398,7 +3467,7 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
 {
   "$defs": {
     "WorkflowNodeRunInfo": {
-      "description": "单节点运行态\n\n【字段说明】\n- node: str - 节点名\n- status: str - \"pending\" | \"running\" | \"ok\" | \"fail\"（pending=run 行预置骨架的初始态）\n- child_run_id: str - 该节点子 Agent 的 run id（深链审计用）\n- detail: str - 失败原因/取消说明（≤200 字）\n- output: str - 成功产出快照（截断存储，≤400 字）\n- started_at / finished_at: str - ISO 时刻",
+      "description": "单节点运行态\n\n【字段说明】\n- node: str - 节点名\n- status: str - \"pending\" | \"running\" | \"ok\" | \"fail\" | \"cancelled\"\n  （pending=run 行预置骨架的初始态；cancelled=取消收口时正在跑的节点）\n- child_run_id: str - 该节点子 Agent 的 run id（深链审计用）\n- detail: str - 失败原因/取消说明（≤200 字）\n- output: str - 成功产出快照（截断存储，≤400 字）\n- started_at / finished_at: str - ISO 时刻",
       "properties": {
         "node": {
           "title": "Node",
@@ -3442,7 +3511,7 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
       "type": "object"
     }
   },
-  "description": "一次工作流运行\n\n【字段说明】\n- id: str - run id（服务端生成）\n- workflow_id / workflow_name: str - 归属工作流\n- session_id: str - 该 run 懒建的 one_shot 会话（子 Agent 审批卡的落点；\"\"=还没建）\n- status: str - \"running\" | \"success\" | \"failed\" | \"interrupted\"\n- started_at / finished_at / error: str - 收尾信息\n- nodes: list[WorkflowNodeRunInfo] - 各节点运行态",
+  "description": "一次工作流运行\n\n【字段说明】\n- id: str - run id（服务端生成）\n- workflow_id / workflow_name: str - 归属工作流\n- session_id: str - 该 run 懒建的 one_shot 会话（子 Agent 审批卡的落点；\"\"=还没建）\n- status: str - \"running\" | \"success\" | \"failed\" | \"interrupted\" | \"cancelled\"\n- started_at / finished_at / error: str - 收尾信息\n- nodes: list[WorkflowNodeRunInfo] - 各节点运行态",
   "properties": {
     "id": {
       "title": "Id",
@@ -3744,7 +3813,7 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
       "type": "object"
     },
     "WorkflowNodeRunInfo": {
-      "description": "单节点运行态\n\n【字段说明】\n- node: str - 节点名\n- status: str - \"pending\" | \"running\" | \"ok\" | \"fail\"（pending=run 行预置骨架的初始态）\n- child_run_id: str - 该节点子 Agent 的 run id（深链审计用）\n- detail: str - 失败原因/取消说明（≤200 字）\n- output: str - 成功产出快照（截断存储，≤400 字）\n- started_at / finished_at: str - ISO 时刻",
+      "description": "单节点运行态\n\n【字段说明】\n- node: str - 节点名\n- status: str - \"pending\" | \"running\" | \"ok\" | \"fail\" | \"cancelled\"\n  （pending=run 行预置骨架的初始态；cancelled=取消收口时正在跑的节点）\n- child_run_id: str - 该节点子 Agent 的 run id（深链审计用）\n- detail: str - 失败原因/取消说明（≤200 字）\n- output: str - 成功产出快照（截断存储，≤400 字）\n- started_at / finished_at: str - ISO 时刻",
       "properties": {
         "node": {
           "title": "Node",
@@ -3788,7 +3857,7 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
       "type": "object"
     },
     "WorkflowRunInfo": {
-      "description": "一次工作流运行\n\n【字段说明】\n- id: str - run id（服务端生成）\n- workflow_id / workflow_name: str - 归属工作流\n- session_id: str - 该 run 懒建的 one_shot 会话（子 Agent 审批卡的落点；\"\"=还没建）\n- status: str - \"running\" | \"success\" | \"failed\" | \"interrupted\"\n- started_at / finished_at / error: str - 收尾信息\n- nodes: list[WorkflowNodeRunInfo] - 各节点运行态",
+      "description": "一次工作流运行\n\n【字段说明】\n- id: str - run id（服务端生成）\n- workflow_id / workflow_name: str - 归属工作流\n- session_id: str - 该 run 懒建的 one_shot 会话（子 Agent 审批卡的落点；\"\"=还没建）\n- status: str - \"running\" | \"success\" | \"failed\" | \"interrupted\" | \"cancelled\"\n- started_at / finished_at / error: str - 收尾信息\n- nodes: list[WorkflowNodeRunInfo] - 各节点运行态",
       "properties": {
         "id": {
           "title": "Id",
@@ -4047,6 +4116,36 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
 }
 ```
 
+### WorkflowCancelCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `id` | `string` | yes |
+
+```json
+{
+  "description": "工作流运行取消命令 - 中止某工作流当前进行中的运行\n\n【字段说明】\n- type: Literal[\"workflow.cancel\"] - 命令类型\n- id: str - 目标工作流（与 workflow.run 同口径：handler 解析其活跃 run）\n\n【设计目的】\nGUI 点击\"取消\"是用户显式授权（同 workflow.run 的点击语义）；无活跃运行\n时幂等拒绝而非报错。取消是善后不是毁灭：run 落 cancelled 终态、正在跑\n的节点补标 cancelled、未轮到的节点保持 pending——历史诚实可查。",
+  "properties": {
+    "type": {
+      "const": "workflow.cancel",
+      "default": "workflow.cancel",
+      "title": "Type",
+      "type": "string"
+    },
+    "id": {
+      "title": "Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "id"
+  ],
+  "title": "WorkflowCancelCommand",
+  "type": "object"
+}
+```
+
 ### WorkflowRunsCommand
 
 | Field | Type | Required |
@@ -4091,7 +4190,7 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
 {
   "$defs": {
     "WorkflowNodeRunInfo": {
-      "description": "单节点运行态\n\n【字段说明】\n- node: str - 节点名\n- status: str - \"pending\" | \"running\" | \"ok\" | \"fail\"（pending=run 行预置骨架的初始态）\n- child_run_id: str - 该节点子 Agent 的 run id（深链审计用）\n- detail: str - 失败原因/取消说明（≤200 字）\n- output: str - 成功产出快照（截断存储，≤400 字）\n- started_at / finished_at: str - ISO 时刻",
+      "description": "单节点运行态\n\n【字段说明】\n- node: str - 节点名\n- status: str - \"pending\" | \"running\" | \"ok\" | \"fail\" | \"cancelled\"\n  （pending=run 行预置骨架的初始态；cancelled=取消收口时正在跑的节点）\n- child_run_id: str - 该节点子 Agent 的 run id（深链审计用）\n- detail: str - 失败原因/取消说明（≤200 字）\n- output: str - 成功产出快照（截断存储，≤400 字）\n- started_at / finished_at: str - ISO 时刻",
       "properties": {
         "node": {
           "title": "Node",
@@ -4135,7 +4234,7 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
       "type": "object"
     },
     "WorkflowRunInfo": {
-      "description": "一次工作流运行\n\n【字段说明】\n- id: str - run id（服务端生成）\n- workflow_id / workflow_name: str - 归属工作流\n- session_id: str - 该 run 懒建的 one_shot 会话（子 Agent 审批卡的落点；\"\"=还没建）\n- status: str - \"running\" | \"success\" | \"failed\" | \"interrupted\"\n- started_at / finished_at / error: str - 收尾信息\n- nodes: list[WorkflowNodeRunInfo] - 各节点运行态",
+      "description": "一次工作流运行\n\n【字段说明】\n- id: str - run id（服务端生成）\n- workflow_id / workflow_name: str - 归属工作流\n- session_id: str - 该 run 懒建的 one_shot 会话（子 Agent 审批卡的落点；\"\"=还没建）\n- status: str - \"running\" | \"success\" | \"failed\" | \"interrupted\" | \"cancelled\"\n- started_at / finished_at / error: str - 收尾信息\n- nodes: list[WorkflowNodeRunInfo] - 各节点运行态",
       "properties": {
         "id": {
           "title": "Id",
@@ -4243,6 +4342,75 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
     }
   },
   "title": "WorkflowOpResult",
+  "type": "object"
+}
+```
+
+### SpeechTranscribeCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `audio_b64` | `string` | yes |
+| `sample_rate` | `integer` | no |
+
+```json
+{
+  "description": "语音转写命令 - GUI 录音发 PCM，daemon 用本地 whisper 转成文字\n\n【字段说明】\n- type: Literal[\"speech.transcribe\"] - 命令类型\n- audio_b64: str - 单声道 int16 小端 PCM 裸字节的 base64（与 ssh.term_write 同编码纪律）\n- sample_rate: int - 采样率（8000..48000；GUI 侧固定降采样到 16000）\n\n【设计目的】\n一次 RPC 一问一答（非流式）：v1 定位是\"说完一段填进输入框\"，几十秒语音\n2.6MB base64 远在 64MB 帧限内；流式实时出字需要双向通道，留给 v2。",
+  "properties": {
+    "type": {
+      "const": "speech.transcribe",
+      "default": "speech.transcribe",
+      "title": "Type",
+      "type": "string"
+    },
+    "audio_b64": {
+      "title": "Audio B64",
+      "type": "string"
+    },
+    "sample_rate": {
+      "default": 16000,
+      "title": "Sample Rate",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "audio_b64"
+  ],
+  "title": "SpeechTranscribeCommand",
+  "type": "object"
+}
+```
+
+### SpeechTranscribeResult
+
+| Field | Type | Required |
+|---|---|---|
+| `ok` | `boolean` | no |
+| `text` | `string` | no |
+| `error` | `string` | no |
+
+```json
+{
+  "description": "语音转写响应\n\n【字段说明】\n- ok: bool - 是否转写成功\n- text: str - 识别出的文字（失败为空；成功但没听清也可能是空串）\n- error: str - 失败原因（依赖缺失/模型加载失败/音频非法，中文原文给 GUI 回显）",
+  "properties": {
+    "ok": {
+      "default": true,
+      "title": "Ok",
+      "type": "boolean"
+    },
+    "text": {
+      "default": "",
+      "title": "Text",
+      "type": "string"
+    },
+    "error": {
+      "default": "",
+      "title": "Error",
+      "type": "string"
+    }
+  },
+  "title": "SpeechTranscribeResult",
   "type": "object"
 }
 ```
@@ -7716,7 +7884,7 @@ Events sent over the IPC socket (daemon → client).
 
 ```json
 {
-  "description": "工作流节点状态事件 - 单个节点进入 running/ok/fail 时各发一条\n\n【字段说明】\n- type: Literal[\"workflow.node\"] - 事件类型\n- run_id: str - 本次工作流运行 ID\n- workflow_id: str - 归属工作流（GUI 判断是否在详情页，决定要不要上色）\n- node: str - 节点名\n- status: str - \"running\" | \"ok\" | \"fail\"\n- child_run_id: str - 该节点子 Agent 的 run ID（running 起就有，深链审计）\n- detail: str - 失败原因摘要（仅 fail 非空，≤200 字）\n- ts: str - 时间戳（ISO 8601）\n\n【设计目的】\nrun 即发即返，节点进度全靠这条事件推——GUI 详情页按\nrun_id==当前查看的 run 做不可变节点补丁即时上色。终态写穿\nworkflow_runs.json，错过事件也能靠 workflow.get 对账补画。",
+  "description": "工作流节点状态事件 - 单个节点进入 running/ok/fail/cancelled 时各发一条\n\n【字段说明】\n- type: Literal[\"workflow.node\"] - 事件类型\n- run_id: str - 本次工作流运行 ID\n- workflow_id: str - 归属工作流（GUI 判断是否在详情页，决定要不要上色）\n- node: str - 节点名\n- status: str - \"running\" | \"ok\" | \"fail\" | \"cancelled\"\n- child_run_id: str - 该节点子 Agent 的 run ID（running 起就有，深链审计）\n- detail: str - 失败原因摘要（仅 fail 非空，≤200 字）\n- ts: str - 时间戳（ISO 8601）\n\n【设计目的】\nrun 即发即返，节点进度全靠这条事件推——GUI 详情页按\nrun_id==当前查看的 run 做不可变节点补丁即时上色。终态写穿\nworkflow_runs.json，错过事件也能靠 workflow.get 对账补画。",
   "properties": {
     "type": {
       "const": "workflow.node",
@@ -7783,7 +7951,7 @@ Events sent over the IPC socket (daemon → client).
 
 ```json
 {
-  "description": "工作流运行收尾事件 - 一次 run 到达终态时发一条\n\n【字段说明】\n- type: Literal[\"workflow.finished\"] - 事件类型\n- run_id: str - 结束的运行 ID\n- workflow_id / workflow_name: str - 归属工作流\n- session_id: str - 该 run 的 one_shot 会话（\"\"=没建过会话=零节点起跑即失败）\n- status: str - \"success\" | \"failed\" | \"interrupted\"\n- error: str - 失败摘要（fail-fast 时是最先炸掉的节点信息）\n- finished_at: str - 收尾时刻（ISO）\n- ts: str - 事件时间戳（ISO 8601）\n\n【设计目的】\n与 workflow.node 分工：node 管过程上色，finished 管终局对账——\nGUI 收到后刷新列表页 last_status chip 与详情抽屉，事件里带足\n行字段快照，订阅端不必再补一次 RPC。",
+  "description": "工作流运行收尾事件 - 一次 run 到达终态时发一条\n\n【字段说明】\n- type: Literal[\"workflow.finished\"] - 事件类型\n- run_id: str - 结束的运行 ID\n- workflow_id / workflow_name: str - 归属工作流\n- session_id: str - 该 run 的 one_shot 会话（\"\"=没建过会话=零节点起跑即失败）\n- status: str - \"success\" | \"failed\" | \"interrupted\" | \"cancelled\"\n- error: str - 失败摘要（fail-fast 时是最先炸掉的节点信息；取消为\"用户取消\"）\n- finished_at: str - 收尾时刻（ISO）\n- ts: str - 事件时间戳（ISO 8601）\n\n【设计目的】\n与 workflow.node 分工：node 管过程上色，finished 管终局对账——\nGUI 收到后刷新列表页 last_status chip 与详情抽屉，事件里带足\n行字段快照，订阅端不必再补一次 RPC。",
   "properties": {
     "type": {
       "const": "workflow.finished",
@@ -7835,6 +8003,66 @@ Events sent over the IPC socket (daemon → client).
     "ts"
   ],
   "title": "WorkflowRunFinishedEvent",
+  "type": "object"
+}
+```
+
+### PrReviewedEvent
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `pr_number` | `integer` | no |
+| `title` | `string` | no |
+| `session_id` | `string` | no |
+| `ok` | `boolean` | no |
+| `error` | `string` | no |
+| `ts` | `string` | yes |
+
+```json
+{
+  "description": "PR 评审发起事件 - pr.review 受理与否都广播一条（发起成功≠评审完成）\n\n【字段说明】\n- type: Literal[\"pr.reviewed\"] - 事件类型\n- pr_number: int - 被评审的 PR 编号\n- title: str - PR 标题（拉取失败时空串）\n- session_id: str - 新建的 one_shot 评审会话（失败时空串）\n- ok: bool - 评审会话是否成功发起\n- error: str - 失败摘要（无仓库坐标/拉 diff 失败/无 token）\n- ts: str - 时间戳（ISO 8601）\n\n【设计目的】\n与 schedule.fired 同款\"后台干活必留打卡\"纪律：轮询 auto_review 在\n没人盯着的时候发起评审，事件是唯一的即时可见性通道——GUI 订阅后\n刷新会话列表并给一行提示；离线客户端靠会话标题\"评审·PR#N\"对账。",
+  "properties": {
+    "type": {
+      "const": "pr.reviewed",
+      "default": "pr.reviewed",
+      "title": "Type",
+      "type": "string"
+    },
+    "pr_number": {
+      "default": 0,
+      "title": "Pr Number",
+      "type": "integer"
+    },
+    "title": {
+      "default": "",
+      "title": "Title",
+      "type": "string"
+    },
+    "session_id": {
+      "default": "",
+      "title": "Session Id",
+      "type": "string"
+    },
+    "ok": {
+      "default": false,
+      "title": "Ok",
+      "type": "boolean"
+    },
+    "error": {
+      "default": "",
+      "title": "Error",
+      "type": "string"
+    },
+    "ts": {
+      "title": "Ts",
+      "type": "string"
+    }
+  },
+  "required": [
+    "ts"
+  ],
+  "title": "PrReviewedEvent",
   "type": "object"
 }
 ```

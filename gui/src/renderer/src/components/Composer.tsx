@@ -7,7 +7,11 @@
 // 3) 六引擎全列，一个不少：这是本项目的核心能力面，GUI 不许提供"降级视图"。
 // 4) 运行中 Enter = 转向（run.steer 排队注入），发送键变停止键——同一输入框两种
 // 语义，用 placeholder 与图标形状明示，与 Codex 的排队输入同型。
-import { useEffect, useRef, useState } from 'react'
+// 5) 语音 v2 是"会话式流式"：点🎤开听，worklet 按能量 VAD 自动断句，每句
+// 转写完增量追加到输入框尾部——边说边出字。转写必有错字，输入框就是校对台；
+// 自动直接发送会把听错的词当金口。段与段之间用串行队列排话，防并发 RPC
+// 谁先回天定、回填文字乱序拼接。
+import { Fragment, useEffect, useRef, useState } from 'react'
 import {
   useStore,
   sendMessage,
@@ -20,17 +24,27 @@ import {
   compactSession
 } from '../store'
 import { useGui, baseName } from '../guiHelpers'
+import { rpc } from '../rpc'
+import type { SpeechTranscribeResult } from '../protocol/types'
+import { VoiceRecorder, downsample, pcmToB64, TARGET_RATE } from '../voiceCapture'
+import type { VoiceCapture } from '../voiceCapture'
 import { Popover, MenuItem } from './Popover'
 import { Icon } from './Icon'
 
-// 审批五态（对齐 daemon PERMISSION_MODES；描述语给用户讲清每种态的行为差异）
+// 审批档位呈现层（对标 Codex 2026"审批模式收敛三档"的教训）：daemon 五态内核
+// 与 deny→ask→allow 评估序一个不动，这里只是把用户词汇从"五种模式名"改成
+// "三档意图 + 高级收纳"。语义映射：谨慎=default（该问就问的安全基线）、
+// 顺滑=acceptEdits、全自动=bypassPermissions；plan/auto 归"高级"。
+// 第三条=行为描述（下拉里给足信息，chip 上只留两字词）
 const PERM_MODES: Array<[string, string, string]> = [
-  ['default', '默认', '每次工具调用都询问'],
-  ['acceptEdits', '接受编辑', '项目内文件编辑免批，其余仍询问'],
-  ['plan', '规划', '只读研究，不允许任何写操作'],
-  ['auto', '自动', '由分类器判断风险，低风险免批'],
-  ['bypassPermissions', '全部放行', '跳过审批（信任目录内才建议）']
+  ['default', '谨慎', '该问就问：每次工具调用按规则决策（安全基线）'],
+  ['acceptEdits', '顺滑', '编辑免批：项目内文件编辑不再逐条确认，其余照问'],
+  ['bypassPermissions', '全自动', '跳过确认层：deny 规则与强制 ask 仍然生效'],
+  ['plan', '高级·规划', '只读研究：任何写操作都被拒绝'],
+  ['auto', '高级·分类器', '分类器模型判断风险，低风险免批']
 ]
+// 前 3 项是日常档，第 4 项起归"高级"——下拉里的分隔线插在这个下标前
+const PERM_DIVIDER = 3
 const MODEL_PRESETS: Array<[string, string]> = [
   ['fast', '快速'],
   ['balanced', '均衡'],
@@ -52,11 +66,14 @@ const ENGINES: Array<[string, string]> = [
   ['pipeline', '流水线']
 ]
 
-// 一个参数 chip：label=当前值中文标签，items=单选表，pick=异步提交（失败回弹提示）
+// 一个参数 chip：label=当前值中文标签，items=单选表（第三元=行为描述，下拉里
+// 当 hint 显示；缺省回退显示原始值），dividerBefore=分隔线下标（"高级"分组），
+// pick=异步提交（失败回弹提示）
 function ParamChip(props: {
   icon: 'shield' | 'sparkle' | 'zap' | 'cpu'
   value: string
-  items: Array<[string, string]>
+  items: Array<[string, string, string?]>
+  dividerBefore?: number
   disabled?: boolean
   hint: string
   onPick: (v: string) => Promise<void>
@@ -79,21 +96,25 @@ function ParamChip(props: {
       {(close) => (
         <>
           <div className="pop-title">{props.hint}</div>
-          {props.items.map(([v, label]) => (
-            <MenuItem
-              key={v}
-              label={label}
-              hint={v}
-              active={props.value === label || props.value === v}
-              onClick={() => {
-                close()
-                setBusy(true)
-                void props
-                  .onPick(v)
-                  .catch((err) => window.alert(`切换失败：${String(err instanceof Error ? err.message : err)}`))
-                  .finally(() => setBusy(false))
-              }}
-            />
+          {props.items.map(([v, label, desc], idx) => (
+            <Fragment key={v}>
+              {props.dividerBefore === idx && (
+                <div className="pop-sep">高级 · 五态内核原样保留</div>
+              )}
+              <MenuItem
+                label={label}
+                hint={desc ?? v}
+                active={props.value === label || props.value === v}
+                onClick={() => {
+                  close()
+                  setBusy(true)
+                  void props
+                    .onPick(v)
+                    .catch((err) => window.alert(`切换失败：${String(err instanceof Error ? err.message : err)}`))
+                    .finally(() => setBusy(false))
+                }}
+              />
+            </Fragment>
           ))}
         </>
       )}
@@ -114,6 +135,20 @@ export function Composer({ booted }: { booted: boolean }) {
   const [text, setText] = useState('')
   const [sending, setSending] = useState(false)
   const taRef = useRef<HTMLTextAreaElement>(null)
+  // 语音会话两态机：idle↔rec（v2 会话式：rec 期间用户持续说话，段段入队，
+  // 不存在 V1 那种整钮 busy 禁用态——你还在说呢，凭什么把按钮焊死）
+  const [voice, setVoice] = useState<'idle' | 'rec'>('idle')
+  const [voiceErr, setVoiceErr] = useState('')
+  const [segCount, setSegCount] = useState(0) // 已回填的句子数（.voice-seg 的显示值+devtest 锚点）
+  const [vadCount, setVadCount] = useState(0) // VAD 断出的段数镜像（渲染用；判据在 segSeenRef）
+  const [segBusy, setSegBusy] = useState(false) // 当前有段正在转写（轻量指示，不拦点击）
+  const recRef = useRef<VoiceRecorder | null>(null)
+  // 串行转写队列：段 A 的 RPC 没回来就不发段 B——并发回话先后无定序，
+  // 回填会拼出"错乱的句接"；队列让文字顺序=说话顺序
+  const queueRef = useRef<Promise<void>>(Promise.resolve())
+  // 本场会话 VAD 断出的段数（含空文本段）：区别于 segCount（有字的段），
+  // 零段判定"整段没检测到人声"用它
+  const segSeenRef = useRef(0)
 
   // 会话有效目录（归属链与侧栏同一函数）：空态=新会话将用的目录，会话态=展示用
   const cwdForHint = activeSid
@@ -124,6 +159,9 @@ export function Composer({ booted }: { booted: boolean }) {
   useEffect(() => {
     if (booted && status === 'connected') taRef.current?.focus()
   }, [booted, status])
+
+  // 卸载时释放麦克风：不拆 track = Windows 隐私指示灯常亮，用户只当我们偷听
+  useEffect(() => () => recRef.current?.cancel(), [])
 
   // 自增高：每次输入重置为 auto 再按 scrollHeight 撑开（上限 180px）
   useEffect(() => {
@@ -154,6 +192,88 @@ export function Composer({ booted }: { booted: boolean }) {
     })
   }
 
+  // 单段转写：段 PCM→16k→base64→speech.transcribe→文本追加到输入框尾部。
+  // 失败只记 voiceErr 不打断会话——第 3 句网断了，第 4 句还能转
+  const transcribeSegment = async (cap: VoiceCapture): Promise<void> => {
+    setSegBusy(true)
+    try {
+      const b64 = pcmToB64(downsample(cap.frames, cap.sampleRate))
+      const res = await rpc<SpeechTranscribeResult>('speech.transcribe', {
+        audio_b64: b64,
+        sample_rate: TARGET_RATE
+      })
+      if (!res.ok) {
+        setVoiceErr(`这句转写失败：${res.error}`)
+      } else if (res.text) {
+        setVoiceErr('')
+        const t = res.text
+        setText((prev) => (prev.trim() ? `${prev} ${t}` : t))
+        setSegCount((c) => c + 1)
+      }
+      // ok 且空文本：whisper 把呼吸/杂音判成了无声——静默丢弃，不弹"没听清"
+      // 打断说话节奏（会话级的"整场没声"由停止路径统一判定）
+    } catch (e) {
+      setVoiceErr(`转写出错：${String(e instanceof Error ? e.message : e)}`)
+    } finally {
+      setSegBusy(false)
+    }
+  }
+
+  // 段入队：进串行 promise 链；捕获异常防一段炸链、后段全哑。
+  // vadCount 镜像段数给计数条——"断了几段"和"进了几句"分开显示，
+  // 才能一眼区分"VAD 没断句"和"whisper 判了非人声"（UI=9 纯音场景就靠这个）
+  const enqueueSegment = (cap: VoiceCapture): void => {
+    segSeenRef.current += 1
+    setVadCount(segSeenRef.current)
+    queueRef.current = queueRef.current
+      .then(() => transcribeSegment(cap))
+      .catch(() => undefined)
+  }
+
+  // 语音按钮统一入口：idle=开听（会话）；rec=停听（要尾段+看零段脸色）。
+  // 所有失败都汇到 voiceErr 小字条——不弹 alert，弹窗会劫持键盘且没法在
+  // devtest 里断言
+  const toggleVoice = async (): Promise<void> => {
+    if (voice === 'rec') {
+      const rec = recRef.current
+      recRef.current = null
+      setVoice('idle')
+      try {
+        const tail = await (rec ? rec.stop() : Promise.resolve<VoiceCapture | null>(null))
+        if (tail) enqueueSegment(tail)
+      } catch (e) {
+        setVoiceErr(`语音会话收尾失败：${String(e instanceof Error ? e.message : e)}`)
+      }
+      if (segSeenRef.current === 0) setVoiceErr('没听清——整段没检测到人声，靠近麦克风再说一遍？')
+      return
+    }
+    setVoiceErr('')
+    segSeenRef.current = 0
+    setVadCount(0)
+    queueRef.current = Promise.resolve()
+    setSegCount(0)
+    try {
+      const rec = new VoiceRecorder()
+      await rec.start(
+        (cap) => enqueueSegment(cap),
+        // 到点自动停（5 分钟上限）：Recorder 已放麦，这里只对齐 UI 状态；
+        // 判 rec 身份是因为用户可能早已手动停过、开了新会话
+        () => {
+          if (recRef.current !== rec) return
+          recRef.current = null
+          setVoice('idle')
+          if (segSeenRef.current === 0) setVoiceErr('没听清——整段没检测到人声，靠近麦克风再说一遍？')
+        },
+        300
+      )
+      recRef.current = rec
+      setVoice('rec')
+      requestAnimationFrame(() => taRef.current?.focus())
+    } catch (e) {
+      setVoiceErr(`无法使用麦克风：${String(e instanceof Error ? e.message : e)}（检查 设置→隐私→麦克风）`)
+    }
+  }
+
   // 提交：空闲=发消息；运行中=把输入当转向指令排队
   const doSend = async (): Promise<void> => {
     const value = text.trim()
@@ -181,7 +301,7 @@ export function Composer({ booted }: { booted: boolean }) {
   // 当前值 → 中文标签（找不到就原样显示：防 daemon 回了没见过的枚举值时界面空白）
   const labelOf = (table: Array<[string, string]>, v?: string): string =>
     table.find(([x]) => x === v)?.[1] ?? v ?? (table === EFFORTS ? '中' : table === MODEL_PRESETS ? '均衡' : '默认')
-  const permLabel = PERM_MODES.find(([v]) => v === (attrs?.permissionMode ?? 'default'))?.[1] ?? '默认'
+  const permLabel = PERM_MODES.find(([v]) => v === (attrs?.permissionMode ?? 'default'))?.[1] ?? '谨慎'
   const modelLabel = `${labelOf(MODEL_PRESETS, attrs?.modelPreset ?? 'balanced')}${attrs?.model ? ` · ${attrs.model.split('/').pop()}` : ''}`
   const effortLabel = labelOf(EFFORTS, attrs?.effortLevel ?? 'medium')
   const engineLabel = labelOf(ENGINES, attrs?.engine ?? 'auto')
@@ -221,13 +341,39 @@ export function Composer({ booted }: { booted: boolean }) {
           >
             <Icon name="plus" size={13} />
           </button>
+          <button
+            className={`chip icon-chip${voice === 'rec' ? ' mic-rec' : ''}`}
+            title={
+              voice === 'rec'
+                ? '停止聆听（说完这句直接点，尾段照常入字）'
+                : '语音输入（自动断句，边说边出字；再点一下停止）'
+            }
+            disabled={!booted || status !== 'connected'}
+            onClick={() => void toggleVoice()}
+          >
+            <Icon name="mic" size={13} />
+          </button>
           <ParamChip
             icon="shield"
             value={permLabel}
-            items={PERM_MODES.map(([v, l]) => [v, `${l}`])}
+            items={PERM_MODES}
+            dividerBefore={PERM_DIVIDER}
             hint="审批模式（本会话）"
             disabled={!activeSid}
-            onPick={(v) => (activeSid ? setPermissionMode(activeSid, v) : Promise.resolve())}
+            onPick={async (v) => {
+              if (!activeSid) return
+              // 【学习要点】只有升到"全自动"设卡：方向不对称——更严格永远无害，
+              // 放宽才需要一次知情。confirm 文案必须如实写 deny/强制 ask 地板
+              // 仍在（对齐 CLAUDE.md 安全事实模型），不许把 bypass 说成"什么都不问"
+              if (
+                v === 'bypassPermissions' &&
+                !window.confirm(
+                  '开启「全自动」？\n\n将跳过审批确认层——deny 规则与强制 ask 仍然生效，不是"什么都不问"。\n建议仅在完全信任的项目目录使用。'
+                )
+              )
+                return
+              await setPermissionMode(activeSid, v)
+            }}
           />
           <ParamChip
             icon="sparkle"
@@ -287,6 +433,14 @@ export function Composer({ booted }: { booted: boolean }) {
             </button>
           )}
         </div>
+        {voice === 'rec' && (
+          <div className="voice-seg" title="能量 VAD 自动断句；每句转写完自动追加到输入框尾部">
+            <span className="voice-seg-dot" />
+            <span>已断 {vadCount} 段 · 已入 {segCount} 句</span>
+            {segBusy && <span className="voice-seg-busy">· 转写中…</span>}
+          </div>
+        )}
+        {voiceErr && <div className="voice-err">{voiceErr}</div>}
       </div>
     </div>
   )

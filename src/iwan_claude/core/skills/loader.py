@@ -39,13 +39,17 @@ $ARGUMENTS
 
 【优先级查找】
 1. 项目本地：.iwan/skills/
-2. 用户全局：~/.iwan/skills/
-3. 内建：core/skills/builtin/
+2. 项目本地（Claude 生态）：.claude/skills/
+3. 用户全局：~/.iwan/skills/
+4. 用户全局（Claude 生态）：~/.claude/skills/
+5. 内建：core/skills/builtin/
 
 【设计特点】
 - 支持扁平格式（name.md）和目录格式（name/SKILL.md）
 - 本地 Skill 覆盖同名内建 Skill
 - 支持从 GitHub 仓库、ZIP 文件、SKILL.md 文件安装
+- 跨工具兼容：直接加载 Claude Code / Codex 生态的 .claude/skills/ 技能包
+  （认 allowed-tools 连字符字段名；iwan 原生目录永远压过第三方同名技能）
 """
 from __future__ import annotations
 
@@ -193,10 +197,11 @@ def _parse_skill_file(path: Path) -> Skill:
     """
     # 1. 读取文件内容
     text = path.read_text(encoding="utf-8")
-    
+
     # 2. 初始化默认值
-    # 默认名称为文件名（不含扩展名）
-    name = path.stem
+    # 默认名称：目录格式（SKILL.md）取父目录名——文件 stem 恒为 "SKILL"，
+    # 用它当默认名会让所有无 name 的目录技能互相撞名；扁平格式仍取 stem
+    name = path.parent.name if path.name == "SKILL.md" else path.stem
     description = ""
     allowed_tools: list[str] = []
     invocation = InvocationType.MANUAL
@@ -225,14 +230,14 @@ def _parse_skill_file(path: Path) -> Skill:
             # 如果正在解析列表字段（allowed_tools 或 keywords）
             if current_list is not None:
                 if stripped.startswith("- "):
-                    # 添加列表项
-                    current_list.append(stripped[2:].strip())
+                    # 添加列表项（Claude 生态的列表项常带引号，一并剥掉）
+                    current_list.append(stripped[2:].strip().strip('"').strip("'"))
                     i += 1
                     continue
                 else:
                     # 列表结束
                     current_list = None
-            
+
             # 解析 name 字段
             if stripped.startswith("name:"):
                 # 去除字段名和引号
@@ -240,10 +245,11 @@ def _parse_skill_file(path: Path) -> Skill:
             # 解析 description 字段（支持 YAML 块标量）
             elif stripped.startswith("description:"):
                 val = stripped[len("description:"):].strip().strip('"').strip("'")
-                # 检测 YAML 块标量（| 或 >）
-                if val in (">", "|"):
+                # 检测 YAML 块标量（| 或 > 开头，兼容 |- >- 等 chomping 指示符）
+                if val[:1] in (">", "|"):
                     # fold=True 表示折叠换行（>），fold=False 表示保留换行（|）
-                    fold = val == ">"
+                    # 按首字符判断——val 可能带 chomping 尾巴（>- / |-）
+                    fold = val[0] == ">"
                     parts: list[str] = []
                     i += 1
                     # 读取缩进的内容行
@@ -268,9 +274,16 @@ def _parse_skill_file(path: Path) -> Skill:
             # 解析 icon 字段
             elif stripped.startswith("icon:"):
                 icon = stripped[len("icon:"):].strip().strip('"').strip("'")
-            # 解析 allowed_tools 字段（开始列表）
-            elif stripped.startswith("allowed_tools:"):
-                current_list = allowed_tools
+            # 解析 allowed_tools 字段（开始列表）；Claude 官方规范用连字符
+            # 名 allowed-tools，且值可内联逗号/空格分隔（如 "Bash(git:*), Read"）
+            # ——两种拼法都认（字段名同为 14 字符，切片统一）；内联值就地拆分，
+            # 空值则进入下方 - 列表模式
+            elif stripped.startswith("allowed_tools:") or stripped.startswith("allowed-tools:"):
+                val = stripped[14:].strip().strip('"').strip("'")
+                if val:
+                    allowed_tools.extend(t for t in re.split(r"[,\s]+", val) if t)
+                else:
+                    current_list = allowed_tools
             # 解析 keywords 字段（开始列表）
             elif stripped.startswith("keywords:"):
                 current_list = keywords
@@ -330,6 +343,25 @@ class SkillLoader:
     """
     # 内建 Skill 目录路径
     _BUILTIN_DIR = Path(__file__).parent / "builtin"
+
+    # 【学习要点】搜索目录单一权威源：三处消费点（resolve 的候选路径、
+    # list_all、list_all_skills）过去各自抄写目录清单，加一档就要改三处——
+    # 漏一处就是"能按名找到、列表里却看不见"的分裂 bug。现在全部从本函数
+    # 取表，优先级只写一遍。
+    #
+    # 兼容 Claude Code / Codex 生态的关键决策：.claude/skills 排在同级 .iwan
+    # 之后、任何更低级之前——"借库"不是"让位"，项目自有的 iwan 技能永远
+    # 压过第三方同名技能，用户级 iwan 压过项目级 claude（iwan 原生优先原则）
+    @classmethod
+    def _skill_dirs(cls) -> list[Path]:
+        """返回按优先级（高→低）排序的全部技能搜索目录"""
+        return [
+            Path(".iwan/skills"),                   # 项目级 iwan 原生
+            Path(".claude/skills"),                 # 项目级 Claude Code/Codex 生态
+            Path("~/.iwan/skills").expanduser(),    # 用户级 iwan 原生
+            Path("~/.claude/skills").expanduser(),  # 用户级 Claude Code/Codex 生态
+            cls._BUILTIN_DIR,                       # 内建
+        ]
 
     def resolve(self, name: str) -> Skill | None:
         """
@@ -391,14 +423,9 @@ class SkillLoader:
         【设计目的】
         生成所有可能的 Skill 文件路径，按优先级排序
         """
-        # 搜索目录列表（按优先级排序）
-        dirs = [
-            Path(".iwan/skills"),              # 项目本地
-            Path("~/.iwan/skills").expanduser(),  # 用户全局
-            self._BUILTIN_DIR,                 # 内建
-        ]
+        # 搜索目录统一取自 _skill_dirs（单一权威源，见其注释）
         paths: list[Path] = []
-        for d in dirs:
+        for d in self._skill_dirs():
             paths.append(d / f"{name}.md")      # 扁平格式
             paths.append(d / name / "SKILL.md")  # 目录格式
         return paths
@@ -425,12 +452,8 @@ class SkillLoader:
         返回所有可用 Skill 的名称，供用户选择
         """
         seen: dict[str, None] = {}
-        # 按优先级反向遍历（内建 → 全局 → 本地），本地覆盖同名
-        for d in [
-            self._BUILTIN_DIR,
-            Path("~/.iwan/skills").expanduser(),
-            Path(".iwan/skills"),
-        ]:
+        # 按优先级反向遍历（最低级先入，高优先级同名覆盖），目录表单一来源
+        for d in reversed(self._skill_dirs()):
             if d.exists():
                 # 收集扁平格式的 Skill
                 for f in sorted(d.glob("*.md")):
@@ -461,12 +484,8 @@ class SkillLoader:
         返回所有可用 Skill 的完整信息，供自动匹配使用
         """
         seen: dict[str, Skill] = {}
-        # 按优先级反向遍历（内建 → 全局 → 本地），本地覆盖同名
-        for d in [
-            self._BUILTIN_DIR,
-            Path("~/.iwan/skills").expanduser(),
-            Path(".iwan/skills"),
-        ]:
+        # 按优先级反向遍历（最低级先入，高优先级同名覆盖），目录表单一来源
+        for d in reversed(self._skill_dirs()):
             if d.exists():
                 # 收集扁平格式的 Skill
                 for f in sorted(d.glob("*.md")):

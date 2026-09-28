@@ -1,8 +1,8 @@
-# 功能：验证工作流六个 RPC 方法在真实 daemon 上的定义回环、校验拒写与错误边界
+# 功能：验证工作流七个 RPC 方法在真实 daemon 上的定义回环、校验拒写与错误边界
 # 设计：走原始 TCP + JSON-RPC 帧（同 schedule 集成测试纪律），测 wire 协议本身。
 # fixture 已把 IWAN_SESSIONS_DIR 指到 tmp，workflows.json 落临时目录。刻意
 # 不测 workflow.run 的执行路径——节点会真起 subagent 打 LLM，集成环境无密钥；
-# run 只测"不存在的 id 必须 ok=False 给文案"这条不碰调度的边界。
+# run/cancel 都只测"没有活跃运行"这条不碰调度的早退边界。
 from __future__ import annotations
 
 import asyncio
@@ -93,6 +93,35 @@ async def test_workflow_cycle_rejected_not_persisted(
 
         r = await _rpc(reader, writer, "c3", "workflow.run", {"id": "ghost-id"})
         assert r["result"]["ok"] is False and "不存在" in r["result"]["error"]
+
+        # cancel 的幽灵 id：活跃表先查、定义存在性根本不看——"没有进行中的
+        # 运行"是它唯一的拒绝形态（幂等语义不关心你问的是谁）
+        r = await _rpc(reader, writer, "c4", "workflow.cancel", {"id": "ghost-id"})
+        assert r["result"]["ok"] is False and "进行中的运行" in r["result"]["error"]
+    finally:
+        writer.close()
+        await writer.wait_closed()
+
+
+# 功能：对存在但没有进行中运行的工作流发 workflow.cancel → ok=False 中文拒绝
+# 设计：真跑一个 run 会打 LLM，集成纪律禁止——取消路径在传输面能测的就是
+# handler 的早退闸（引擎单测覆盖不到 active_run_for 前置判断）；断拒绝走
+# ok=False 信封而非 JSON-RPC error（参数没坏，是业务无事可做），且同连接
+# 后续请求照常——取消 RPC 不许有掀桌副作用
+async def test_workflow_cancel_idle_rejected(
+    running_daemon: subprocess.Popen[bytes], free_port: int
+) -> None:
+    reader, writer = await asyncio.open_connection("127.0.0.1", free_port)
+    try:
+        r = await _rpc(reader, writer, "i1", "workflow.save", {
+            "name": "闲流", "description": "",
+            "tasks": [{"name": "A", "prompt": "a", "depends_on": []}],
+        })
+        wid = r["result"]["id"]
+        r = await _rpc(reader, writer, "i2", "workflow.cancel", {"id": wid})
+        assert r["result"]["ok"] is False and "进行中的运行" in r["result"]["error"]
+        r = await _rpc(reader, writer, "i3", "workflow.get", {"id": wid})
+        assert r["result"]["ok"] is True  # 被拒绝的 cancel 不伤定义行
     finally:
         writer.close()
         await writer.wait_closed()

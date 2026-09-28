@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -223,3 +224,76 @@ async def test_title_refine_safety_valves(tmp_path: Path) -> None:
     while m2._title_tasks:
         await asyncio.gather(*list(m2._title_tasks))
     assert s2.title == "人写的标题"
+
+
+# 功能：模拟 daemon 重启——新 SessionManager 对磁盘上的旧会话执行 get_history/close 不再 -32010
+# 设计：同 tmp store 造两个 manager（第二个内存为空，正是重启现场），走公开方法而非
+#      直接调 _get_session，锁住的是"RPC handler 依赖的整条寻址链"；再断言回灌对象
+#      进了内存字典（第二次访问零读盘）——防有人改回启动全量预载或每查必读盘
+async def test_persisted_session_survives_restart(tmp_path: Path) -> None:
+    store = SessionStore(tmp_path)
+    m1 = SessionManager(store, lambda: _Runner(), EventBus())  # type: ignore[arg-type]
+    s1 = await m1.create("chat", "重启前旧会话")
+    await m1.send_message(s1.id, "说句话", skip_auto_skill=True)
+
+    m2 = SessionManager(store, lambda: _Runner(), EventBus())  # type: ignore[arg-type]
+    assert m2._sessions == {}  # 重启现场：内存空、磁盘有
+    history = await m2.get_history(s1.id)
+    assert any("说句话" in str(m.get("content", "")) for m in history)
+    assert s1.id in m2._sessions  # 已回灌
+    # 回灌对象可直接走完剩余生命周期
+    await m2.close(s1.id)
+    assert store.read_meta(s1.id).status == "closed"
+
+
+# 功能：重启回灌的会话能继续 send_message 多轮对话（bug 报告里的核心用户路径）
+# 设计：不复用 m1 的任何对象，纯靠 store 磁盘衔接两代 manager；断 run_id 生成、
+#      消息落盘、状态回到 waiting_for_input——证明回灌会话与原生会话同构无特例
+async def test_hydrated_session_accepts_new_message(tmp_path: Path) -> None:
+    store = SessionStore(tmp_path)
+    m1 = SessionManager(store, lambda: _Runner(), EventBus())  # type: ignore[arg-type]
+    s1 = await m1.create("chat", "续聊验证")
+    await m1.send_message(s1.id, "第一轮", skip_auto_skill=True)
+
+    m2 = SessionManager(store, lambda: _Runner(), EventBus())  # type: ignore[arg-type]
+    res = await m2.send_message(s1.id, "第二轮", skip_auto_skill=True)
+    assert res.run_id
+    assert m2._sessions[s1.id].status == "waiting_for_input"
+    thread = store.read_messages(s1.id)
+    text = json.dumps(thread, ensure_ascii=False)
+    assert "第一轮" in text and "第二轮" in text
+
+
+# 功能：磁盘上不存在（或 meta 损坏）的 sid 依旧报 SESSION_NOT_FOUND，回灌不改变错误语义
+# 设计：坏 meta 用"写坏 JSON 再读"构造，覆盖 read_meta 的 ValueError/KeyError 两个
+#      异常出口合并成同一错误码的路径——防 except 面收窄后坏数据炸 500
+async def test_hydrate_missing_or_broken_still_not_found(tmp_path: Path) -> None:
+    store = SessionStore(tmp_path)
+    manager = SessionManager(store, lambda: _Runner(), EventBus())  # type: ignore[arg-type]
+    with pytest.raises(HandlerError) as e1:
+        await manager.get_history("sess-never-existed")
+    assert e1.value.code == SESSION_NOT_FOUND
+
+    (tmp_path / "sess-broken").mkdir()
+    (tmp_path / "sess-broken" / "meta.json").write_text("{not json", encoding="utf-8")
+    with pytest.raises(HandlerError) as e2:
+        await manager.get_history("sess-broken")
+    assert e2.value.code == SESSION_NOT_FOUND
+
+
+# 功能：含路径分隔符/.. 的恶意 sid 一律 not found，且绝不触碰文件系统
+# 设计：回灌引入了"客户端字符串 → 文件路径"新数据流，这是必须锁死的安全边界；
+#      用 autouse 无关的独立 monkeypatch 让 read_meta 一旦被调用就炸测试——
+#      断的不是返回值而是"根本没读盘"
+async def test_hydrate_rejects_path_traversal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    store = SessionStore(tmp_path)
+
+    def _boom(sid: str) -> Session:
+        raise AssertionError(f"read_meta must not be called for sid={sid!r}")
+
+    monkeypatch.setattr(store, "read_meta", _boom)
+    manager = SessionManager(store, lambda: _Runner(), EventBus())  # type: ignore[arg-type]
+    for evil in ("..\\..\\windows", "a/b", "..%2f", "\x00sess", ".hidden"):
+        with pytest.raises(HandlerError) as e:
+            manager._get_session(evil)
+        assert e.value.code == SESSION_NOT_FOUND

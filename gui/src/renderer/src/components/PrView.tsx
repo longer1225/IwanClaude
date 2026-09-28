@@ -13,7 +13,8 @@ import type {
   PrContextResult,
   PrCreateResult,
   PrInfo,
-  PrListResult
+  PrListResult,
+  PrReviewResult
 } from '../protocol/types'
 import { Icon } from './Icon'
 
@@ -35,6 +36,9 @@ export function PrView() {
   const [base, setBase] = useState('')
   const [draft, setDraft] = useState(false)
   const [createMsg, setCreateMsg] = useState('')
+  // ④ 评审回显：一次只发一个（评审=烧 LLM 的授权动作，串行防手滑连点）
+  const [reviewMsg, setReviewMsg] = useState('')
+  const [reviewBusy, setReviewBusy] = useState(false)
 
   const cwd = selectedCwd ?? ''
 
@@ -91,6 +95,21 @@ export function PrView() {
       setCreateMsg(`✗ ${String(e)}`)
     } finally {
       setBusy(false)
+    }
+  }
+
+  // 一键评审：daemon 拉 diff 起 one_shot 会话即返；这里只报"发起成败"，
+  // 评审内容在侧栏"评审·PR#N"会话里慢慢跑（pr.reviewed 事件会刷新会话列表）
+  const submitReview = async (n: number): Promise<void> => {
+    setReviewBusy(true)
+    setReviewMsg('')
+    try {
+      const r = await rpc<PrReviewResult>('pr.review', { cwd, pr_number: n })
+      setReviewMsg(r.ok ? `✓ 评审会话已开：评审·PR#${n}（侧栏可点开）` : `✗ ${r.error}`)
+    } catch (e) {
+      setReviewMsg(`✗ ${String(e)}`)
+    } finally {
+      setReviewBusy(false)
     }
   }
 
@@ -164,6 +183,7 @@ export function PrView() {
           <button className="chip" disabled={!ctx?.ok || busy || pulls.length < 30} onClick={() => setPage((p) => p + 1)}>›</button>
         </div>
         {listErr && <div className="fn-err">{listErr}</div>}
+        {reviewMsg && <div className={reviewMsg.startsWith('✓') ? 'fn-ok' : 'fn-err'}>{reviewMsg}</div>}
         {!listErr && ctx?.ok && !busy && !pulls.length && <div className="fn-empty">该状态下没有 PR</div>}
         {pulls.map((p) => (
           <div key={p.number} className="fn-row" onClick={() => window.open(p.url, '_blank')} title={p.title}>
@@ -173,6 +193,15 @@ export function PrView() {
             <span className="grow" />
             <span className="fn-meta">{p.author} · {p.head_ref} → {p.base_ref}</span>
             <span className="fn-meta">#{p.number}</span>
+            {/* stopPropagation：按钮在整行 onClick（开网页）里，不拦会双动作 */}
+            <button
+              className="chip pr-review-btn"
+              disabled={reviewBusy}
+              title="只读评审：拉取 diff 起一个一次性评审会话"
+              onClick={(e) => { e.stopPropagation(); void submitReview(p.number) }}
+            >
+              评审
+            </button>
           </div>
         ))}
       </div>

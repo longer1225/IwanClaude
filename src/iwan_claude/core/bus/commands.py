@@ -13,6 +13,7 @@
 - 事件订阅：EventSubscribeCommand
 - 会话管理：SessionCreateCommand, SessionSendMessageCommand, SessionGetHistoryCommand, SessionCloseCommand
 - 权限响应：PermissionRespondCommand
+- PR 协作：PrContextCommand, PrListCommand, PrCreateCommand, PrReviewCommand
 - 模式设置：SessionSetAutoModeCommand（legacy 三态）, SessionSetPermissionModeCommand（五态）
 - 上下文压缩：SessionCompactCommand
 - 检查点管理：SessionCheckpointListCommand, SessionCheckpointRestoreCommand
@@ -1178,6 +1179,40 @@ class PrCreateResult(BaseModel):
     error: str = ""
 
 
+class PrReviewCommand(BaseModel):
+    """
+    PR 评审命令 - 拉取指定 PR 的 diff 并起一个 one_shot 评审会话
+
+    【字段说明】
+    - type: Literal["pr.review"] - 命令类型
+    - cwd: str - 目标仓库（解析 owner/repo 坐标）
+    - pr_number: int - 要评审的 PR 编号
+
+    【设计目的与安全边界】
+    只读拉 diff（GitHub media type 直出补丁文本）+ 新建 one_shot 会话
+    跑评审——diff 是喂给模型的文本、不被执行；评审会话工具链照常过
+    审批门。发起 = GUI 显式点击或 config [github] auto_review 显式打开，
+    两条路都是授权动作（workflow.run 同口径）。
+    """
+    type: Literal["pr.review"] = "pr.review"
+    cwd: str
+    pr_number: int
+
+
+class PrReviewResult(BaseModel):
+    """
+    PR 评审响应
+
+    【字段说明】
+    - ok: bool - 评审会话是否成功发起（True=diff 已到手、评审已在跑）
+    - session_id: str - "评审·PR#N" one_shot 会话 ID
+    - error: str - 失败摘要（非 git 仓库/无远端/拉 PR 失败/无 token 权限）
+    """
+    ok: bool = False
+    session_id: str = ""
+    error: str = ""
+
+
 class ScheduleListCommand(BaseModel):
     """
     定时任务列表命令 - 查询全部任务定义（含下次到期时间）
@@ -1366,7 +1401,8 @@ class WorkflowNodeRunInfo(BaseModel):
 
     【字段说明】
     - node: str - 节点名
-    - status: str - "pending" | "running" | "ok" | "fail"（pending=run 行预置骨架的初始态）
+    - status: str - "pending" | "running" | "ok" | "fail" | "cancelled"
+      （pending=run 行预置骨架的初始态；cancelled=取消收口时正在跑的节点）
     - child_run_id: str - 该节点子 Agent 的 run id（深链审计用）
     - detail: str - 失败原因/取消说明（≤200 字）
     - output: str - 成功产出快照（截断存储，≤400 字）
@@ -1389,7 +1425,7 @@ class WorkflowRunInfo(BaseModel):
     - id: str - run id（服务端生成）
     - workflow_id / workflow_name: str - 归属工作流
     - session_id: str - 该 run 懒建的 one_shot 会话（子 Agent 审批卡的落点；""=还没建）
-    - status: str - "running" | "success" | "failed" | "interrupted"
+    - status: str - "running" | "success" | "failed" | "interrupted" | "cancelled"
     - started_at / finished_at / error: str - 收尾信息
     - nodes: list[WorkflowNodeRunInfo] - 各节点运行态
     """
@@ -1508,6 +1544,23 @@ class WorkflowRunCommand(BaseModel):
     id: str
 
 
+class WorkflowCancelCommand(BaseModel):
+    """
+    工作流运行取消命令 - 中止某工作流当前进行中的运行
+
+    【字段说明】
+    - type: Literal["workflow.cancel"] - 命令类型
+    - id: str - 目标工作流（与 workflow.run 同口径：handler 解析其活跃 run）
+
+    【设计目的】
+    GUI 点击"取消"是用户显式授权（同 workflow.run 的点击语义）；无活跃运行
+    时幂等拒绝而非报错。取消是善后不是毁灭：run 落 cancelled 终态、正在跑
+    的节点补标 cancelled、未轮到的节点保持 pending——历史诚实可查。
+    """
+    type: Literal["workflow.cancel"] = "workflow.cancel"
+    id: str
+
+
 class WorkflowRunsCommand(BaseModel):
     """
     工作流运行历史命令
@@ -1545,6 +1598,38 @@ class WorkflowOpResult(BaseModel):
     ok: bool = True
     id: str = ""
     run_id: str = ""
+    error: str = ""
+
+
+class SpeechTranscribeCommand(BaseModel):
+    """
+    语音转写命令 - GUI 录音发 PCM，daemon 用本地 whisper 转成文字
+
+    【字段说明】
+    - type: Literal["speech.transcribe"] - 命令类型
+    - audio_b64: str - 单声道 int16 小端 PCM 裸字节的 base64（与 ssh.term_write 同编码纪律）
+    - sample_rate: int - 采样率（8000..48000；GUI 侧固定降采样到 16000）
+
+    【设计目的】
+    一次 RPC 一问一答（非流式）：v1 定位是"说完一段填进输入框"，几十秒语音
+    2.6MB base64 远在 64MB 帧限内；流式实时出字需要双向通道，留给 v2。
+    """
+    type: Literal["speech.transcribe"] = "speech.transcribe"
+    audio_b64: str
+    sample_rate: int = 16000
+
+
+class SpeechTranscribeResult(BaseModel):
+    """
+    语音转写响应
+
+    【字段说明】
+    - ok: bool - 是否转写成功
+    - text: str - 识别出的文字（失败为空；成功但没听清也可能是空串）
+    - error: str - 失败原因（依赖缺失/模型加载失败/音频非法，中文原文给 GUI 回显）
+    """
+    ok: bool = True
+    text: str = ""
     error: str = ""
 
 
@@ -2103,6 +2188,7 @@ Command = Annotated[
     | PrContextCommand
     | PrListCommand
     | PrCreateCommand
+    | PrReviewCommand
     | ScheduleListCommand
     | ScheduleCreateCommand
     | ScheduleUpdateCommand
@@ -2132,6 +2218,8 @@ Command = Annotated[
     | WorkflowSaveCommand
     | WorkflowDeleteCommand
     | WorkflowRunCommand
-    | WorkflowRunsCommand,
+    | WorkflowCancelCommand
+    | WorkflowRunsCommand
+    | SpeechTranscribeCommand,
     Discriminator("type"),
 ]
