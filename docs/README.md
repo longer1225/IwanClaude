@@ -51,6 +51,10 @@
 | [memory-integration.md](todo/memory-integration.md) | 三层记忆系统集成的后续待办（集成本身已完成 2026-08-08） |
 | [project-showcase.md](todo/project-showcase.md) | 简历/面试导向的数据化内容清单；新想法先记这里再排期 |
 
+## images/ — 桌面 GUI 截图素材
+
+README「界面速览」的七帧原图（devtest capturePage 拍摄，勿手动编辑，重拍后按 `gui-0N-<面板>.png` 覆盖）。
+
 ## 根目录
 
 - `index.md` — 早期自动生成的 API 列表，**已过时**，无引用；确认无用可直接删除。

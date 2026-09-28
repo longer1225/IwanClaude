@@ -32,6 +32,23 @@
 | **工具系统** | 64 个内置工具 + 热加载（放 `.py` 进 `.iwan/tools/` 即发现，运行时 reload）+ 并行调用 |
 | **MCP** | 外部工具服务器协议（stdio / tcp） |
 | **Skills** | 项目级 > 用户级 > 内置三级技能加载，自动触发 + 手动 `/skill_name` |
+| **桌面 GUI** | Electron 客户端（`gui/`）：七功能面板 + 语音输入（本地 whisper 断句）+ 权限三档预设（谨慎/顺滑/全自动） |
+
+---
+
+## 🖼️ 界面速览
+
+Electron 桌面客户端（开发中，`gui/` 子工程）——连接同一个 `iwan-core` daemon，TUI 之外的图形面。
+
+| 界面 | 说明 |
+|---|---|
+| ![主界面](./docs/images/gui-01-home.png) | **主界面**：会话侧栏 + 输入框，🎤 按钮本地语音输入、实时显示断句进度 |
+| ![Git 面板](./docs/images/gui-02-git.png) | **Git**：暂存/丢弃/提交/Push/Pull 全按钮化，改动列表实时刷新 |
+| ![Pull Request](./docs/images/gui-03-pr.png) | **Pull Request**：本地坐标卡 + GitHub PR 列表 + 一键评审（此仓库尚无 PR，显示空态） |
+| ![定时任务](./docs/images/gui-04-schedule.png) | **定时任务**：到点自动起会话执行指令，新建表单即截图所示 |
+| ![工作流](./docs/images/gui-05-workflow.png) | **工作流**：DAG 分层编排多 Agent 节点，运行历史与取消状态一目了然 |
+| ![MCP](./docs/images/gui-06-mcp.png) | **MCP 服务**：设置面板只读展示外部工具服务器挂载情况 |
+| ![SSH 终端](./docs/images/gui-07-ssh.png) | **SSH 终端**：连接库 + 本机密钥 + 主机信任 + 多页签终端 |
 
 ---
 
