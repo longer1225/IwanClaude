@@ -19,7 +19,7 @@ import { RightPanel, FileViewer } from './components/RightPanel'
 import { SettingsView } from './components/SettingsView'
 import { PrView } from './components/PrView'
 import { ScheduleView } from './components/ScheduleView'
-import { McpView } from './components/McpView'
+import { PluginView } from './components/PluginView'
 import { GitPanel } from './components/GitPanel'
 import { SshView } from './components/SshView'
 import { WorkflowView } from './components/WorkflowView'
@@ -57,6 +57,8 @@ export default function App() {
   const rightOpen = useGui((s) => s.rightOpen)
   const guiSet = useGui((s) => s.set)
   const mainView = useGui((s) => s.mainView)
+  // 预览页签且已选中文件时右栏加宽一档（rp-wide）：340px 读 md 表格太挤
+  const previewWide = useGui((s) => s.rightTab === 'preview' && s.fileView !== null)
 
   // 启动拉一次 gui.json（主题/字号/项目表）——在应用样式后才渲染，避免闪白
   useEffect(() => {
@@ -72,7 +74,7 @@ export default function App() {
         topics: [
           'session.*', 'run.*', 'step.*', 'tool.*', 'llm.*',
           'permission.*', 'trust.*', 'subagent.*', 'skill.*', 'context.*',
-          'schedule.*', 'ssh.*', 'workflow.*'
+          'schedule.*', 'ssh.*', 'workflow.*', 'plugin.*'
         ],
         scope: 'global'
       })
@@ -99,13 +101,13 @@ export default function App() {
   // 功能视图（M2/M3）：主区整体换脸，Composer/线程只属于 chat
   const fnView =
     mainView === 'pr' ? <PrView /> : mainView === 'git' ? <GitPanel />
-    : mainView === 'schedule' ? <ScheduleView /> : mainView === 'mcp' ? <McpView />
+    : mainView === 'schedule' ? <ScheduleView /> : mainView === 'mcp' ? <PluginView />
     : mainView === 'ssh' ? <SshView /> : mainView === 'workflow' ? <WorkflowView /> : null
 
   return (
     <div className="frame">
       <TitleBar />
-      <div className={`shell status-${status}${rightOpen && mainView === 'chat' ? ' rp-open' : ''}`}>
+      <div className={`shell status-${status}${rightOpen && mainView === 'chat' ? ' rp-open' : ''}${rightOpen && mainView === 'chat' && previewWide ? ' rp-wide' : ''}`}>
         <Sidebar />
         <main className="main">
           {fnView ? (

@@ -51,7 +51,7 @@ export function TitleBar() {
   return (
     <header className="titlebar">
       <span className="tb-brand">
-        <span className="tb-mark" aria-hidden="true" />iwan
+        <span className="tb-mark" aria-hidden="true" />iwan work
       </span>
       <span className="tb-drag" />
       <button

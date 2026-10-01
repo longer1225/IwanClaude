@@ -318,6 +318,19 @@ export interface SshTermCloseParams {
   session_id: string
 }
 
+export interface PluginListParams {
+
+}
+
+export interface PluginSetEnabledParams {
+  name: string
+  enabled: boolean
+}
+
+export interface PluginInstallParams {
+  url: string
+}
+
 // ==================== 命令结果与数据结构 ====================
 export interface FileChangeInfo {
   path: string
@@ -454,6 +467,18 @@ export interface SshConnInfo {
   user?: string
   port?: number
   key_file?: string
+}
+
+export interface PluginRow {
+  name: string
+  version?: string
+  enabled?: boolean
+  source?: string
+  skills?: Array<string>
+  hooks?: Array<string>
+  mcp?: Array<string>
+  status?: string
+  error?: string
 }
 
 export interface PongResult {
@@ -722,6 +747,20 @@ export interface SshTermOpResult {
   error?: string
 }
 
+export interface PluginListResult {
+  plugins?: Array<PluginRow>
+}
+
+export interface PluginSetEnabledResult {
+  ok?: boolean
+  error?: string
+}
+
+export interface PluginInstallResult {
+  ok: boolean
+  message: string
+}
+
 // ==================== 命令名联合 ====================
 export type CommandMethod =
   | "PydanticUndefined"
@@ -739,6 +778,9 @@ export type CommandMethod =
   | "git.status"
   | "mcp.status"
   | "permission.respond"
+  | "plugin.install"
+  | "plugin.list"
+  | "plugin.set_enabled"
   | "pr.context"
   | "pr.create"
   | "pr.list"
@@ -1077,5 +1119,12 @@ export type BusEvent =
     session_id?: string;
     ok?: boolean;
     error?: string;
+    ts: string;
+  }
+  | {
+    type: 'plugin.changed';
+    name: string;
+    enabled: boolean;
+    by?: string;
     ts: string;
   }

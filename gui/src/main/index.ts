@@ -24,7 +24,7 @@ function createWindow(): void {
     height: 900,
     minWidth: 980,
     minHeight: 640,
-    title: 'iwan',
+    title: 'iwan work',
     frame: false, // 去原生标题栏；拖拽/双击最大化由渲染层 .titlebar 的 app-region 承担
     backgroundColor: '#F6F1E7', // 首帧即暖色，避免白闪（渐变带的顶色）
     webPreferences: {
@@ -1112,6 +1112,105 @@ function createWindow(): void {
               }
               return 'FINAL review-sessions=' + sess.length + ' closed=' + closed
             })()`, 44)
+          } else if (uiMode === '14') {
+            // ===== 插件①链：进「插件 / MCP」页 → 断言三内置卡在且默认禁用 →
+            // 点 toggle 启用 commit-craft → 事件回流后卡片上屏"已启用"+skill chip
+            // 出现 → RPC 直查 plugin.list 复核 enabled=true（UI 与账本同源证明）→
+            // 再点回去停用还原现场（devtest 纪律：来过就要擦干净）。install 输入框
+            // 只验"有值→按钮解禁"，绝不真点——链不碰外网下载 =====
+            js('nav-plg', `(() => {
+              const b = [...document.querySelectorAll('.nav-row')].find((x) => (x.textContent || '').includes('插件'))
+              if (!b) return 'no-nav'
+              b.click(); return 'plg-view'
+            })()`, 14)
+            js('plg-cards', `(() => {
+              const names = [...document.querySelectorAll('.fn-card')]
+                .map((c) => c.getAttribute('data-testid') || '').filter((t) => t.startsWith('plugin-card-'))
+              return 'cards=' + names.length + ' has-cc=' + names.includes('plugin-card-commit-craft')
+            })()`, 19)
+            snap(21) // 插件页初态：全禁用列表
+            js('plg-off-confirm', `(() => {
+              const s = document.querySelector('[data-testid=plugin-status-commit-craft]')
+              return 'status=' + (s ? s.textContent : 'gone')
+            })()`, 23)
+            js('plg-toggle', `(() => {
+              const b = document.querySelector('[data-testid=plugin-toggle-commit-craft]')
+              if (!b) return 'no-toggle'
+              if ((b.textContent || '').trim() !== '启用') return 'wrong-label:' + (b.textContent || '').trim()
+              b.click(); return 'clicked'
+            })()`, 26)
+            js('plg-on-screen', `(() => {
+              const s = document.querySelector('[data-testid=plugin-status-commit-craft]')
+              const card = document.querySelector('[data-testid=plugin-card-commit-craft]')
+              const skill = card && [...card.querySelectorAll('.fn-tool')].some((t) => (t.textContent || '').includes('commit-message'))
+              return 'status=' + (s ? s.textContent : 'gone') + ' skillchip=' + (skill ? 'y' : 'n')
+            })()`, 30)
+            snap(31) // 启用上屏帧：绿点+已启用+贡献 chip
+            js('plg-rpc-check', `(async () => {
+              const r = await window.iwan.request('plugin.list', {})
+              const row = (r.result?.plugins || []).find((p) => p.name === 'commit-craft')
+              return 'rpc enabled=' + row?.enabled + ' status=' + row?.status
+            })()`, 34)
+            js('plg-restore', `(() => {
+              const b = document.querySelector('[data-testid=plugin-toggle-commit-craft]')
+              if (!b) return 'no-toggle'
+              b.click(); return 'toggled-back'
+            })()`, 38)
+            js('plg-url-probe', `(() => {
+              const inp = document.querySelector('[data-testid=plugin-url-input]')
+              const btn = document.querySelector('[data-testid=plugin-install-btn]')
+              if (!inp || !btn) return 'no-install-widget'
+              const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set
+              setter.call(inp, 'https://example.invalid/pkg.zip')
+              inp.dispatchEvent(new Event('input', { bubbles: true }))
+              const typeEnables = !btn.disabled
+              setter.call(inp, '')
+              inp.dispatchEvent(new Event('input', { bubbles: true }))
+              return 'enable-on-type=' + (typeEnables ? 'y' : 'n') + ' disable-on-clear=' + (btn.disabled ? 'y' : 'n')
+            })()`, 41)
+            js('final-14', `(async () => {
+              const r = await window.iwan.request('plugin.list', {})
+              const row = (r.result?.plugins || []).find((p) => p.name === 'commit-craft')
+              const s = document.querySelector('[data-testid=plugin-status-commit-craft]')
+              return 'FINAL rpc-enabled=' + row?.enabled + ' screen=' + (s ? s.textContent : 'gone')
+            })()`, 45)
+          } else if (uiMode === '16') {
+            // ===== 品牌改名+会话清理+检索质量页链：断言顶栏品牌文案与字号、
+            // 侧栏会话数（82→2 清理后的清爽度）、进设置导航到「检索质量」并断言
+            // Recall@K 行上屏。只读链：不改任何设置、不点写按钮，无需恢复动作 =====
+            js('brand-check', `(() => {
+              const b = document.querySelector('.tb-brand')
+              if (!b) return 'no-brand'
+              return 'text=' + JSON.stringify(b.textContent.trim()) + ' size=' + getComputedStyle(b).fontSize
+            })()`, 12)
+            js('sess-count', `(() => 'sessions=' + document.querySelectorAll('.sess-row').length)()`, 14)
+            snap(16) // 主界面帧：左上角"iwan work"+清爽侧栏同框自证
+            js('open-settings', `(() => {
+              const b = document.querySelector('.side-foot .foot-set')
+              if (!b) return 'no-gear'
+              b.click(); return 'opened'
+            })()`, 18)
+            js('nav-quality', `(() => {
+              const b = [...document.querySelectorAll('.set-nav-item')].find((x) => (x.textContent || '').includes('检索质量'))
+              if (!b) return 'no-nav'
+              b.click(); return 'quality'
+            })()`, 22)
+            snap(25) // 检索质量页：真实 Recall 数字上屏
+            js('q-assert', `(() => {
+              const body = document.querySelector('.set-body')
+              const t = body ? body.textContent || '' : ''
+              return 'has-recall=' + (t.includes('Recall@5') ? 'y' : 'n') + ' has-value=' + (t.includes('93.8%') ? 'y' : 'n')
+            })()`, 28)
+            // 诊断轮：上一张 25s 截图里"评估时间/模型/索引规模"三行缺席——坐实到底是
+            // 渲染缺席（真 bug）还是滚动偏移（截图假象）。看第一行 label + 滚动位置
+            js('q-diag', `(() => {
+              const body = document.querySelector('.set-body')
+              const first = body ? body.querySelector('.set-label') : null
+              return 'first-label=' + (first ? first.textContent : 'none') +
+                ' scrollTop=' + (body ? body.scrollTop : '?') +
+                ' has-meta=' + ((body ? body.textContent : '').includes('评估时间') ? 'y' : 'n')
+            })()`, 30)
+            js('close-settings', `(() => { window.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape'})); return 'closed' })()`, 30)
           } else {
             js('open-history', `(() => {
               const rows = document.querySelectorAll('.sess-row')

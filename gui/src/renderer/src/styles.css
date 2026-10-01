@@ -93,6 +93,8 @@ input { font: inherit; color: inherit; }
   background: linear-gradient(180deg, var(--bg-grad-1) 0%, var(--bg-grad-2) 28%, var(--bg-grad-3) 62%, var(--bg-grad-4) 100%);
 }
 .shell.rp-open { grid-template-columns: 250px minmax(0, 1fr) 340px; }
+/* 预览打开时右栏自动加宽：md 表格/代码块在 340px 里横向滚动是种折磨 */
+.shell.rp-open.rp-wide { grid-template-columns: 250px minmax(0, 1fr) 560px; }
 
 /* 顶栏：整条是系统拖拽区，按钮各自 no-drag；z-index 压过设置浮层(90)——
    弹窗开着时窗口照样能拖，这是无边框 App 的基本礼貌。
@@ -114,7 +116,7 @@ input { font: inherit; color: inherit; }
   align-items: center;
   gap: 7px;
   padding: 0 12px 0 15px;
-  font-size: 12.5px;
+  font-size: 14px;
   font-weight: 700;
   letter-spacing: 0.3px;
   color: var(--text-primary);
@@ -269,6 +271,11 @@ input { font: inherit; color: inherit; }
   font-size: 13px;
 }
 .sess-time { font-size: 11px; color: var(--text-secondary); flex: none; }
+/* 待审批提示：闪烁琥珀三角——比"会话里有一张卡"这个事实更显眼，
+   否则审批躺在不活跃会话里等于石沉大海（定时任务踩过的坑） */
+.sess-notice { display: inline-flex; align-items: center; color: var(--warn); flex: none; animation: pulse 1.4s infinite; }
+/* 定时会话跑完自动关闭：保留但变灰，标题可点开回看结果 */
+.sess-row.closed .sess-title { opacity: 0.5; font-style: italic; }
 .side-empty { font-size: 12.5px; color: var(--text-secondary); padding: 10px; text-align: center; }
 
 /* 悬停才现身行内动作——不悬停时保持 Codex 截图的干净列表观感 */
@@ -315,7 +322,21 @@ input { font: inherit; color: inherit; }
 .dot-connected, .dot-run { background: var(--status-run); }
 .dot-connecting, .dot-reconnecting { background: var(--warn); animation: pulse 1.2s infinite; }
 .dot-error { background: var(--danger); }
+/* 插件禁用态：空心感——灰点不抢注意，只在列表扫读时提供开关状态锚点 */
+.dot-idle { background: var(--line-strong, #555); opacity: 0.6; }
 @keyframes pulse { 50% { opacity: 0.35; } }
+
+/* ---------------- 插件页（PluginView） ---------------- */
+.plg-install { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
+.plg-url {
+  flex: 1; background: var(--card-bg); border: 1px solid var(--line); border-radius: var(--radius-card);
+  padding: 7px 10px; color: var(--text-primary); font-size: 12px; outline: none;
+}
+.plg-url:focus { border-color: var(--accent); }
+.plg-subhead {
+  font-size: 11px; color: var(--text-secondary); text-transform: uppercase;
+  letter-spacing: 0.08em; margin: 16px 0 8px;
+}
 
 /* ---------------- 弹层（Popover / MenuItem） ---------------- */
 .popover-host { display: inline-flex; position: relative; }
@@ -380,6 +401,11 @@ input { font: inherit; color: inherit; }
   display: flex;
   flex-direction: column;
   min-width: 0;
+  /* 【学习要点】grid 子项的自动最小尺寸默认是 min-content：不设 min-height:0
+     时，长对话会把整行撑到内容高度，.thread 的 overflow-y:auto 永远不触发，
+     内容被外层 overflow:hidden 裁掉——没有滚动条也滚不动。min-width:0 早就治了
+     横轴同一个病，纵轴这次补上，两轴对称才算封死。 */
+  min-height: 0;
   position: relative;
 }
 .main-inner {
@@ -865,6 +891,12 @@ input { font: inherit; color: inherit; }
   tab-size: 4;
 }
 .fv-bin { white-space: normal; color: var(--text-secondary); }
+/* md 渲染视图：与源码 <pre> 平级占据 flex 剩余高度，滚动条留给它自己 */
+.fv-md { flex: 1; overflow: auto; padding: 14px 20px; background: var(--card-bg); }
+.fv-md > :first-child { margin-top: 0; }
+/* 预览页签：FilePreview 直接铺满整页（头 + 内容两行，内容吃剩余高度自己滚） */
+.fv-page { display: flex; flex-direction: column; min-height: 0; }
+.fv-page > .fv-head { flex: 0 0 auto; }
 
 /* ---------------- 设置页 ---------------- */
 .set-overlay {

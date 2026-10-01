@@ -14,7 +14,7 @@ import { Icon } from './Icon'
 import type { IconName } from './Icon'
 import { baseName } from '../guiHelpers'
 
-type Section = 'appearance' | 'projects' | 'mcp' | 'trust' | 'engine' | 'about'
+type Section = 'appearance' | 'projects' | 'mcp' | 'trust' | 'engine' | 'quality' | 'about'
 
 const SECTIONS: Array<[Section, string, IconName]> = [
   ['appearance', '外观', 'sun'],
@@ -22,6 +22,7 @@ const SECTIONS: Array<[Section, string, IconName]> = [
   ['mcp', 'MCP 服务', 'plug'],
   ['trust', '审批与信任', 'shield'],
   ['engine', '引擎与模型', 'cpu'],
+  ['quality', '检索质量', 'search'],
   ['about', '关于', 'message']
 ]
 
@@ -220,6 +221,83 @@ function EngineSection() {
   )
 }
 
+// 检索质量区：读 ~/.iwan/rag_eval_latest.json（rag.eval --run 落盘）——纯文件桥，零 daemon 协议改动
+//
+// 【学习要点】这是"只读展示外部产物"的第三种数据源模式（区别于 gui.json 可写、
+// trust.list 真命令）：评估由 Python 侧跑（要真打 embedding API，GUI 里不该做），
+// GUI 只负责把落盘 JSON 翻成人话。缺文件不报错而是给出生成命令——空态即教程。
+interface RagEvalData {
+  ts?: string
+  root?: string
+  embedding_model?: string
+  chunk?: { size?: number; overlap?: number }
+  index?: { chunks?: number; sources?: number; index_s?: number }
+  total_questions?: number
+  recall_at_k?: Record<string, number>
+  precision_at_k?: Record<string, number>
+  mrr?: number
+  hit_rate?: number
+  category_breakdown?: Record<string, { count?: number; ['avg_recall@5']?: number; hit_rate?: number }>
+}
+
+// 百分比格式化（0.875 → "87.5%"；缺值回显 —）
+function pct(v: number | undefined): string {
+  return v === undefined ? '—' : `${(v * 100).toFixed(1)}%`
+}
+
+// 检索质量面板：Recall@K / Precision / MRR / 命中率 + 元信息 + 分类拆解
+function QualitySection() {
+  const [state, setState] = useState<{ exists: boolean; data: unknown } | null>(null)
+  useEffect(() => {
+    void window.iwan.readRagEval().then(setState).catch(() => setState({ exists: false, data: null }))
+  }, [])
+  const d = (state?.exists ? state.data : null) as RagEvalData | null
+  const rk = d?.recall_at_k ?? {}
+  const pk = d?.precision_at_k ?? {}
+  return (
+    <>
+      <p className="set-note">
+        衡量 RAG 检索质量的基准测试：16 个针对本仓库源码的固定问题，看<b>正确文件能否被检回</b>。
+        数据来自 <code>~/.iwan/rag_eval_latest.json</code>，由
+        <code>uv run python -m iwan_claude.core.rag.eval --run</code> 生成（要真调 embedding API，只在 CLI 侧跑）。
+      </p>
+      {!state && <div className="pane-hint">读取评估结果…</div>}
+      {state && !state.exists && (
+        <div className="pane-hint">尚未运行过检索评估——执行 <code>uv run python -m iwan_claude.core.rag.eval --run</code> 后回到本页。</div>
+      )}
+      {d && (
+        <>
+          <div className="set-row"><span className="set-label">评估时间</span><span className="set-value">{d.ts ?? '—'}</span></div>
+          <div className="set-row"><span className="set-label">Embedding 模型</span><span className="set-value"><code>{d.embedding_model ?? '—'}</code></span></div>
+          <div className="set-row"><span className="set-label">索引规模</span><span className="set-value">{d.index?.chunks ?? '?'} 块 / {d.index?.sources ?? '?'} 文件 · 建索引 {d.index?.index_s ?? '?'}s</span></div>
+          <div className="set-row"><span className="set-label">题目数</span><span className="set-value">{d.total_questions ?? '—'}</span></div>
+          {(['1', '3', '5', '10'] as const).map((k) => (
+            <div key={k} className="set-row">
+              <span className="set-label">Recall@{k}</span>
+              <span className="set-value">{pct(rk[k])}</span>
+            </div>
+          ))}
+          <div className="set-row"><span className="set-label">Precision@5</span><span className="set-value">{pct(pk['5'])}</span></div>
+          <div className="set-row"><span className="set-label">MRR（平均倒数排名）</span><span className="set-value">{d.mrr !== undefined ? d.mrr.toFixed(3) : '—'}</span></div>
+          <div className="set-row"><span className="set-label">命中率 Hit@10</span><span className="set-value">{pct(d.hit_rate)}</span></div>
+          {d.category_breakdown && Object.keys(d.category_breakdown).length > 0 && (
+            <>
+              <p className="set-note">按题目类别拆解（Recall@5）：</p>
+              {Object.entries(d.category_breakdown).map(([cat, v]) => (
+                <div key={cat} className="set-row row-line">
+                  <span className="set-label grow">{cat}</span>
+                  <span className="chg-badge">{pct(v['avg_recall@5'])}</span>
+                  <span className="set-value">{v.count ?? '?'} 题</span>
+                </div>
+              ))}
+            </>
+          )}
+        </>
+      )}
+    </>
+  )
+}
+
 // 关于区：core.ping 探活 + 路径速览
 function AboutSection() {
   const [pong, setPong] = useState<PongResult | null>(null)
@@ -277,6 +355,7 @@ export function SettingsView() {
           {sec === 'mcp' && <McpSection />}
           {sec === 'trust' && <TrustSection />}
           {sec === 'engine' && <EngineSection />}
+          {sec === 'quality' && <QualitySection />}
           {sec === 'about' && <AboutSection />}
         </div>
       </div>

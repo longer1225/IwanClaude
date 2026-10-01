@@ -185,7 +185,14 @@ const PATHS: Record<string, React.ReactNode> = {
       <path d="M4.2 4.5V8h3.5" />
     </>
   ),
-  sparkle: <path d="M12 4l1.7 4.3L18 10l-4.3 1.7L12 16l-1.7-4.3L6 10l4.3-1.7L12 4zM18.5 15.5l.8 1.9 1.9.8-1.9.8-.8 1.9-.8-1.9-1.9-.8 1.9-.8.8-1.9z" />
+  sparkle: <path d="M12 4l1.7 4.3L18 10l-4.3 1.7L12 16l-1.7-4.3L6 10l4.3-1.7L12 4zM18.5 15.5l.8 1.9 1.9.8-1.9.8-.8 1.9-.8-1.9-1.9-.8 1.9-.8.8-1.9z" />,
+  openExternal: (
+    <>
+      <path d="M14 4.5H19.5V10" />
+      <path d="M19.5 4.5L11 13" />
+      <path d="M18 13.5V18a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4.5" />
+    </>
+  )
 }
 
 export type IconName = keyof typeof PATHS

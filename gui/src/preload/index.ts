@@ -46,6 +46,9 @@ contextBridge.exposeInMainWorld('iwan', {
   // 只读 daemon 的 config.toml（MCP 面板/关于页用；GUI 永不写它）
   readConfig: (): Promise<{ exists: boolean; raw: string; toml: unknown }> =>
     ipcRenderer.invoke('config:read'),
+  // 只读 RAG 检索质量评估结果（~/.iwan/rag_eval_latest.json，由 rag.eval --run 落盘）
+  readRagEval: (): Promise<{ exists: boolean; data: unknown }> =>
+    ipcRenderer.invoke('eval:rag'),
   // GUI 自身设置（主题/字号/项目登记表），存 ~/.iwan/gui.json
   getSettings: (): Promise<Record<string, unknown>> => ipcRenderer.invoke('settings:get'),
   setSettings: (patch: Record<string, unknown>): Promise<Record<string, unknown>> =>

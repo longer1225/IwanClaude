@@ -10,6 +10,7 @@ interface IwanBridge {
   sessionsMeta(ids: string[]): Promise<Record<string, { cwd: string; created_at: string; run_ids: string[] }>>
   runTasks(sid: string, runId: string): Promise<Array<Record<string, unknown>>>
   readConfig(): Promise<{ exists: boolean; raw: string; toml: unknown }>
+  readRagEval(): Promise<{ exists: boolean; data: unknown }>
   getSettings(): Promise<Record<string, unknown>>
   setSettings(patch: Record<string, unknown>): Promise<Record<string, unknown>>
   openPath(p: string): Promise<string>

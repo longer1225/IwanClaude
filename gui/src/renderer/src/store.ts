@@ -73,6 +73,11 @@ interface State {
   workflows: WorkflowInfo[]
   wfRuns: WorkflowRunInfo[]
   wfLiveRunId: string
+  // 【学习要点】审批提示按 session 计数存 store 而非只留 waitingNotices：
+  // 后者以 tool_use_id 为键、服务于"答复回写原卡"，侧栏要的是"哪会话欠几条答复"
+  // 这一维聚合视图——两份索引各管各的查询方向，缺一就会互相拖累生命周期
+  notices: Record<string, number>
+  bumpNotice(sid: string, delta: number): void
   setStatus(s: string): void
   setActive(sid: string | null): void
   setCwd(cwd: string | null): void
@@ -149,6 +154,7 @@ export const useStore = create<State>((set, get) => ({
   workflows: [],
   wfRuns: [],
   wfLiveRunId: '',
+  notices: {},
   setStatus: (s) => set({ status: s }),
   setActive: (sid) => set({ activeSid: sid }),
   setCwd: (cwd) => {
@@ -175,6 +181,14 @@ export const useStore = create<State>((set, get) => ({
   },
   setSessions: (list) => set({ sessions: list.map((s) => ({ ...s, cwd: sessionCwdStore[s.id] ?? s.cwd })) }),
   removeSession: (sid) => set((st) => ({ sessions: st.sessions.filter((s) => s.id !== sid) })),
+  bumpNotice: (sid, delta) =>
+    set((st) => {
+      const n = (st.notices[sid] ?? 0) + delta
+      const next = { ...st.notices }
+      if (n <= 0) delete next[sid]
+      else next[sid] = n
+      return { notices: next }
+    }),
   pushMsg: (sid, msg) =>
     set((st) => ({ threads: { ...st.threads, [sid]: [...(st.threads[sid] ?? []), msg] } })),
   patchMsg: (sid, id, patch) =>
@@ -552,7 +566,16 @@ export function handleBusEvent(ev: BusEvent): void {
       return
     }
     case 'session.closed': {
-      st.removeSession(ev.session_id)
+      // 【学习要点】定时会话（schedule 触发的 one_shot）以 closed 为正常终局——
+      // 运行结果只活在该会话线程里，GUI 一刀切 removeSession 等于当着用户的面
+      // 销毁答案。标题前缀"定时·"是 _schedule_fire 的建会话约定，据此保留标记
+      // closed（变灰可回看）；其余手动关闭的会话仍按原样移出列表。
+      const meta = st.sessions.find((s) => s.id === ev.session_id)
+      // 会话已终，其未决审批计数一并清零——否则琥珀三角永远闪在灰行上
+      const pend = st.notices[ev.session_id]
+      if (pend) st.bumpNotice(ev.session_id, -pend)
+      if (meta && meta.title.startsWith('定时·')) st.upsertSession({ ...meta, status: 'closed' })
+      else st.removeSession(ev.session_id)
       return
     }
     case 'session.message_received': {
@@ -562,6 +585,7 @@ export function handleBusEvent(ev: BusEvent): void {
     case 'permission.requested': {
       const msgId = nextId()
       waitingNotices.set(ev.tool_use_id, { sid: ev.session_id, msgId })
+      st.bumpNotice(ev.session_id, 1)
       // 【学习要点】审批卡走 Msg.card 而不是纯 notice：daemon 的 permission.respond
       // 需要 tool_use_id+decision，卡片自带按钮才能就地答复；granted/denied 事件
       // 再把 answered 写回同一张卡——"答复必有回声"在 GUI 里的同一条纪律。
@@ -581,6 +605,7 @@ export function handleBusEvent(ev: BusEvent): void {
       // 原地改写审批卡为结果回声；找不到坐标（GUI 中途加入的会话）就补一条新通知
       const spot = waitingNotices.get(ev.tool_use_id)
       waitingNotices.delete(ev.tool_use_id)
+      if (spot) st.bumpNotice(spot.sid, -1)
       const text =
         t === 'permission.granted'
           ? `▶ 审批通过（${ev.decision}）：${ev.tool_use_id.slice(0, 8)}`
@@ -672,6 +697,10 @@ export function handleBusEvent(ev: BusEvent): void {
       return
     }
     case 'schedule.fired': {
+      // 【学习要点】先把这次 run 认领给它的常驻会话，再刷新列表——llm.token 只带
+      // run_id，严格归属纪律下无人认领的 token 直接丢弃；不登记这一步，定时报时
+      // 跑完了线程里也只看得见用户消息，回复永远不回显
+      if (ev.ok && ev.run_id && ev.session_id) runOwner.set(ev.run_id, ev.session_id)
       // 触发即记账：任务表 last_run/next_due 已在 daemon 侧更新，重拉拿新值；
       // 同时刷新会话列表——每次触发都会开出一个 one_shot 新会话
       void refreshSchedules()

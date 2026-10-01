@@ -6,6 +6,8 @@
 // 变更/任务两个页签则是把 daemon 已有协议（files.changes/restore）与磁盘账本
 // （runs/<id>/.tasks/*.json）接进界面：面板是"查看器+触发器"，不是新的数据源。
 import { useCallback, useEffect, useState } from 'react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { useStore, loadChanges, restoreFiles } from '../store'
 import type { FileChange } from '../store'
 import { useGui, sessionEffectiveCwd, baseName } from '../guiHelpers'
@@ -71,16 +73,33 @@ function TreeDir(props: { root: string; rel: string; depth: number; showHidden: 
   )
 }
 
-// 叶子文件：点击 → 主进程 readFile → gui.fileView 浮层
+// 叶子文件：点击 → 主进程 readFile → 「预览」页签。
+// html/htm 特殊通道：交给系统浏览器（用户拍板——右栏内嵌只能渲染"无脚本静态页"，
+// 不如浏览器全功能；预览页仍保留其源码视图）。浏览器打开是异步旁路，
+// 失败只留控制台警告，不打断文件树操作。
+const HTML_RE = /\.html?$/i
+
 function TreeFile(props: { root: string; rel: string; name: string; depth: number }) {
   const setFileView = useGui((s) => s.set)
   const [loading, setLoading] = useState(false)
   const open = (): void => {
     setLoading(true)
+    if (HTML_RE.test(props.name)) {
+      // html：浏览器负责"看"，右栏只安静备好源码——不抢焦点也不跳到预览页签
+      window.iwan.openPath(`${props.root}/${props.rel}`).then((err) => {
+        if (err) console.warn('浏览器打开失败:', err)
+      })
+      window.iwan
+        .readFile(props.root, props.rel)
+        .then((f) => setFileView({ fileView: { root: props.root, rel: props.rel, ...f } }))
+        .catch(() => { /* 读不到就算了，主路径是浏览器 */ })
+        .finally(() => setLoading(false))
+      return
+    }
     window.iwan
       .readFile(props.root, props.rel)
-      .then((f) => setFileView({ fileView: { root: props.root, rel: props.rel, ...f } }))
-      .catch((e) => setFileView({ fileView: { root: props.root, rel: props.rel, text: String(e), truncated: false, binary: false, size: 0 } }))
+      .then((f) => setFileView({ fileView: { root: props.root, rel: props.rel, ...f }, rightTab: 'preview' }))
+      .catch((e) => setFileView({ fileView: { root: props.root, rel: props.rel, text: String(e), truncated: false, binary: false, size: 0 }, rightTab: 'preview' }))
       .finally(() => setLoading(false))
   }
   return (
@@ -92,7 +111,7 @@ function TreeFile(props: { root: string; rel: string; name: string; depth: numbe
   )
 }
 
-// 页签一：文件树
+// 页签「文件」：只展示目录树，看内容一律跳「预览」页签（职责单一，树永远满高）
 function FilesTab({ root }: { root: string }) {
   const [showHidden, setShowHidden] = useState(false)
   return (
@@ -107,6 +126,26 @@ function FilesTab({ root }: { root: string }) {
       <div className="pane-scroll">
         <TreeDir root={root} rel="" depth={0} showHidden={showHidden} />
       </div>
+    </div>
+  )
+}
+
+// 页签「预览」：整页给一个文件——从文件页签点文件自动跳来，也可停在这儿边看边聊。
+// 关闭钮的语义是"退回文件页签继续挑"（rightTab 回 files），而非清空 fileView：
+// 保留 fileView 让预览页签不至于空白，下次点进来还在
+function PreviewTab() {
+  const fv = useGui((s) => s.fileView)
+  const setG = useGui((s) => s.set)
+  if (!fv) {
+    return <div className="pane-hint pad">从「文件」页签点一个文件，就会跳到这里预览。</div>
+  }
+  return (
+    <div className="pane fv-page">
+      <FilePreview
+        fv={fv}
+        onClose={() => setG({ rightTab: 'files' })}
+        onPop={() => setG({ fileViewPop: true })}
+      />
     </div>
   )
 }
@@ -230,6 +269,7 @@ export function RightPanel() {
 
   const tabs: Array<[RightTab, string, IconName]> = [
     ['files', '文件', 'folder'],
+    ['preview', '预览', 'file'],
     ['changes', '变更', 'list'],
     ['tasks', '任务', 'check']
   ]
@@ -270,6 +310,7 @@ export function RightPanel() {
               </button>
             </div>
           ))}
+        {gui.rightTab === 'preview' && <PreviewTab />}
         {gui.rightTab === 'changes' &&
           (activeSid ? <ChangesTab key={activeSid} sid={activeSid} /> : <div className="pane-hint pad">打开一个会话后查看它改动过的文件。</div>)}
         {gui.rightTab === 'tasks' &&
@@ -279,39 +320,93 @@ export function RightPanel() {
   )
 }
 
-// 文件预览浮层（覆盖整个应用区，Esc/× 关闭）
+// 文件预览渲染体（右栏驻留与全屏浮窗共用）
+//
+// 【学习要点】"查看器三态"：md → 渲染视图（可切原文）、其他文本 → <pre>、
+// 二进制 → 交给系统默认程序。分流只看扩展名 + 主进程解码出的 binary 位，
+// 前端绝不猜文件内容——猜错一次（把 UTF-16 当文本渲染出满屏 NUL）就再也骗不过用户。
+// 同一渲染体挂两种容器（dock/pop）是"内容与壳分离"的最小实践：状态（raw 切换、
+// openNote）跟着内容走，关闭语义（onClose/onPop）由壳注入。
+const MD_RE = /\.(md|markdown)$/i
+
+interface FV { root: string; rel: string; text: string; truncated: boolean; binary: boolean; size: number }
+
+export function FilePreview({ fv, onClose, onPop }: { fv: FV; onClose: () => void; onPop?: () => void }) {
+  const [raw, setRaw] = useState(false)
+  const [openNote, setOpenNote] = useState('')
+  // 换文件必回渲染态：上一个文件的"看原文"选择不该跟过来
+  useEffect(() => {
+    setRaw(false)
+    setOpenNote('')
+  }, [fv.root, fv.rel])
+  const isMd = !fv.binary && MD_RE.test(fv.rel)
+  const openExternal = (): void => {
+    window.iwan.openPath(`${fv.root}/${fv.rel}`).then((err) => {
+      setOpenNote(err ? `打开失败：${err}` : '')
+    })
+  }
+  return (
+    <>
+      <div className="fv-head">
+        <Icon name="file" size={13} />
+        <span className="fv-path" title={fv.root + '/' + fv.rel}>{fv.rel || baseName(fv.root)}</span>
+        <span className="dim">{fv.binary ? '二进制' : `${(fv.size / 1024).toFixed(1)} KB`}</span>
+        {isMd && (
+          <button className="mini-btn" onClick={() => setRaw((v) => !v)} title={raw ? '切换 Markdown 渲染视图' : '查看 Markdown 源码'}>
+            {raw ? '预览' : '原文'}
+          </button>
+        )}
+        <span className="grow" />
+        {onPop && (
+          <button className="icon-btn tiny" onClick={onPop} title="展开为浮窗（大屏读长文）">
+            <Icon name="monitor" size={13} />
+          </button>
+        )}
+        <button className="icon-btn tiny" onClick={() => void openExternal()} title="用系统默认程序打开（Word/PPT/浏览器…）">
+          <Icon name="openExternal" size={13} />
+        </button>
+        <button className="icon-btn tiny" onClick={onClose} title="关闭预览">
+          <Icon name="x" size={13} />
+        </button>
+      </div>
+      {openNote && <div className="fv-note">{openNote}</div>}
+      {fv.binary ? (
+        <div className="fv-text fv-bin">二进制文件（前 8KB 含 NUL 字节），不提供文本预览——点上方外链钮可用系统默认程序打开。</div>
+      ) : isMd && !raw ? (
+        <div className="fv-md md">
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>{fv.text}</ReactMarkdown>
+        </div>
+      ) : (
+        <>
+          {HTML_RE.test(fv.rel) && (
+            <div className="fv-note">这是 HTML 源码。渲染效果已由系统浏览器打开——如需重开，点上方外链钮。</div>
+          )}
+          {fv.truncated && <div className="fv-note">文件较大，仅预览前 256 KB。</div>}
+          <pre className="fv-text">{fv.text}</pre>
+        </>
+      )}
+    </>
+  )
+}
+
+// 全屏浮窗：仅当 fileViewPop=true（预览被用户"展开"）时出现；关闭=退回右栏而非清空
 export function FileViewer() {
   const fv = useGui((s) => s.fileView)
+  const pop = useGui((s) => s.fileViewPop)
   const setG = useGui((s) => s.set)
   useEffect(() => {
-    if (!fv) return
+    if (!fv || !pop) return
     const onKey = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape') setG({ fileView: null })
+      if (e.key === 'Escape') setG({ fileViewPop: false })
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [fv, setG])
-  if (!fv) return null
+  }, [fv, pop, setG])
+  if (!fv || !pop) return null
   return (
-    <div className="fv-overlay" onClick={() => setG({ fileView: null })}>
+    <div className="fv-overlay" onClick={() => setG({ fileViewPop: false })}>
       <div className="fv-card" onClick={(e) => e.stopPropagation()}>
-        <div className="fv-head">
-          <Icon name="file" size={13} />
-          <span className="fv-path" title={fv.root + '/' + fv.rel}>{fv.rel || baseName(fv.root)}</span>
-          <span className="dim">{fv.binary ? '二进制文件' : `${(fv.size / 1024).toFixed(1)} KB`}</span>
-          <span className="grow" />
-          <button className="icon-btn tiny" onClick={() => setG({ fileView: null })} title="关闭 (Esc)">
-            <Icon name="x" size={13} />
-          </button>
-        </div>
-        {fv.binary ? (
-          <div className="fv-text fv-bin">二进制文件（前 8KB 含 NUL 字节），不提供文本预览。</div>
-        ) : (
-          <>
-            {fv.truncated && <div className="fv-note">文件较大，仅预览前 256 KB。</div>}
-            <pre className="fv-text">{fv.text}</pre>
-          </>
-        )}
+        <FilePreview fv={fv} onClose={() => setG({ fileViewPop: false })} />
       </div>
     </div>
   )

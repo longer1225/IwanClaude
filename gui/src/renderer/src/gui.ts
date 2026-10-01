@@ -7,7 +7,7 @@
 import { create } from 'zustand'
 
 export type ThemeChoice = 'light' | 'dark' | 'system'
-export type RightTab = 'files' | 'changes' | 'tasks'
+export type RightTab = 'files' | 'changes' | 'tasks' | 'preview'
 // 主区视图：会话线程之外，M2/M3 点亮了 PR/Git/定时任务/MCP 四个功能位，W2 补工作流
 // 【学习要点】mainView 刻意不进 persist 白名单——视图是"会话性"状态：
 // 重启后回到对话比回到 PR 列表更符合直觉（同 VS Code 不记编辑器最后焦点面板）
@@ -27,11 +27,14 @@ export interface GuiState {
   settingsOpen: boolean
   mainView: MainView
   fileView: { root: string; rel: string; text: string; truncated: boolean; binary: boolean; size: number } | null
+  // 预览是否升级为全屏浮窗：默认 false=驻留右栏（用户工作流=边聊边看）。
+  // 与 fileView 同属"会话性"状态，不进 persist 白名单
+  fileViewPop: boolean
   hydrated: boolean
   applyFromDisk(): Promise<void>
   set(p: Partial<Pick<GuiState,
     'theme' | 'fontScale' | 'uiFontPx' | 'codeFontPx' | 'rightOpen' | 'rightTab' |
-    'settingsOpen' | 'fileView' | 'pins' | 'sessionProject' | 'collapsed' | 'mainView'>>): void
+    'settingsOpen' | 'fileView' | 'fileViewPop' | 'pins' | 'sessionProject' | 'collapsed' | 'mainView'>>): void
   addProject(root: string): void
   removeProject(root: string): void
 }
@@ -66,6 +69,7 @@ export const useGui = create<GuiState>((set, get) => ({
   settingsOpen: false,
   mainView: 'chat',
   fileView: null,
+  fileViewPop: false,
   hydrated: false,
   // 启动时从 gui.json 拉一次全量设置（localStorage 旧账本 sessionCwd 做兜底迁移）
   async applyFromDisk() {

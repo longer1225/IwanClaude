@@ -194,6 +194,16 @@ async function settingsSet(patch: Record<string, unknown>): Promise<Record<strin
   return next
 }
 
+// 读 RAG 检索质量评估结果（~/.iwan/rag_eval_latest.json，由 rag.eval --run 落盘；缺文件报空态）
+async function readRagEval(): Promise<{ exists: boolean; data: unknown }> {
+  try {
+    const f = await decodeFile(path.join(IWAN_DIR, 'rag_eval_latest.json'))
+    return { exists: true, data: JSON.parse(f.text) as unknown }
+  } catch {
+    return { exists: false, data: null }
+  }
+}
+
 // 注册全部文件桥通道（main 启动时调一次）
 export function registerFsBridge(): void {
   ipcMain.handle('fs:readDir', (_e, root: string, rel: string) => {
@@ -207,6 +217,7 @@ export function registerFsBridge(): void {
   ipcMain.handle('sessions:meta', (_e, ids: unknown) => sessionsMeta(Array.isArray(ids) ? ids.filter((x): x is string => typeof x === 'string') : []))
   ipcMain.handle('runs:tasks', (_e, sid: string, runId: string) => runTasks(sid, runId))
   ipcMain.handle('config:read', () => readConfig())
+  ipcMain.handle('eval:rag', () => readRagEval())
   ipcMain.handle('settings:get', () => settingsGet())
   ipcMain.handle('settings:set', (_e, patch: Record<string, unknown>) =>
     settingsSet(patch && typeof patch === 'object' ? patch : {})

@@ -179,7 +179,12 @@ export function ScheduleView() {
             <div className="fn-prompt" title={t.prompt}>{t.prompt}</div>
             <div className="fn-meta-row">
               <span>下次：{whenShort(t.next_due)}</span>
-              <span>上次：{whenShort(t.last_run)}{t.last_result ? ` · ${t.last_result}` : ''}</span>
+              {/* 【学习要点】"成功"是 daemon 对 fire 回调是否落地的判定（触发成功），
+                  不代表 agent run 跑完——两件事混在一个词里，用户会误读成"任务已执行完"。
+                  tooltip 把语义摊开并给出查看真实结果的入口（侧栏"定时·"会话） */}
+              <span title="成功=任务已触发并创建了会话；运行是否真正跑完，看侧栏「定时·」会话的回复（需审批时会一直等待）">
+                上次：{whenShort(t.last_run)}{t.last_result ? ` · ${t.last_result}` : ''}
+              </span>
             </div>
           </div>
         ))}

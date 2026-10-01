@@ -6,9 +6,21 @@
 // 3) 单行最大 64MB（MCP 工具大结果），Node 的 readline 默认无限、够用，但仍显式设上限思想一致；
 // 4) params 里【不放】type 字段（与 TUI 的 send_command 调用方式完全相同，服务端按 method 分派）。
 import net from 'node:net'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import readline from 'node:readline'
+
+// 从 ~/.iwan/config.toml 文本里抠 [core] token（极简定向正则，不引 toml 解析依赖）
+// 只在行首作用域内取 [core] 段第一次出现的 token = "..."
+function parseCoreToken(text: string): string {
+  const core = text.match(/^\[core\][\s\S]*?(?=^\[|$)/m)
+  if (!core) return ''
+  const kv = core[0].match(/^\s*token\s*=\s*"([^"]*)"/m)
+  return kv ? kv[1] : ''
+}
 
 export type RpcParams = Record<string, unknown>
 
@@ -26,6 +38,8 @@ export class RpcTransport extends EventEmitter {
   private pending = new Map<string, Pending>()
   private host = '127.0.0.1'
   private port = 7437
+  // 鉴权令牌（协议缺口 #4）：空串 = 拨号后直接进入正常收发，不握手
+  private token = ''
   private closedByUs = false
   status: ConnStatus = 'connecting'
 
@@ -35,6 +49,17 @@ export class RpcTransport extends EventEmitter {
     const p = Number(process.env.IWAN_PORT ?? '7437')
     if (Number.isFinite(p) && p > 0) this.port = p
     if (process.env.IWAN_HOST) this.host = process.env.IWAN_HOST
+    // 令牌三级来源：IWAN_TOKEN env > ~/.iwan/config.toml [core] token > 空(免鉴权)
+    this.token = process.env.IWAN_TOKEN ?? ''
+    if (!this.token) {
+      try {
+        this.token = parseCoreToken(
+          fs.readFileSync(path.join(os.homedir(), '.iwan', 'config.toml'), 'utf8')
+        )
+      } catch {
+        this.token = '' // 配置文件不存在 = 无令牌，与 daemon 端"缺省静默跳过"同纪律
+      }
+    }
   }
 
   // 设置"连不上就拉起 daemon"的重试策略挂钩：start 内部会循环重试直到成功或放弃
@@ -74,9 +99,24 @@ export class RpcTransport extends EventEmitter {
         settled = true
         sock.removeListener('error', onErr)
         this.sock = sock
-        this.setStatus('connected')
         this.readLoop(sock)
-        resolve()
+        // 有令牌：readLoop 已就位（hello 应答走 dispatch 回填 pending），
+        // 握手成功才算 connected；失败 destroy 后 reject，交给外层重试环兜底
+        if (!this.token) {
+          this.setStatus('connected')
+          resolve()
+          return
+        }
+        this.request('auth.hello', { token: this.token })
+          .then(() => {
+            this.setStatus('connected')
+            resolve()
+          })
+          .catch((err: Error) => {
+            this.sock = null
+            sock.destroy()
+            reject(err)
+          })
       })
       const onErr = (err: Error): void => {
         sock.destroy()

@@ -60,6 +60,7 @@ function Row({ item }: { item: { key?: string; label: string; icon: IconName; di
 function SessionRow({ s, projectRoot }: { s: SessionMeta; projectRoot?: string }) {
   const activeSid = useStore((st) => st.activeSid)
   const running = useStore((st) => st.runningSids.has(s.id))
+  const notice = useStore((st) => st.notices[s.id] ?? 0)
   const pins = useGui((st) => st.pins)
   const guiSet = useGui((st) => st.set)
   const mainView = useGui((st) => st.mainView)
@@ -98,7 +99,7 @@ function SessionRow({ s, projectRoot }: { s: SessionMeta; projectRoot?: string }
   }, [projects, metaCwd, sessionProject, s.id, projectRoot])
 
   return (
-    <div className={`sess-row${s.id === activeSid ? ' active' : ''}${pinned ? ' pinned' : ''}`}>
+    <div className={`sess-row${s.id === activeSid ? ' active' : ''}${pinned ? ' pinned' : ''}${s.status === 'closed' ? ' closed' : ''}`}>
       {editing ? (
         <input
           className="row-input"
@@ -124,7 +125,11 @@ function SessionRow({ s, projectRoot }: { s: SessionMeta; projectRoot?: string }
             {pinned && <Icon name="pin" size={11} className="pin-mark" />}
             {s.title || '(未命名)'}
           </span>
-          {running ? (
+          {notice > 0 ? (
+            <span className="sess-notice" title={`该会话有 ${notice} 条审批在等你答复`}>
+              <Icon name="alert" size={12} />
+            </span>
+          ) : running ? (
             <span className="dot dot-run" title="运行中" />
           ) : (
             <span className="sess-time">{relTime(s.updatedAt)}</span>
