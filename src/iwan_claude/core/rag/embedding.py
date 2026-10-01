@@ -165,13 +165,27 @@ class EmbeddingProvider:
             timeout=httpx.Timeout(total_timeout, connect=min(20.0, max(5.0, total_timeout / 6)))
         )
 
-    async def embed(self, texts: list[str], batch_size: int = 32) -> list[list[float]]:
+    # 当前 embedding 模型名：索引侧写/校验指纹用（换模型必须重建索引的守卫依据）
+    @property
+    def model(self) -> str:
+        return self._model
+
+    async def embed(self, texts: list[str], batch_size: int = 10) -> list[list[float]]:
         """
         批量嵌入文本
 
         【参数说明】
         - texts: list[str] - 要嵌入的文本列表
-        - batch_size: int - 每批处理的文本数量（默认 32）
+        - batch_size: int - 每批处理的文本数量（默认 10）
+
+        【为什么默认是 10 而不是更大的数】
+        本项目 embedding 端点默认是 DashScope text-embedding-v3 的 OpenAI 兼容
+        端点，它硬卡**单次请求 input 数组 ≤ 10**，超一个就整批 400
+        （InternalError.Algo.InvalidParameter: batch size ... not be larger than 10）。
+        旧默认 32 会让任何分块数 >10 的文件在索引时被静默跳过——生产 RAG 与
+        向量记忆里的大文件从来就没成功嵌入过。改成 10 后：小批量多跑几次只是
+        多点往返，永不触发上限；即便切到允许大批量的其他端点，10 也只是偏保守、
+        绝不影响正确性。
 
         【返回值】
         - list[list[float]]: 向量列表，每个文本对应一个向量
@@ -181,12 +195,8 @@ class EmbeddingProvider:
         2. 依次处理每个批次
         3. 合并所有结果
 
-        【设计目的】
-        支持大量文本的嵌入，通过分批处理避免单次请求过大，
-        提高请求成功率和效率。
-
         【注意事项】
-        - batch_size 不宜过大（API 有限制）
+        - batch_size 不宜过大（API 有限制，见上）
         - 文本为空列表时返回空列表
 
         【示例】

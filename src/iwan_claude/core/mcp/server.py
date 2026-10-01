@@ -276,6 +276,29 @@ class McpServerManager:
         self._clients.clear()
         self._tools.clear()
 
+    # 单服务器公开启动入口（插件启用即时生效用）：容错语义与 start_all 完全一致
+    async def start_one(self, cfg: McpServerConfig) -> None:
+        # 配置快照先行（同 start_all 纪律）：起不来也要在 status() 里现身；
+        # 同名旧条目先剔除——重复启用不该让 status 报出双行
+        self._configs = [c for c in self._configs if c.name != cfg.name] + [cfg]
+        await self._start_one(cfg)
+
+    # 停下单服务器并全表除名（client/工具/配置快照/错误记录）；返回该名字是否真实存在过
+    async def stop_server(self, name: str) -> bool:
+        client = self._clients.pop(name, None)
+        existed = client is not None or any(c.name == name for c in self._configs)
+        # 死工具同批剔除（stop_all 的教训：只清连接会漏出一批指向幽灵的句柄）
+        self._tools = [t for t in self._tools if t._server_name != name]
+        self._configs = [c for c in self._configs if c.name != name]
+        self._last_error.pop(name, None)
+        if client is not None:
+            try:
+                await client.close()
+                log.info("mcp: server '%s' stopped", name)
+            except Exception:
+                log.warning("mcp: error stopping server '%s'", name, exc_info=True)
+        return existed
+
     async def _connect(self, cfg: McpServerConfig) -> McpClient:
         """
         根据配置建立 MCP Server 连接

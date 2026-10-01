@@ -190,7 +190,7 @@ class PermissionConfig:
     权限配置类 - 对应 [permission] section
 
     属性：
-        timeout_s: 权限审批超时时间（秒），0 表示不超时
+        timeout_s: 权限审批超时时间（秒），0 表示不超时；默认 600
         mode: 会话默认权限模式（五态：default/acceptEdits/plan/auto/
             bypassPermissions；对齐 Claude Code，语义矩阵见设计文档）
         deny/ask/allow: 声明式规则（对齐 Claude Code 的 deny→ask→allow 序），
@@ -198,7 +198,9 @@ class PermissionConfig:
         trust_file: 项目信任决定持久化路径（S9 Layer 0；与 policy.toml 平级）
         trust_inherit: 子目录是否继承祖先目录的信任决定（false = 仅精确匹配）
     """
-    timeout_s: float = 60.0  # 审批超时秒数；0 表示不超时
+    # 审批超时秒数；0 表示不超时。60→600：定时/后台会话弹审批时人往往不在场，
+    # 60 秒几乎必然超时拒绝（fail-closed 语义不变），10 分钟给"回头再点"留窗口
+    timeout_s: float = 600.0
     mode: str = "default"    # 五态权限模式的 daemon 默认值
     deny: list[str] = field(default_factory=list)
     ask: list[str] = field(default_factory=list)
@@ -518,6 +520,9 @@ class IwanConfig:
     """
     host: str = _DEFAULT_HOST
     port: int = _DEFAULT_PORT
+    # 鉴权令牌（协议缺口 #4）：空 = 不鉴权（默认，向后兼容三端客户端）；
+    # 非空 = 每条 TCP 连接首行必须 auth.hello {token}，失败即 -32001 断连
+    token: str = ""
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
     llm: LlmConfig = field(default_factory=LlmConfig)
@@ -615,7 +620,7 @@ def _apply_toml(config: IwanConfig, data: dict[str, Any]) -> None:
         core = data["core"]
         if not isinstance(core, dict):
             raise SystemExit("Config error: [core] must be a table")
-        unknown_core: set[str] = set(core.keys()) - {"host", "port"}
+        unknown_core: set[str] = set(core.keys()) - {"host", "port", "token"}
         if unknown_core:
             raise SystemExit(f"Unknown [core] keys: {', '.join(sorted(unknown_core))}")
         if "host" in core:
@@ -628,6 +633,11 @@ def _apply_toml(config: IwanConfig, data: dict[str, Any]) -> None:
             if not isinstance(val, int):
                 raise SystemExit("Config error: core.port must be an integer")
             config.port = val
+        if "token" in core:
+            val = core["token"]
+            if not isinstance(val, str):
+                raise SystemExit("Config error: core.token must be a string")
+            config.token = val
 
     if "logging" in data:
         log = data["logging"]
@@ -1180,6 +1190,10 @@ def _apply_env(config: IwanConfig) -> None:
             config.port = int(port_str)
         except ValueError:
             raise SystemExit(f"Config error: IWAN_PORT must be an integer, got: {port_str!r}")
+
+    token = os.environ.get("IWAN_TOKEN")
+    if token is not None:
+        config.token = token
 
     log_level = os.environ.get("IWAN_LOG_LEVEL")
     if log_level is not None:

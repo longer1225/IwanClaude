@@ -1,0 +1,6 @@
+{
+  "name": "commit-craft",
+  "version": "0.1.0",
+  "description": "中文 Conventional Commit 规范：提交信息生成技能 + git commit 格式校验 hook",
+  "author": "IwanClaude"
+}

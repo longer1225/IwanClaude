@@ -241,7 +241,13 @@ class IwanTuiApp(App[None]):
         "[dim]  输入消息开始对话  ·  键入 / 查看命令  ·  F6 检查点  ·  Ctrl+T/W 新建/关闭会话  ·  Alt+1~9 切换会话  ·  Ctrl+Q 退出[/dim]"
     )
 
-    def __init__(self, host: str, port: int, replay_run_id: str | None = None) -> None:
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        replay_run_id: str | None = None,
+        token: str = "",
+    ) -> None:
         """
         初始化 TUI 应用实例
 
@@ -261,6 +267,8 @@ class IwanTuiApp(App[None]):
         self._host = host
         # 保存 core 服务的端口号
         self._port = port
+        # 鉴权令牌（协议缺口 #4）：空串走 SocketClient 的免握手路径
+        self._token = token
         # 保存回放运行 ID，用于重放历史事件（调试/演示用途）
         self._replay_run_id = replay_run_id
         # SocketClient 实例，初始为 None，连接建立后赋值
@@ -2981,7 +2989,7 @@ class IwanTuiApp(App[None]):
 
         while True:
             # ========== 创建新连接 ==========
-            client = SocketClient(self._host, self._port)
+            client = SocketClient(self._host, self._port, self._token)
             self._client = None
             try:
                 # 尝试连接到 core 服务
@@ -3697,6 +3705,8 @@ def run(config: IwanConfig, replay_run_id: str | None = None) -> None:
         >>> run(config)
     """
     # 使用配置创建 TUI 应用实例
-    app = IwanTuiApp(config.host, config.port, replay_run_id=replay_run_id)
+    app = IwanTuiApp(
+        config.host, config.port, replay_run_id=replay_run_id, token=config.token
+    )
     # 启动 Textual 事件循环（阻塞直到用户退出）
     app.run()

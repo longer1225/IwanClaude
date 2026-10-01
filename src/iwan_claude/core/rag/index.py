@@ -179,10 +179,33 @@ class KnowledgeIndexManager:
         self._index_path = Path(index_path)
         # 元数据文件路径
         self._meta_path = self._index_path / "index_meta.json"
+        # 索引元数据（显式注解：值域混合 str/int/dict，交给推断会随新键漂移）
+        self._meta: dict[str, Any] = {}
         # LLM 客户端（可选，用于 Contextual Retrieval 和查询重写）
         self._llm_client = llm_client
         # 加载元数据
         self._load_meta()
+        # 【学习要点】模型指纹守卫（构造路径）：指纹不匹配 = 磁盘向量与当前
+        # embedder 不在同一语义空间，增量判断/检索都在消费垃圾向量。此刻内存 store
+        # 尚为空，丢弃增量 meta 即令下一轮 index_directory 全量重建——比静默混用便宜
+        mismatch = self._fingerprint_mismatch()
+        if mismatch:
+            logger.warning(
+                "rag: 索引指纹与当前配置不符（%s），丢弃增量元数据，下次索引将全量重建", mismatch,
+            )
+            self._meta = {"sources": {}}
+
+    # 比对 meta 记录与当前 embedder/向量库；返回不符描述（""=一致或无从判断）
+    def _fingerprint_mismatch(self) -> str:
+        stored_model = str(self._meta.get("embedding_model", ""))
+        stored_dim = self._meta.get("dim")
+        cur_model = str(getattr(self._embedding_provider, "model", ""))
+        cur_dim = getattr(self._vector_store, "dim", None)
+        if stored_model and cur_model and stored_model != cur_model:
+            return f"embedding_model {stored_model} -> {cur_model}"
+        if stored_dim is not None and cur_dim is not None and int(stored_dim) != int(cur_dim):
+            return f"dim {stored_dim} -> {cur_dim}"
+        return ""
 
     def _load_meta(self) -> None:
         """
@@ -939,6 +962,11 @@ class KnowledgeIndexManager:
         """
         # 保存向量存储
         self._vector_store.save(self._index_path)
+        # 模型指纹随元数据一同落盘：读侧（构造守卫/load 校验）的对照物在写侧盖章
+        self._meta["embedding_model"] = str(getattr(self._embedding_provider, "model", ""))
+        dim = getattr(self._vector_store, "dim", None)
+        if dim is not None:
+            self._meta["dim"] = int(dim)
         # 保存元数据
         self._save_meta()
 
@@ -957,3 +985,11 @@ class KnowledgeIndexManager:
         self._vector_store.load(self._index_path)
         # 加载元数据
         self._load_meta()
+        # 【学习要点】load 路径的守卫必须是硬失败而非清 meta：此刻旧向量已经
+        # 灌进内存 store，静默降级等于放行垃圾检索——宁可抛错逼调用方重建
+        mismatch = self._fingerprint_mismatch()
+        if mismatch:
+            raise RuntimeError(
+                f"RAG 索引与当前配置不符（{mismatch}）："
+                "拒绝加载旧向量，请先 rebuild_index 再重新索引"
+            )

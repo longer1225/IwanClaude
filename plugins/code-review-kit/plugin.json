@@ -1,0 +1,6 @@
+{
+  "name": "code-review-kit",
+  "version": "0.1.0",
+  "description": "三级代码评审技能（严重/建议/可选），与 PR 一键评审模板同源",
+  "author": "IwanClaude"
+}

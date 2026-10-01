@@ -1,0 +1,6 @@
+{
+  "name": "doc-maker",
+  "version": "0.1.0",
+  "description": "文档生成技能包：PPT 幻灯片 + Word 报告，内置版式规范与 python-pptx/docx 踩坑清单",
+  "author": "IwanClaude"
+}

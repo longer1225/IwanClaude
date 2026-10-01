@@ -354,15 +354,19 @@ class Scheduler:
         # detail 约定为 "run_id|人类可读说明"，fire 回调没内容时按失败处理
         if "|" in detail:
             run_id, _, detail = detail.partition("|")
+        # 【学习要点】广播在记账**之前**：客户端要靠这条 fired 把 run_id 登记进
+        # 事件路由表，而 fire 回调里的 run 是异步开跑的——先记账（含磁盘写）再广播
+        # 的那几毫秒间隙，定时 run 的首批 llm.token 已到客户端，run_id 无人认领
+        # 被严格归属丢弃，此后整条回复永久消失，审批卡冻结"运行中"假象
+        if self._on_fired is not None:
+            try:
+                await self._on_fired(t, ok, run_id, detail)
+            except Exception:
+                log.exception("schedule: 广播 schedule.fired 失败（不影响任务本身）")
         if advance:
             nd = next_due_after(t["kind"], t["spec"], now)
             self._store.record_run(
                 t["id"], _iso(now), ("成功" if ok else f"失败：{detail}")[:200],
                 _iso(nd) if nd else "",
             )
-        if self._on_fired is not None:
-            try:
-                await self._on_fired(t, ok, run_id, detail)
-            except Exception:
-                log.exception("schedule: 广播 schedule.fired 失败（不影响任务本身）")
         return {"ok": ok, "run_id": run_id, "error": "" if ok else detail}

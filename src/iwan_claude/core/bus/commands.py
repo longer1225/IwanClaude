@@ -2156,6 +2156,81 @@ class SshTermOpResult(BaseModel):
     error: str = ""
 
 
+class PluginRow(BaseModel):
+    """
+    插件行模型 - plugin.list 的逐插件快照
+
+    【字段说明】
+    - name/version: 清单身份字段（清单损坏时 name 退为目录名，行仍现身）
+    - enabled: 账本里的用户选择位
+    - source: "builtin"（随仓库分发）| "installed"（~/.iwan/plugins 下的 URL 安装包）
+    - skills/hooks/mcp: 启用态下该插件贡献的组件清单（禁用=空表）
+    - status: "ok" | "partial"（撞名跳过部分贡献）| "error"（清单/贡献非法，整插件跳过）
+    """
+    name: str
+    version: str = ""
+    enabled: bool = False
+    source: str = "builtin"
+    skills: list[str] = []
+    hooks: list[str] = []
+    mcp: list[str] = []
+    status: str = "ok"
+    error: str = ""
+
+
+class PluginListCommand(BaseModel):
+    """
+    插件列表命令 - 查询全部已发现插件（含禁用与 error 行）
+
+    【设计目的】
+    error 插件也要现身：GUI 必须能解释"为什么装不上"，静默消失的插件
+    比报错的插件更伤信任——与 mcp.status"配置是意图，状态是事实"同纪律。
+    """
+    type: Literal["plugin.list"] = "plugin.list"
+
+
+class PluginListResult(BaseModel):
+    """插件列表响应 - 行序按 内置→已安装 分组、组内按名字典序"""
+    plugins: list[PluginRow] = []
+
+
+class PluginSetEnabledCommand(BaseModel):
+    """
+    插件启停命令 - 翻转某插件的 enabled 位并即时汇入运行系统
+
+    【生效边界】
+    skills/hooks 即时（下次匹配即变）；MCP server 启停对应连接；
+    在飞 run 已注册的工具句柄不追缴——禁用只影响新 run，文档写明。
+    """
+    type: Literal["plugin.set_enabled"] = "plugin.set_enabled"
+    name: str
+    enabled: bool
+
+
+class PluginSetEnabledResult(BaseModel):
+    """插件启停响应 - 名字不存在或该插件处于 error 态时 ok=False 带原因"""
+    ok: bool = True
+    error: str = ""
+
+
+class PluginInstallCommand(BaseModel):
+    """
+    插件安装命令 - 从 URL（GitHub 仓库/分支 或 ZIP）安装到 ~/.iwan/plugins/
+
+    【安全说明】
+    安装即同意：URL 是用户主动给出的信任来源，装完 enabled=true 直接生效；
+    下载/解压全程防 zip-slip，hooks/mcp 贡献仍走各自的 fail-closed 校验闸。
+    """
+    type: Literal["plugin.install"] = "plugin.install"
+    url: str
+
+
+class PluginInstallResult(BaseModel):
+    """插件安装响应 - message 面向用户（成功=插件名，失败=中文原因）"""
+    ok: bool
+    message: str
+
+
 # 根据 type 字段决定命令类型的判别联合
 # 使用 Pydantic 的 Discriminator 实现多态类型，根据 type 字段自动推断命令类型
 Command = Annotated[
@@ -2220,6 +2295,9 @@ Command = Annotated[
     | WorkflowRunCommand
     | WorkflowCancelCommand
     | WorkflowRunsCommand
-    | SpeechTranscribeCommand,
+    | SpeechTranscribeCommand
+    | PluginListCommand
+    | PluginSetEnabledCommand
+    | PluginInstallCommand,
     Discriminator("type"),
 ]

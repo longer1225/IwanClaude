@@ -53,7 +53,13 @@ import sys
 import time
 from datetime import UTC
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    # 仅类型标注用的前向引用（装配处运行期局部导入，与 hooks 同一模式，
+    # 也避免在 IS_WINDOWS 常量之后新增 E402 顶层导入）
+    from iwan_claude.core.hooks import HookRegistry
+    from iwan_claude.core.plugins import PluginRegistry
 
 # Windows 标记：asyncio.ProactorEventLoop（Windows 默认）不支持 loop.add_signal_handler
 # 在 Windows 上需要使用不同的信号处理方式
@@ -96,6 +102,13 @@ from iwan_claude.core.bus.commands import (
     PermissionRespondCommand,       # 权限响应命令
     PermissionRespondResult,        # 权限响应结果
     PongResult,                     # Ping 响应
+    PluginInstallCommand,           # 插件 URL 安装命令
+    PluginInstallResult,            # 插件 URL 安装结果
+    PluginListCommand,              # 插件列表命令
+    PluginListResult,               # 插件列表结果
+    PluginRow,                      # 插件行模型
+    PluginSetEnabledCommand,        # 插件启停命令
+    PluginSetEnabledResult,         # 插件启停结果
     PrContextCommand,               # PR 上下文命令（本地 git 解析）
     PrContextResult,                # PR 上下文结果
     PrCreateCommand,                # PR 创建命令（push + 建 PR）
@@ -302,6 +315,10 @@ class CoreApp:
         self._permission_manager: PermissionManager | None = None
         # MCP 服务器管理器：管理外部 MCP 工具服务器
         self._mcp_manager: McpServerManager | None = None
+        # 插件系统（S10 ①）：注册表 + hooks 注册表引用——后者要留给
+        # set_enabled/install 副作用做原地替换（PermissionManager 持同一对象）
+        self._plugin_registry: PluginRegistry | None = None
+        self._hook_registry: HookRegistry | None = None
         # LangGraph 检查点存储：支持状态持久化和回溯
         self._checkpointer: Any | None = None
         # 检查点上下文：用于异步资源的正确关闭
@@ -315,6 +332,9 @@ class CoreApp:
         self._scheduler: Scheduler | None = None
         # 最近一次触发的 (run_id, session_id) 映射：schedule.fired 事件补字段用
         self._sched_last_fire: dict[str, tuple[str, str]] = {}
+        # 任务 id → 常驻会话 id：每个定时任务一个线程，触发消息全部汇入其中
+        # （旧版每次 fire 新建 one_shot，结果随会话关闭蒸发、审批也每次重弹）
+        self._sched_sessions: dict[str, str] = {}
         # ④ PR 自动评审：已处理过的 PR 号（手动评审与轮询共享，防重复烧 LLM）
         # + 首轮 seed 标记（上线即囤：存量 open PR 登记但不评审，只跟新号）
         # + 轮询任务句柄（config.github.auto_review=False 时永远是 None）
@@ -983,6 +1003,68 @@ class CoreApp:
             return SpeechTranscribeResult(ok=False, error=str(e))
         return SpeechTranscribeResult(ok=True, text=text)
 
+    # ===== 插件系统（S10 ①）=====
+
+    # 插件列表（plugin.list）：全行表含禁用与 error 行，GUI 插件页数据源
+    async def _plugin_list_handler(self, params: dict[str, Any]) -> PluginListResult:
+        PluginListCommand.model_validate(params)
+        assert self._plugin_registry is not None
+        return PluginListResult(
+            plugins=[PluginRow.model_validate(r) for r in self._plugin_registry.rows()]
+        )
+
+    # 插件启停（plugin.set_enabled）：翻账本 → 三类贡献面即时汇入 → 广播
+    async def _plugin_set_enabled_handler(self, params: dict[str, Any]) -> PluginSetEnabledResult:
+        cmd = PluginSetEnabledCommand.model_validate(params)
+        assert self._plugin_registry is not None
+        before = {c.name for c in self._plugin_registry.mcp_configs()}
+        ok, err = self._plugin_registry.set_enabled(cmd.name, cmd.enabled)
+        if not ok:
+            return PluginSetEnabledResult(ok=False, error=err)
+        await self._apply_plugin_mcp_diff(before)
+        self._refresh_plugin_surfaces()
+        await self._publish_plugin_changed(cmd.name, cmd.enabled, "toggle")
+        return PluginSetEnabledResult(ok=True)
+
+    # 插件安装（plugin.install）：URL → ~/.iwan/plugins（安装即同意，成功直接生效并广播）
+    async def _plugin_install_handler(self, params: dict[str, Any]) -> PluginInstallResult:
+        cmd = PluginInstallCommand.model_validate(params)
+        assert self._plugin_registry is not None
+        before = {c.name for c in self._plugin_registry.mcp_configs()}
+        name, message, ok = await self._plugin_registry.install(cmd.url)
+        if not ok:
+            return PluginInstallResult(ok=False, message=message)
+        await self._apply_plugin_mcp_diff(before)
+        self._refresh_plugin_surfaces()
+        await self._publish_plugin_changed(name, True, "install")
+        return PluginInstallResult(ok=True, message=message)
+
+    # MCP 差分启停：只动插件名字空间（用户配置的 server 全程不被本路径触碰）
+    async def _apply_plugin_mcp_diff(self, before: set[str]) -> None:
+        assert self._mcp_manager is not None and self._plugin_registry is not None
+        after = self._plugin_registry.mcp_configs()
+        after_names = {c.name for c in after}
+        for gone in sorted(before - after_names):
+            await self._mcp_manager.stop_server(gone)
+        for cfg in after:
+            if cfg.name not in before:
+                await self._mcp_manager.start_one(cfg)
+
+    # 刷新非 MCP 贡献面：hooks 双表原地替换 + 技能目录类表重写
+    def _refresh_plugin_surfaces(self) -> None:
+        from iwan_claude.core.skills.loader import SkillLoader
+        assert self._plugin_registry is not None
+        if self._hook_registry is not None:
+            self._hook_registry.replace_plugin_hooks(self._plugin_registry.hook_specs())
+        SkillLoader.set_plugin_dirs(self._plugin_registry.skill_dirs())
+
+    # 广播 plugin.changed：启停是全局副作用，多客户端同秒看见同一事实
+    async def _publish_plugin_changed(self, name: str, enabled: bool, by: str) -> None:
+        from iwan_claude.core.bus.events import PluginChangedEvent
+        await self._bus.publish(PluginChangedEvent(
+            name=name, enabled=enabled, by=by, ts=_now(),
+        ))
+
     # 引擎 launch 回调：懒建本 run 共享的 one_shot 会话与 SpawnAgentTool，后台启动节点子 Agent
     async def _workflow_launch(self, ctx: NodeLaunchCtx) -> tuple[str, str]:
         assert self._sessions is not None and self._config is not None
@@ -1080,25 +1162,60 @@ class CoreApp:
             finished_at=tr.finished_at, ts=_now(),
         ))
 
-    # 调度器的触发入口：复刻 agent.run 的即发即返路径，返回 "run_id|说明" 或 "|失败原因"
+    # 调度器的触发入口：每任务一个常驻会话，fire 消息汇入同一线程，返回 "run_id|说明" 或 "|失败原因"
     async def _schedule_fire(self, task: dict[str, Any]) -> tuple[bool, str]:
+        # 【学习要点】旧实现每次 fire 新建 one_shot 会话：结果随 one_shot 关闭即弃，
+        # 审批每次重弹，且高频任务把侧栏刷成日志。改为"任务↔一个 chat 会话"后：
+        # 报时逐分钟累积在同一线程，"始终允许"的审批指纹天然跨分钟生效。
+        # 复用判定只走公开 API list_sessions（它已合并内存态，返回的就是活对象）；
+        # 会话被用户手动关闭（closed）则视同缺失，下一班静默换用新线程。
         assert self._sessions is not None
-        try:
-            session = await self._sessions.create(
-                mode="one_shot",
-                title=f"定时·{task.get('name', '')}"[:40],
-                cwd=str(task.get("cwd", "")),
+        tid = str(task.get("id", ""))
+        title = f"定时·{task.get('name', '')}"[:40]
+        all_sessions = self._sessions.list_sessions()
+        sid = self._sched_sessions.get(tid, "")
+        session = next(
+            (s for s in all_sessions if s.id == sid and s.status != "closed"),
+            None,
+        )
+        if session is None:
+            # 内存映射随 daemon 重启而失——标题是 _schedule_fire 的建会话约定，
+            # 据此从持久层捞回原线程（list_sessions 按 updated_at 降序，取最近一条），
+            # 报时历史不至于每次重启断档另起炉灶
+            session = next(
+                (
+                    s
+                    for s in all_sessions
+                    if s.title == title and s.mode == "chat" and s.status != "closed"
+                ),
+                None,
             )
-        except Exception as e:
-            return False, f"|创建会话失败：{type(e).__name__}: {e}"
+            if session is not None:
+                self._sched_sessions[tid] = session.id
+        if session is None:
+            try:
+                session = await self._sessions.create(
+                    mode="chat", title=title, cwd=str(task.get("cwd", "")),
+                )
+            except Exception as e:
+                return False, f"|创建会话失败：{type(e).__name__}: {e}"
+            self._sched_sessions[tid] = session.id
         run_id = new_run_id()
         run_task = asyncio.create_task(
-            self._sessions.send_message(session.id, str(task.get("prompt", "")), run_id=run_id)
+            self._schedule_send(session.id, str(task.get("prompt", "")), run_id)
         )
         self._running_runs.add(run_task)
         run_task.add_done_callback(self._running_runs.discard)
-        self._sched_last_fire[str(task.get("id", ""))] = (run_id, session.id)
+        self._sched_last_fire[tid] = (run_id, session.id)
         return True, f"{run_id}|已触发（会话 {session.id}）"
+
+    # 定时消息发送：SESSION_BUSY（上一班 run 未结束）如实降级成日志，炸的是这一班不是调度循环
+    async def _schedule_send(self, sid: str, prompt: str, run_id: str) -> None:
+        assert self._sessions is not None
+        try:
+            await self._sessions.send_message(sid, prompt, run_id=run_id)
+        except Exception as e:
+            logger.warning("schedule: 会话 %s 本轮跳过：%s", sid, e)
 
     # 调度器记账后的广播：发 schedule.fired，GUI 借此刷新任务表并发现新会话
     async def _schedule_notified(
@@ -2037,11 +2154,40 @@ class CoreApp:
             ask=self._config.permission.ask,
             allow=self._config.permission.allow,
         )
+        # ===== 初始化插件注册表（S10 插件系统①）=====
+        # 装配排在 hooks/MCP 之前：那两处都要汇入插件层贡献；
+        # 用户配置的 MCP server 名先入账作保留名（插件撞名→该贡献跳过标 partial）
+        from iwan_claude.core.plugins import PluginRegistry
+        # IWAN_PLUGINS_DIR：安装目录与账本一起改道（集成测试绝不许写用户真实 ~/.iwan）
+        _plg_dir = os.environ.get("IWAN_PLUGINS_DIR", "")
+        if _plg_dir:
+            self._plugin_registry = PluginRegistry(
+                install_dir=Path(_plg_dir).expanduser(),
+                ledger_path=Path(_plg_dir).expanduser() / "plugins.toml",
+            )
+        else:
+            self._plugin_registry = PluginRegistry()
+        self._plugin_registry.load({s.name for s in self._config.mcp.servers})
+        _p_rows = self._plugin_registry.rows()
+        logger.info(
+            "plugins: %d discovered, %d enabled (%d error)",
+            len(_p_rows), sum(1 for r in _p_rows if r["enabled"]),
+            sum(1 for r in _p_rows if r["status"] == "error"),
+        )
+
         # [[hooks]] 已在配置加载期校验过，这里解析成可执行规格并接入事件总线
         # （registry 持 bus：每个实际跑过的 hook 广播 hook.evaluated，TUI 可观测）
         from iwan_claude.core.hooks import HookRegistry, parse_hook_entries
+        from iwan_claude.core.skills.loader import SkillLoader
         hook_specs = parse_hook_entries(self._config.hooks)
         hook_registry = HookRegistry(hook_specs, bus=self._bus)
+        # 插件 hook 汇入双表（只启用的贡献；PermissionManager 持本对象引用，
+        # 后续 set_enabled 原地 replace 即生效，调用方零感知）
+        assert self._plugin_registry is not None
+        hook_registry.replace_plugin_hooks(self._plugin_registry.hook_specs())
+        self._hook_registry = hook_registry
+        # 插件技能目录入类级尾表（优先级最低：本地永远压插件，见 SkillLoader 注释）
+        SkillLoader.set_plugin_dirs(self._plugin_registry.skill_dirs())
         # 启动默认模式：[permission] mode 优先；老配置 [agent] auto_mode 仅在
         # 新键未动过（仍为 default）时经 AUTO_TO_MODE 折进来——新旧键共存时
         # 更具体的 permission 节赢，这条判据写进设计文档 §3
@@ -2105,9 +2251,11 @@ class CoreApp:
         # ===== 初始化 MCP 服务器管理器 =====
         # MCP（Model Context Protocol）用于集成外部工具服务器
         self._mcp_manager = McpServerManager()
-        if self._config.mcp.servers:
-            logger.info("mcp: starting %d server(s)", len(self._config.mcp.servers))
-            await self._mcp_manager.start_all(self._config.mcp.servers)
+        # 插件贡献的 MCP server 与用户配置并启（撞名在贡献计算期已挡，插件名带 {plugin}__ 前缀）
+        all_mcp_servers = self._config.mcp.servers + self._plugin_registry.mcp_configs()
+        if all_mcp_servers:
+            logger.info("mcp: starting %d server(s)", len(all_mcp_servers))
+            await self._mcp_manager.start_all(all_mcp_servers)
 
         # ===== 初始化 Checkpointer =====
         # 根据配置选择检查点存储后端（none/memory/sqlite）
@@ -2265,6 +2413,7 @@ class CoreApp:
             self._config.port,      # 绑定端口
             self._broadcaster,      # 事件广播器
             trace=self._trace,      # 跟踪写入器
+            token=self._config.token,  # 鉴权令牌（空=不鉴权，协议缺口 #4）
         )
         
         # ===== 注册 RPC 命令处理器 =====
@@ -2337,6 +2486,9 @@ class CoreApp:
         server.register("workflow.cancel", self._workflow_cancel_handler)
         server.register("workflow.runs", self._workflow_runs_handler)
         server.register("speech.transcribe", self._speech_transcribe_handler)
+        server.register("plugin.list", self._plugin_list_handler)
+        server.register("plugin.set_enabled", self._plugin_set_enabled_handler)
+        server.register("plugin.install", self._plugin_install_handler)
 
         # ===== 启动服务器 =====
         # start() 方法会启动 TCP 监听并返回绑定的地址

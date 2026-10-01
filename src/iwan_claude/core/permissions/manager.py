@@ -162,7 +162,7 @@ class PermissionManager:
         policies: dict[str, ToolPolicy] | None = None,
         *,
         policy_file: Path | None = None,
-        timeout_s: float = 60.0,
+        timeout_s: float = 600.0,
         rules: Any = None,  # PermissionRules（声明式 deny/ask/allow 规则）
         hooks: Any = None,  # HookRegistry（PreToolUse/PostToolUse 外部裁判）
         default_mode: str = "default",  # 权限模式五态的会话默认值
@@ -173,7 +173,7 @@ class PermissionManager:
         【参数说明】
         - policies: dict[str, ToolPolicy] | None - 工具策略映射（默认使用 DEFAULT_POLICIES）
         - policy_file: Path | None - 策略文件路径（用于持久化缓存）
-        - timeout_s: float - 审批超时时间（秒，0 表示不超时，默认 60.0）
+        - timeout_s: float - 审批超时时间（秒，0 表示不超时，默认 600.0）
         - rules: PermissionRules | None - 声明式 deny/ask/allow 规则引擎输入
           （None 或空 = 关闭规则引擎，只走 legacy 评估链，保证旧配置零感知升级）
         - hooks: HookRegistry | None - 生命周期钩子注册表（None/空 = PreToolUse
@@ -194,7 +194,7 @@ class PermissionManager:
         ```python
         manager = PermissionManager(
             policy_file=Path("~/.iwan/policy.toml"),
-            timeout_s=60.0
+            timeout_s=600.0
         )
         ```
         """

@@ -27,9 +27,13 @@ async def running_daemon(free_port: int) -> AsyncGenerator[subprocess.Popen[byte
     env = os.environ.copy()
     env["IWAN_PORT"] = str(free_port)
     env["IWAN_LOG_FILE"] = ""
+    # 测试 daemon 恒为免鉴权：用户 shell 里残留的 IWAN_TOKEN 不得泄进测试实例
+    env["IWAN_TOKEN"] = ""
     env["IWAN_LOG_LEVEL"] = "WARNING"
     env["IWAN_SESSIONS_DIR"] = str(tmp_dir / "sessions")
     env["IWAN_POLICY_FILE"] = str(tmp_dir / "policy.toml")
+    # 插件安装目录与账本一起改道临时目录：集成测试的 set_enabled 绝不写用户 ~/.iwan
+    env["IWAN_PLUGINS_DIR"] = str(tmp_dir / "plugins")
     # 关语音预热：测试 daemon 不拖百兆模型进内存、不依赖模型缓存存在
     env["IWAN_SPEECH_PREWARM"] = "0"
 

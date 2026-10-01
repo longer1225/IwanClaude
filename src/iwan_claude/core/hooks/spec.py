@@ -27,6 +27,9 @@ class HookSpec:
     - matcher: 精确工具名 或 "*"（本期不做 regex/多值）
     - argv: 已拆分的命令行（shell=False 直接 exec）
     - timeout_s: 子进程超时（秒，>0）
+    - source: 规格出处（"config"=用户 [[hooks]]，其余=插件名）——
+      插件系统汇入同一注册表后，观测事件与错误信息需要能说清"这条守卫是谁装的"；
+      dataclass 尾位默认值保证所有既有构造点零改动（向后兼容）
 
     【设计目的】
     spec 层与执行层（runner.py）分离：校验在启动期集中完成，
@@ -36,6 +39,8 @@ class HookSpec:
     matcher: str
     argv: list[str]
     timeout_s: float
+    # 规格出处："config"=用户 [[hooks]]，其余=插件名（观测/报错溯源用；尾位默认值向后兼容）
+    source: str = "config"
 
 
 # 把配置里的 shell 风格 command 字符串安全拆成 argv

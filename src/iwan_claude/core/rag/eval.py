@@ -47,7 +47,9 @@ import ast  # 自动生成测试集时提取顶层符号
 import asyncio  # 异步编程核心
 import json  # 读写测试集
 import logging  # 日志输出
+import time  # --run 模式给索引/评估阶段计时
 from dataclasses import dataclass, field  # 数据类定义
+from datetime import datetime  # 结果 JSON 的时间戳
 from pathlib import Path  # 文件路径处理
 from typing import Any  # 类型注解
 
@@ -785,6 +787,86 @@ def print_summary(summary: EvalSummary) -> None:
 
 
 # =============================================================================
+# --run 真跑通道：构建向量索引 → 逐题检索 → 指标报告 → JSON 落盘
+# =============================================================================
+
+
+async def run_real_eval(
+    testset: list[EvalQuestion], root: str, out_path: Path
+) -> dict[str, Any]:
+    """
+    端到端跑一次真实检索评估
+
+    使用与 daemon 相同的配置（get_config → [rag] 分块参数 / embedding 端点），
+    对 root 建全量向量索引后逐题检索，打印报告并把汇总指标写入 out_path
+    （GUI 的"检索质量"区块读这份 JSON）。返回写盘的 payload 便于调用方断言。
+    """
+    # 【学习要点】1) 与 daemon 同源配置：评估用的分块/embedding 参数必须
+    # 和生产检索路径一致，否则量出来的召回率代表的不是用户真正得到的系统。
+    # 2) 不注入 llm_client：查询重写与 LLM 重排是"锦上添花层"，评估先量裸
+    # 检索的地板值，地板稳了再单独测加层增益，两层混测会互相掩盖回归。
+    from iwan_claude.core.config import get_config
+    from iwan_claude.core.rag.chunker import DocumentChunker
+    from iwan_claude.core.rag.embedding import get_embedding_provider
+    from iwan_claude.core.rag.index import KnowledgeIndexManager
+    from iwan_claude.core.rag.vectorstore import MemoryVectorStore
+
+    cfg = get_config()
+    chunker = DocumentChunker(
+        chunk_size=cfg.rag.max_chunk_size, chunk_overlap=cfg.rag.chunk_overlap
+    )
+    provider = get_embedding_provider(cfg.rag, cfg.llm.base_url)
+    mgr = KnowledgeIndexManager(
+        MemoryVectorStore(), provider, chunker, index_path=cfg.rag.index_path
+    )
+
+    t0 = time.perf_counter()
+    await mgr.index_directory(root=root)
+    idx_s = round(time.perf_counter() - t0, 1)
+    st = mgr.status()
+    print(f"[eval] 索引完成: {st.total_chunks} chunks / {st.total_sources} sources / {idx_s}s")
+
+    summary = await RAGEvaluator(mgr, testset).evaluate()
+    print_summary(summary)
+
+    payload: dict[str, Any] = {
+        "ts": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "root": str(Path(root).resolve()),
+        "embedding_model": cfg.rag.embedding_model,
+        "chunk": {"size": cfg.rag.max_chunk_size, "overlap": cfg.rag.chunk_overlap},
+        "index": {"chunks": st.total_chunks, "sources": st.total_sources, "index_s": idx_s},
+        "total_questions": summary.total_questions,
+        "recall_at_k": {str(k): round(v, 4) for k, v in summary.avg_recall_at_k.items()},
+        "precision_at_k": {str(k): round(v, 4) for k, v in summary.avg_precision_at_k.items()},
+        "mrr": round(summary.avg_mrr, 4),
+        "hit_rate": round(summary.overall_hit_rate, 4),
+        "category_breakdown": {
+            cat: {
+                mk: (round(mv, 4) if isinstance(mv, float) else mv)
+                for mk, mv in metrics.items()
+            }
+            for cat, metrics in summary.category_breakdown.items()
+        },
+        "per_question": [
+            {
+                "query": r.question.query,
+                "category": r.question.category,
+                "first_hit": r.first_hit_position,
+                "mrr": round(r.mrr, 3),
+            }
+            for r in summary.results
+        ],
+    }
+    # 【学习要点】落盘用"写 tmp + 原子 rename"同款思路不必要（一次性读的消费端
+    # 容忍半写窗口极小），但目录不存在必须自己兜——GUI 读不到文件会显示空态
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"[eval] 结果 JSON -> {out_path}")
+    await provider.aclose()
+    return payload
+
+
+# =============================================================================
 # 命令行入口
 # =============================================================================
 
@@ -812,6 +894,17 @@ if __name__ == "__main__":
         "--ablation",
         action="store_true",
         help="运行分块参数消融实验",
+    )
+    parser.add_argument(
+        "--run",
+        action="store_true",
+        help="端到端真跑一次评估（需 embedding API key，构建索引后逐题检索）",
+    )
+    parser.add_argument(
+        "--out",
+        type=str,
+        default=None,
+        help="--run 结果 JSON 落盘路径（默认 ~/.iwan/rag_eval_latest.json，GUI 读这份）",
     )
 
     args = parser.parse_args()
@@ -847,8 +940,17 @@ if __name__ == "__main__":
     else:
         testset = BUILTIN_TESTSET
 
+    # --run 模式：端到端真跑（索引 + 检索 + 指标 + 落盘）
+    if args.run:
+        out = (
+            Path(args.out)
+            if args.out
+            else Path.home() / ".iwan" / "rag_eval_latest.json"
+        )
+        asyncio.run(run_real_eval(testset, args.root, out))
+
     # --ablation 模式：运行消融实验
-    if args.ablation:
+    elif args.ablation:
         print("分块参数消融实验...")
         # 注意：需要真实 API Key 才能运行
         print("请在代码中配置真实的 EmbeddingProvider 后运行")

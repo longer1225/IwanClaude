@@ -221,6 +221,10 @@ METHOD_NOT_FOUND = -32601 # 方法不存在
 INVALID_PARAMS = -32602   # 参数错误（参数类型或值不正确）
 INTERNAL_ERROR = -32603   # 服务器内部错误
 
+# 应用层错误码（-32000 ~ -32099 属 JSON-RPC 保留区，本项目从 -32001 起分配）
+# AUTH_REQUIRED (-32001): 连接握手鉴权失败（core.token 配置后首条消息必须是 auth.hello）
+AUTH_REQUIRED = -32001
+
 
 class HandlerError(Exception):
     """

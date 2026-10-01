@@ -82,13 +82,15 @@ class SocketClient:
     - 连接关闭时自动取消所有待处理请求
     """
 
-    def __init__(self, host: str, port: int) -> None:
+    def __init__(self, host: str, port: int, token: str = "") -> None:
         """
         初始化 TCP 客户端
 
         参数：
             host: 核心服务的主机地址
             port: 核心服务的端口号
+            token: 鉴权令牌；空串 = 跳过 auth.hello 握手（与历史行为一致），
+                非空 = connect() 先完成握手再返回
 
         属性：
             _host: 主机地址
@@ -100,6 +102,8 @@ class SocketClient:
         """
         self._host = host
         self._port = port
+        # 鉴权令牌：connect() 里非空才走 auth.hello 握手
+        self._token = token
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
         self._pending: dict[str, asyncio.Future[dict[str, Any]]] = {}
@@ -126,6 +130,38 @@ class SocketClient:
         self._reader, self._writer = await asyncio.open_connection(
             self._host, self._port, limit=_MAX_LINE_BYTES
         )
+        # 配了令牌才握手：空 token 路径保持一次 open 即返，行为逐字节同历史
+        if self._token:
+            await self._handshake()
+
+    # 发送 auth.hello 并等待放行应答；被拒时以 RuntimeError 上抛（区别于网络层 OSError）
+    async def _handshake(self) -> None:
+        """
+        连接后握手鉴权
+
+        前提：构造时传入了非空 token。发送一条 auth.hello JSON-RPC 请求，
+        阻塞等待服务器的一行应答；收到 error（含旧版 daemon 回 -32601
+        method not found 的情形）即抛 RuntimeError——宁可硬失败，绝不带着
+        未鉴权连接继续发业务命令。
+        """
+        assert self._writer is not None and self._reader is not None
+        req = JsonRpcRequest(
+            id=str(uuid.uuid4()),
+            method="auth.hello",
+            params={"token": self._token},
+        )
+        self._writer.write((req.model_dump_json() + "\n").encode())
+        await self._writer.drain()
+        line = await self._reader.readline()
+        if not line:
+            raise ConnectionError("daemon 在握手时断开连接")
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            raise ConnectionError("握手应答非法 JSON") from None
+        if "error" in obj:
+            msg = obj["error"].get("message", "未知错误")
+            raise RuntimeError(f"daemon 拒绝鉴权：{msg}")
 
     async def close(self) -> None:
         """

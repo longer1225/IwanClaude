@@ -921,6 +921,27 @@ class PrReviewedEvent(BaseModel):
     ts: str
 
 
+class PluginChangedEvent(BaseModel):
+    """
+    插件启停/安装事件 - 运行系统的插件贡献集发生变化时广播
+
+    【字段说明】
+    - name: 插件清单名
+    - enabled: 变化后的启停位
+    - by: "toggle"（用户开关）| "install"（URL 安装落地）
+    - ts: ISO 8601 时间戳
+
+    【设计目的】
+    启停是全局副作用（skills 搜索表、hook 双表、MCP 连接集同时变），
+    多客户端要同一秒看见同一事实——GUI 插件页与日志面板都订阅本事件刷新。
+    """
+    type: Literal["plugin.changed"] = "plugin.changed"
+    name: str
+    enabled: bool
+    by: str = "toggle"
+    ts: str
+
+
 # 根据 type 字段决定事件类型的判别联合
 # 使用 Pydantic 的 Discriminator 实现多态类型，根据 type 字段自动推断事件类型
 Event = Annotated[
@@ -962,6 +983,7 @@ Event = Annotated[
     | SshClosedEvent
     | WorkflowNodeEvent
     | WorkflowRunFinishedEvent
-    | PrReviewedEvent,
+    | PrReviewedEvent
+    | PluginChangedEvent,
     Discriminator("type"),
 ]

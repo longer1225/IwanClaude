@@ -51,12 +51,28 @@ class HookRegistry:
         初始化注册表
 
         【参数说明】
-        - hooks: 已通过 spec 校验的 hook 列表
+        - hooks: 已通过 spec 校验的 hook 列表（用户配置层）
         - bus: EventBus（可选）；提供时每个实际执行过的 hook 广播一条
           hook.evaluated 事件（TUI 观测性优先），None 时静默
+
+        【插件层设计】配置表与插件表分开持有、迭代时合并：
+        PermissionManager 持的是本对象引用而非列表快照，因此插件热启停
+        走 replace_plugin_hooks 原地改表即可生效，调用方零感知。
+        两表校验纪律不同——配置层全有或全无（启动期炸），
+        插件层逐插件隔离（坏清单只跳过该插件，见 plugins/contributor.py）。
         """
-        self._hooks = list(hooks)
+        self._config_hooks = list(hooks)
+        self._plugin_hooks: list[HookSpec] = []
         self._bus = bus
+
+    # 生效全表 = 配置层 + 插件层：计算属性而非合并副本，热替换后无需通知任何人
+    @property
+    def _hooks(self) -> list[HookSpec]:
+        return [*self._config_hooks, *self._plugin_hooks]
+
+    # 整体替换插件贡献的 hook（插件启停/重载时由 app 装配层调用；配置层永不受影响）
+    def replace_plugin_hooks(self, specs: list[HookSpec]) -> None:
+        self._plugin_hooks = list(specs)
 
     # 是否一条 hook 都没有（决定调用方能否完全跳过本层）
     def is_empty(self) -> bool:

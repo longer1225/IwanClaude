@@ -260,6 +260,11 @@ class MemoryVectorStore(VectorStore):
         # 所以维度不匹配必须在写入瞬间炸出来提醒重建索引
         self._dim: int | None = None
 
+    # 当前锚定的向量维度（None=还没收过货）：索引元数据记录指纹时读取
+    @property
+    def dim(self) -> int | None:
+        return self._dim
+
     # 判断 chunk 是否通过过滤器（source_path 精确匹配 / symbol 精确匹配）
     @staticmethod
     def _matches_filters(chunk: Chunk, filters: dict[str, Any] | None) -> bool:

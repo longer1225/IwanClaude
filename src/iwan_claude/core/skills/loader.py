@@ -344,6 +344,17 @@ class SkillLoader:
     # 内建 Skill 目录路径
     _BUILTIN_DIR = Path(__file__).parent / "builtin"
 
+    # 插件贡献的技能目录（运行期由插件系统整体重写，见 set_plugin_dirs）。
+    # 做成类属性而非实例属性：daemon 里 SkillLoader 存在多个实例
+    # （runners/TUI 侧各持各的），插件启停只想改一个编辑点——类级共享表
+    # 让"后建的实例自动看见先装的插件"，无需任何实例回溯通知。
+    _plugin_dirs: list[Path] = []
+
+    # 设置插件技能目录（传空表=全部禁用；顺序即插件优先级，先到先得）
+    @classmethod
+    def set_plugin_dirs(cls, dirs: list[Path]) -> None:
+        cls._plugin_dirs = list(dirs)
+
     # 【学习要点】搜索目录单一权威源：三处消费点（resolve 的候选路径、
     # list_all、list_all_skills）过去各自抄写目录清单，加一档就要改三处——
     # 漏一处就是"能按名找到、列表里却看不见"的分裂 bug。现在全部从本函数
@@ -361,6 +372,9 @@ class SkillLoader:
             Path("~/.iwan/skills").expanduser(),    # 用户级 iwan 原生
             Path("~/.claude/skills").expanduser(),  # 用户级 Claude Code/Codex 生态
             cls._BUILTIN_DIR,                       # 内建
+            # 插件层排最末：本地永远压插件——与 .claude 借库同一条纪律，
+            # 第三方包不得覆盖项目/用户自己的技能，哪怕它"更新潮"
+            *cls._plugin_dirs,
         ]
 
     def resolve(self, name: str) -> Skill | None:

@@ -21,6 +21,7 @@ IPC 服务器
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import logging
 from collections.abc import Awaitable, Callable
@@ -31,6 +32,7 @@ from typing import Any
 from pydantic import BaseModel, ValidationError
 
 from iwan_claude.core.bus.envelope import (
+    AUTH_REQUIRED,
     INTERNAL_ERROR,
     INVALID_REQUEST,
     METHOD_NOT_FOUND,
@@ -118,6 +120,7 @@ class SocketServer:
         port: int,
         broadcaster: IpcEventBroadcaster | None = None,
         trace: TraceWriter | None = None,
+        token: str = "",
     ) -> None:
         """
         初始化 TCP 服务器
@@ -139,6 +142,9 @@ class SocketServer:
         """
         self._host = host
         self._port = port
+        # 鉴权令牌：空串 = 不鉴权（默认，行为与历史逐字节一致）；
+        # 非空 = 每条新连接的第一行必须是 auth.hello 握手
+        self._token = token
         self._handlers: dict[str, CommandHandler] = {}
         self._server: asyncio.AbstractServer | None = None
         self._broadcaster = broadcaster
@@ -260,6 +266,9 @@ class SocketServer:
         logger.debug("client connected: %s", peer)
         self._active_writers.add(writer)
         try:
+            # 握手放在读循环之前：token 为空零预读，老路径逐字节不变
+            if self._token and not await self._authenticate(reader, writer):
+                return
             await self._read_loop(reader, writer)
         finally:
             self._active_writers.discard(writer)
@@ -270,6 +279,48 @@ class SocketServer:
             except Exception:
                 pass
             logger.debug("client disconnected: %s", peer)
+
+    # 连接首行鉴权握手：校验 auth.hello 令牌，成败各回一行应答；False 表示应断开
+    async def _authenticate(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> bool:
+        """
+        握手鉴权
+
+        仅在构造时传入非空 token 时被调用。读连接的第一行，要求它是
+        auth.hello 请求且 params.token 匹配（hmac.compare_digest 防时序侧信道）。
+
+        返回：
+            bool: True 放行进入正常读循环；False 已回错误、调用方应关闭连接
+        """
+        try:
+            line = await reader.readline()
+        except asyncio.LimitOverrunError:
+            await self._send(writer, make_error(None, INVALID_REQUEST, "握手帧过大"))
+            return False
+        if not line:
+            return False  # 对端在握手前就断连，无需回话
+        try:
+            obj = json.loads(line)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            await self._send(writer, make_error(None, PARSE_ERROR, "握手帧非法 JSON"))
+            return False
+        rid = obj.get("id", "auth-hello") if isinstance(obj, dict) else "auth-hello"
+        ok = (
+            isinstance(obj, dict)
+            and obj.get("method") == "auth.hello"
+            and hmac.compare_digest(str(obj.get("params", {}).get("token", "")), self._token)
+        )
+        if not ok:
+            logger.warning("auth.hello 校验失败，断开连接")
+            await self._send(
+                writer, make_error(rid, AUTH_REQUIRED, "鉴权失败或缺少 auth.hello 握手")
+            )
+            return False
+        await self._send(writer, JsonRpcSuccess(id=rid, result={"ok": True}))
+        return True
 
     async def _read_loop(
         self,

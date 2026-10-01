@@ -154,7 +154,7 @@ async def _run_async(goal: str, config: IwanConfig) -> int:
         退出码：0 表示成功，1 表示失败
     """
     # 创建 Socket 客户端
-    client = SocketClient(config.host, config.port)
+    client = SocketClient(config.host, config.port, config.token)
     
     try:
         # 连接核心服务

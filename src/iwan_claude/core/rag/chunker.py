@@ -46,6 +46,15 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+# 单个 Chunk 送入 Embedding API 的字符硬上限。
+# 【为什么必须存在】DashScope text-embedding-v3 对"每条 input"有 8192 token 上限
+# （超限即整批 400 InternalError.Algo.InvalidParameter，被 index_directory 静默跳过、
+# 整个文件不进索引）。AST/标题等结构化策略会按"完整语义单元"产出块——一个横跨上千行的
+# 巨型类/函数就可能是一个 9 万字符的块，直接触发该上限。6000 字符留足余量：即便纯 CJK
+# （约 1 token/字符）也稳在 8192 之下；而正常代码符号几乎不可能这么大，所以这道闸只
+# 拦得住病态巨块，不会把普通方法切碎、不改变常规检索粒度。
+_EMBED_HARD_CAP_CHARS = 6000
+
 
 # 读文件并解码：UTF-8 → GBK → replace 兜底。
 # 【设计】索引是批量操作，单个编码怪异的历史文件不该炸掉整批任务——
@@ -184,23 +193,100 @@ class DocumentChunker:
         """
         # 获取文件扩展名（小写）
         ext = path.suffix.lower()
-        
+
         # 根据扩展名选择分块策略
         if ext == ".py":
-            return self._chunk_python(path)
+            raw = self._chunk_python(path)
         elif ext in (".md", ".markdown"):
-            return self._chunk_markdown(path)
+            raw = self._chunk_markdown(path)
         elif ext == ".json":
-            return self._chunk_json(path)
+            raw = self._chunk_json(path)
         elif ext in (".yaml", ".yml"):
-            return self._chunk_yaml(path)
+            raw = self._chunk_yaml(path)
         elif ext == ".xml":
-            return self._chunk_xml(path)
+            raw = self._chunk_xml(path)
         elif ext == ".csv":
-            return self._chunk_csv(path)
+            raw = self._chunk_csv(path)
         else:
             # 兜底策略：使用滑动窗口分块
-            return self._chunk_plaintext(path)
+            raw = self._chunk_plaintext(path)
+        # 统一收口：任何策略都不得产出超过嵌入端硬上限的块（见 _clamp_oversized）
+        return self._clamp_oversized(raw)
+
+    # 把超过嵌入硬上限的巨块按行再切成窗口；首块保留原 chunk_id 以维持父子锚点
+    def _clamp_oversized(self, chunks: list[Chunk]) -> list[Chunk]:
+        """
+        对结构化分块结果做"可嵌入性"兜底裁剪
+
+        【背景】AST / 标题 / 键值等策略都按语义单元产出整块，块大小不可控；
+        嵌入端（DashScope）对每条 input 有 8192 token 硬上限，超限块会让
+        整批请求 400 并被静默跳过——结果是"整个大文件从不出现在向量索引里"。
+        本方法把所有分块策略统一收口，保证不会有任何块超过 _EMBED_HARD_CAP_CHARS。
+
+        【切法】只在真正超限时才动手：把巨块的文本按行累积成 <=cap 的窗口，
+        不重叠（重叠会打乱行号，父块本身已提供语义聚合，这里不追求跨窗连续性）。
+        第一窗口复用原 Chunk 的 chunk_id（这样"方法→类"的 parent_id 仍指向有效父），
+        其余窗口作为新块、parent_id 指向原块——检索命中任一子窗都能展开回完整父上下文。
+
+        【为什么放在 chunk_file 末尾而不是各策略内部】一处收口胜过六处设防；
+        未来新增分块策略自动继承上限保护，不会重蹈"忘记 clamp 导致文件被跳"的覆辙。
+        """
+        capped: list[Chunk] = []
+        for c in chunks:
+            if len(c.text) <= _EMBED_HARD_CAP_CHARS:
+                capped.append(c)
+                continue
+            # 逐行累积成不超过上限的窗口，记录每窗口的起止行
+            lines = c.text.splitlines(keepends=True)
+            windows: list[tuple[str, int, int]] = []  # (文本, 起始行, 结束行)
+            buf = ""
+            buf_start = c.start_line
+            for offset, ln in enumerate(lines):
+                line_no = c.start_line + offset
+                # 单行本身就超上限（压缩 JS / 超长单行 docstring）：
+                # 先把缓冲冲干净，再对该行按字符硬切——否则窗口只在"行间"断开，
+                # 一个 6 万字符的整行会躲过切分、重新变成超限巨块
+                if len(ln) > _EMBED_HARD_CAP_CHARS:
+                    if buf.strip():
+                        windows.append((buf, buf_start, line_no - 1))
+                        buf = ""
+                    for cut in range(0, len(ln), _EMBED_HARD_CAP_CHARS):
+                        windows.append((ln[cut:cut + _EMBED_HARD_CAP_CHARS], line_no, line_no))
+                    buf_start = line_no + 1
+                    continue
+                if len(buf) + len(ln) > _EMBED_HARD_CAP_CHARS and buf:
+                    windows.append((buf, buf_start, line_no - 1))
+                    buf = ln
+                    buf_start = line_no
+                else:
+                    if not buf:
+                        buf_start = line_no
+                    buf += ln
+            if buf.strip():
+                windows.append((buf, buf_start, c.start_line + len(lines) - 1))
+
+            for idx, (piece, s_line, e_line) in enumerate(windows):
+                if idx == 0:
+                    # 首窗保留原 chunk_id：现有指向父块的 parent_id 不会悬空
+                    capped.append(
+                        c.model_copy(
+                            update={"text": piece, "start_line": s_line, "end_line": e_line}
+                        )
+                    )
+                else:
+                    capped.append(
+                        Chunk(
+                            text=piece,
+                            source_path=c.source_path,
+                            start_line=s_line,
+                            end_line=e_line,
+                            symbol=c.symbol,
+                            section_path=c.section_path,
+                            metadata=dict(c.metadata),
+                            parent_id=c.chunk_id,
+                        )
+                    )
+        return capped
 
     def _chunk_python(self, path: Path) -> list[Chunk]:
         """

@@ -84,6 +84,27 @@ async def _ping(config: IwanConfig) -> None:
     # reader 用于读取数据，writer 用于写入数据
     reader, writer = await asyncio.open_connection(config.host, config.port)
 
+    # 配了鉴权令牌就要先握手（ping 走裸 socket，不经 SocketClient.connect 的自动握手）
+    if config.token:
+        hello = {
+            "jsonrpc": "2.0",
+            "id": "cli-auth",
+            "method": "auth.hello",
+            "params": {"token": config.token},
+        }
+        writer.write((json.dumps(hello) + "\n").encode())
+        await writer.drain()
+        first = await asyncio.wait_for(reader.readline(), timeout=10.0)
+        if not first or b'"error"' in first:
+            print(
+                "error: 鉴权失败，daemon 拒绝了 auth.hello："
+                f"{first.decode(errors='replace').strip()}",
+                file=sys.stderr,
+            )
+            writer.close()
+            await writer.wait_closed()
+            sys.exit(1)
+
     # ===== 构建 JSON-RPC 请求 =====
     # JSON-RPC 2.0 规范要求：
     # - jsonrpc: "2.0"（协议版本）

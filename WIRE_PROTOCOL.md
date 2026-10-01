@@ -5838,6 +5838,319 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
 }
 ```
 
+### PluginRow
+
+| Field | Type | Required |
+|---|---|---|
+| `name` | `string` | yes |
+| `version` | `string` | no |
+| `enabled` | `boolean` | no |
+| `source` | `string` | no |
+| `skills` | `array` | no |
+| `hooks` | `array` | no |
+| `mcp` | `array` | no |
+| `status` | `string` | no |
+| `error` | `string` | no |
+
+```json
+{
+  "description": "插件行模型 - plugin.list 的逐插件快照\n\n【字段说明】\n- name/version: 清单身份字段（清单损坏时 name 退为目录名，行仍现身）\n- enabled: 账本里的用户选择位\n- source: \"builtin\"（随仓库分发）| \"installed\"（~/.iwan/plugins 下的 URL 安装包）\n- skills/hooks/mcp: 启用态下该插件贡献的组件清单（禁用=空表）\n- status: \"ok\" | \"partial\"（撞名跳过部分贡献）| \"error\"（清单/贡献非法，整插件跳过）",
+  "properties": {
+    "name": {
+      "title": "Name",
+      "type": "string"
+    },
+    "version": {
+      "default": "",
+      "title": "Version",
+      "type": "string"
+    },
+    "enabled": {
+      "default": false,
+      "title": "Enabled",
+      "type": "boolean"
+    },
+    "source": {
+      "default": "builtin",
+      "title": "Source",
+      "type": "string"
+    },
+    "skills": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Skills",
+      "type": "array"
+    },
+    "hooks": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Hooks",
+      "type": "array"
+    },
+    "mcp": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Mcp",
+      "type": "array"
+    },
+    "status": {
+      "default": "ok",
+      "title": "Status",
+      "type": "string"
+    },
+    "error": {
+      "default": "",
+      "title": "Error",
+      "type": "string"
+    }
+  },
+  "required": [
+    "name"
+  ],
+  "title": "PluginRow",
+  "type": "object"
+}
+```
+
+### PluginListCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+
+```json
+{
+  "description": "插件列表命令 - 查询全部已发现插件（含禁用与 error 行）\n\n【设计目的】\nerror 插件也要现身：GUI 必须能解释\"为什么装不上\"，静默消失的插件\n比报错的插件更伤信任——与 mcp.status\"配置是意图，状态是事实\"同纪律。",
+  "properties": {
+    "type": {
+      "const": "plugin.list",
+      "default": "plugin.list",
+      "title": "Type",
+      "type": "string"
+    }
+  },
+  "title": "PluginListCommand",
+  "type": "object"
+}
+```
+
+### PluginListResult
+
+| Field | Type | Required |
+|---|---|---|
+| `plugins` | `array` | no |
+
+```json
+{
+  "$defs": {
+    "PluginRow": {
+      "description": "插件行模型 - plugin.list 的逐插件快照\n\n【字段说明】\n- name/version: 清单身份字段（清单损坏时 name 退为目录名，行仍现身）\n- enabled: 账本里的用户选择位\n- source: \"builtin\"（随仓库分发）| \"installed\"（~/.iwan/plugins 下的 URL 安装包）\n- skills/hooks/mcp: 启用态下该插件贡献的组件清单（禁用=空表）\n- status: \"ok\" | \"partial\"（撞名跳过部分贡献）| \"error\"（清单/贡献非法，整插件跳过）",
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "version": {
+          "default": "",
+          "title": "Version",
+          "type": "string"
+        },
+        "enabled": {
+          "default": false,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "source": {
+          "default": "builtin",
+          "title": "Source",
+          "type": "string"
+        },
+        "skills": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Skills",
+          "type": "array"
+        },
+        "hooks": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Hooks",
+          "type": "array"
+        },
+        "mcp": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Mcp",
+          "type": "array"
+        },
+        "status": {
+          "default": "ok",
+          "title": "Status",
+          "type": "string"
+        },
+        "error": {
+          "default": "",
+          "title": "Error",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "PluginRow",
+      "type": "object"
+    }
+  },
+  "description": "插件列表响应 - 行序按 内置→已安装 分组、组内按名字典序",
+  "properties": {
+    "plugins": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/PluginRow"
+      },
+      "title": "Plugins",
+      "type": "array"
+    }
+  },
+  "title": "PluginListResult",
+  "type": "object"
+}
+```
+
+### PluginSetEnabledCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `name` | `string` | yes |
+| `enabled` | `boolean` | yes |
+
+```json
+{
+  "description": "插件启停命令 - 翻转某插件的 enabled 位并即时汇入运行系统\n\n【生效边界】\nskills/hooks 即时（下次匹配即变）；MCP server 启停对应连接；\n在飞 run 已注册的工具句柄不追缴——禁用只影响新 run，文档写明。",
+  "properties": {
+    "type": {
+      "const": "plugin.set_enabled",
+      "default": "plugin.set_enabled",
+      "title": "Type",
+      "type": "string"
+    },
+    "name": {
+      "title": "Name",
+      "type": "string"
+    },
+    "enabled": {
+      "title": "Enabled",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "name",
+    "enabled"
+  ],
+  "title": "PluginSetEnabledCommand",
+  "type": "object"
+}
+```
+
+### PluginSetEnabledResult
+
+| Field | Type | Required |
+|---|---|---|
+| `ok` | `boolean` | no |
+| `error` | `string` | no |
+
+```json
+{
+  "description": "插件启停响应 - 名字不存在或该插件处于 error 态时 ok=False 带原因",
+  "properties": {
+    "ok": {
+      "default": true,
+      "title": "Ok",
+      "type": "boolean"
+    },
+    "error": {
+      "default": "",
+      "title": "Error",
+      "type": "string"
+    }
+  },
+  "title": "PluginSetEnabledResult",
+  "type": "object"
+}
+```
+
+### PluginInstallCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `url` | `string` | yes |
+
+```json
+{
+  "description": "插件安装命令 - 从 URL（GitHub 仓库/分支 或 ZIP）安装到 ~/.iwan/plugins/\n\n【安全说明】\n安装即同意：URL 是用户主动给出的信任来源，装完 enabled=true 直接生效；\n下载/解压全程防 zip-slip，hooks/mcp 贡献仍走各自的 fail-closed 校验闸。",
+  "properties": {
+    "type": {
+      "const": "plugin.install",
+      "default": "plugin.install",
+      "title": "Type",
+      "type": "string"
+    },
+    "url": {
+      "title": "Url",
+      "type": "string"
+    }
+  },
+  "required": [
+    "url"
+  ],
+  "title": "PluginInstallCommand",
+  "type": "object"
+}
+```
+
+### PluginInstallResult
+
+| Field | Type | Required |
+|---|---|---|
+| `ok` | `boolean` | yes |
+| `message` | `string` | yes |
+
+```json
+{
+  "description": "插件安装响应 - message 面向用户（成功=插件名，失败=中文原因）",
+  "properties": {
+    "ok": {
+      "title": "Ok",
+      "type": "boolean"
+    },
+    "message": {
+      "title": "Message",
+      "type": "string"
+    }
+  },
+  "required": [
+    "ok",
+    "message"
+  ],
+  "title": "PluginInstallResult",
+  "type": "object"
+}
+```
+
 ## Server Push
 
 Events pushed from daemon to subscribed clients over the same TCP connection.
@@ -8063,6 +8376,54 @@ Events sent over the IPC socket (daemon → client).
     "ts"
   ],
   "title": "PrReviewedEvent",
+  "type": "object"
+}
+```
+
+### PluginChangedEvent
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `name` | `string` | yes |
+| `enabled` | `boolean` | yes |
+| `by` | `string` | no |
+| `ts` | `string` | yes |
+
+```json
+{
+  "description": "插件启停/安装事件 - 运行系统的插件贡献集发生变化时广播\n\n【字段说明】\n- name: 插件清单名\n- enabled: 变化后的启停位\n- by: \"toggle\"（用户开关）| \"install\"（URL 安装落地）\n- ts: ISO 8601 时间戳\n\n【设计目的】\n启停是全局副作用（skills 搜索表、hook 双表、MCP 连接集同时变），\n多客户端要同一秒看见同一事实——GUI 插件页与日志面板都订阅本事件刷新。",
+  "properties": {
+    "type": {
+      "const": "plugin.changed",
+      "default": "plugin.changed",
+      "title": "Type",
+      "type": "string"
+    },
+    "name": {
+      "title": "Name",
+      "type": "string"
+    },
+    "enabled": {
+      "title": "Enabled",
+      "type": "boolean"
+    },
+    "by": {
+      "default": "toggle",
+      "title": "By",
+      "type": "string"
+    },
+    "ts": {
+      "title": "Ts",
+      "type": "string"
+    }
+  },
+  "required": [
+    "name",
+    "enabled",
+    "ts"
+  ],
+  "title": "PluginChangedEvent",
   "type": "object"
 }
 ```

@@ -1,0 +1,10 @@
+{
+  "hooks": [
+    {
+      "event": "PreToolUse",
+      "matcher": "Bash",
+      "command": "${IWAN_PYTHON} \"${CLAUDE_PLUGIN_ROOT}/hooks/check_commit.py\"",
+      "timeout_s": 5
+    }
+  ]
+}

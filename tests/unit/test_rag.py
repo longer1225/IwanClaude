@@ -10,7 +10,7 @@ import httpx
 import pytest
 
 from iwan_claude.core.rag.adaptive import AdaptiveRetriever, RetrievalResult
-from iwan_claude.core.rag.chunker import Chunk, DocumentChunker
+from iwan_claude.core.rag.chunker import _EMBED_HARD_CAP_CHARS, Chunk, DocumentChunker
 from iwan_claude.core.rag.embedding import EmbeddingProvider
 from iwan_claude.core.rag.index import IndexStatus, KnowledgeIndexManager
 from iwan_claude.core.rag.llm_client import LLMClient
@@ -93,6 +93,43 @@ Content 2
         chunks = chunker.chunk_file(txt_file)
 
         assert len(chunks) >= 2  # 至少分成 2 块
+
+    # 功能：验证 AST 产出的"横跨上千行的巨函数"会被裁到嵌入硬上限以下
+    # 设计：构造一个体积极大的单函数（3 万行长 docstring 撑爆 _chunk_python 的整符号成块），
+    #       直接复现生产里 app.py 95907 字符整块被 DashScope 400 静默跳过的形态；
+    #       断言三点——无块超上限、确实被切开、首块保留原 symbol 且后续子块 parent_id 指向首块
+    #       （方法→类父子锚点不悬空），这正是 chunk_file 末尾 _clamp_oversized 收口的价值
+    def test_chunk_python_oversized_symbol_is_clamped(self, tmp_path: Path) -> None:
+        big_body = "\n".join([f'    # {"z" * 200}' for _ in range(150)])  # ≈3 万字符，远超 6000 上限
+        python_code = f"def huge():\n{big_body}\n    return 1\n"
+        py_file = tmp_path / "huge.py"
+        py_file.write_text(python_code)
+
+        chunker = DocumentChunker()
+        chunks = chunker.chunk_file(py_file)
+
+        assert len(chunks) >= 2
+        assert all(len(c.text) <= _EMBED_HARD_CAP_CHARS for c in chunks)
+        first = chunks[0]
+        assert first.symbol == "def huge"
+        for sub in chunks[1:]:
+            assert sub.parent_id == first.chunk_id
+            assert sub.symbol == "def huge"
+
+    # 功能：验证"单行就超过上限"的极端内容同样被硬切，不躲过收口
+    # 设计：窗口切分原本只在"行与行之间"断开，一个 1 万字符的整行（压缩文件/超长单行串）
+    #       会绕过按行累积、重新成为超限巨块——这正是本轮修复补齐的边界；用一个只有一行的
+    #       非 .py 文件（走兜底纯文本策略）断言仍被切成 <=上限 的多块，证明兜底路径也过闸
+    def test_chunk_oversized_single_line_hard_split(self, tmp_path: Path) -> None:
+        one_line = "q" * (_EMBED_HARD_CAP_CHARS * 2)  # 一整行就 2 倍上限
+        txt_file = tmp_path / "minified.txt"
+        txt_file.write_text(one_line)
+
+        chunker = DocumentChunker()
+        chunks = chunker.chunk_file(txt_file)
+
+        assert len(chunks) >= 2
+        assert all(len(c.text) <= _EMBED_HARD_CAP_CHARS for c in chunks)
 
 
 class TestMemoryVectorStore:
@@ -1412,6 +1449,68 @@ class TestRagReviewFixes202609:
         )
         result = asyncio.run(evaluator._evaluate_single(question))
         assert result.recall_at_k[1] == 1.0
+
+
+class TestModelFingerprintGuard:
+    """换 embedding 模型必须作废旧索引的 fail-closed 守卫"""
+
+    # 功能：save 后 index_meta.json 必须带 embedding_model 与 dim 指纹
+    # 设计：用真 MemoryVectorStore（而非 mock）让 dim 由首批向量真实锚定，
+    #       指纹的"写侧盖章"链路 embedder.model→meta→磁盘 全程不被 mock 遮蔽
+    def test_save_writes_model_fingerprint(self, tmp_path: Path) -> None:
+        import json as _json
+
+        store = MemoryVectorStore()
+        embedder = MagicMock(spec=EmbeddingProvider)
+        embedder.model = "text-embedding-v3"
+        mgr = KnowledgeIndexManager(store, embedder, DocumentChunker(), index_path=str(tmp_path / "idx"))
+        chunk = Chunk(text="hi", source_path="a.py", start_line=1, end_line=1)
+        asyncio.run(store.add([chunk], [[0.1, 0.2, 0.3]]))
+        mgr._meta["sources"]["a.py"] = {"mtime": 1, "chunk_count": 1}
+        mgr.save()
+        meta = _json.loads((tmp_path / "idx" / "index_meta.json").read_text(encoding="utf-8"))
+        assert meta["embedding_model"] == "text-embedding-v3"
+        assert meta["dim"] == 3
+        assert meta["sources"]["a.py"]["chunk_count"] == 1
+
+    # 功能：同模型重启保留增量 meta；换模型则 meta 被清空（下一轮强制全量重建）
+    # 设计：同一 tmp_path 两次构造 manager，模拟 daemon 重启；若守卫漏判，第二次
+    #       构造会带着旧 sources 直接跳过重索引——静默用旧向量，正是本守卫要拦的事
+    def test_model_change_resets_meta_on_construct(self, tmp_path: Path) -> None:
+        store1 = MemoryVectorStore()
+        e1 = MagicMock(spec=EmbeddingProvider)
+        e1.model = "model-a"
+        m1 = KnowledgeIndexManager(store1, e1, DocumentChunker(), index_path=str(tmp_path / "idx"))
+        m1._meta["sources"]["a.py"] = {"mtime": 1, "chunk_count": 1}
+        m1.save()
+        # 同模型再构造：指纹一致，增量记录必须原样活着
+        m2 = KnowledgeIndexManager(MemoryVectorStore(), e1, DocumentChunker(), index_path=str(tmp_path / "idx"))
+        assert "a.py" in m2._meta["sources"]
+        # 换模型再构造：增量 meta 作废
+        e3 = MagicMock(spec=EmbeddingProvider)
+        e3.model = "model-b"
+        m3 = KnowledgeIndexManager(MemoryVectorStore(), e3, DocumentChunker(), index_path=str(tmp_path / "idx"))
+        assert m3._meta["sources"] == {}
+
+    # 功能：load() 遇模型指纹不符必须硬失败，而非把旧向量灌进内存
+    # 设计：磁盘上留一份 model-b 建的完整索引（chunks/vectors/meta 三件套），
+    #       用 model-a 的 manager 显式 load——构造守卫清的是内存 meta，load 路径
+    #       重读磁盘后才是向量真正进 store 的时刻，raise 是最后一道闸门
+    def test_load_raises_on_model_mismatch(self, tmp_path: Path) -> None:
+        idx = tmp_path / "idx"
+        store = MemoryVectorStore()
+        eb = MagicMock(spec=EmbeddingProvider)
+        eb.model = "model-b"
+        mb = KnowledgeIndexManager(store, eb, DocumentChunker(), index_path=str(idx))
+        chunk = Chunk(text="hi", source_path="a.py", start_line=1, end_line=1)
+        asyncio.run(store.add([chunk], [[0.1, 0.2, 0.3]]))
+        mb._meta["sources"]["a.py"] = {"mtime": 1, "chunk_count": 1}
+        mb.save()
+        ea = MagicMock(spec=EmbeddingProvider)
+        ea.model = "model-a"
+        ma = KnowledgeIndexManager(MemoryVectorStore(), ea, DocumentChunker(), index_path=str(idx))
+        with pytest.raises(RuntimeError, match="model-b -> model-a"):
+            ma.load()
 
 
 if __name__ == "__main__":
