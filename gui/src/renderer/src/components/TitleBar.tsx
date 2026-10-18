@@ -38,6 +38,15 @@ function GlyphClose() {
     </svg>
   )
 }
+// 新窗口：一扇小窗 + 右上角加号（"再开一路"的直觉形状）
+function GlyphNew() {
+  return (
+    <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+      <rect x="0.5" y="2.5" width="7" height="7" fill="none" stroke="currentColor" strokeWidth="1" />
+      <path d="M6 0.5v3M4.5 2h3" stroke="currentColor" strokeWidth="1" />
+    </svg>
+  )
+}
 
 export function TitleBar() {
   const [maximized, setMaximized] = useState(false)
@@ -54,6 +63,13 @@ export function TitleBar() {
         <span className="tb-mark" aria-hidden="true" />iwan work
       </span>
       <span className="tb-drag" />
+      <button
+        className="tb-btn"
+        title="新窗口（另开一路并行任务）"
+        onClick={() => window.iwan.newWindow()}
+      >
+        <GlyphNew />
+      </button>
       <button
         className="tb-btn"
         title="最小化"

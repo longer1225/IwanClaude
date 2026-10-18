@@ -57,4 +57,4 @@ Electron GUI / Textual TUI / CLI  ──TCP 127.0.0.1:7437 · NDJSON · JSON-RPC
 3. **事件是唯一 UI 真相**：daemon 只广播事件（`EventBus` → `IpcEventBroadcaster`），客户端本地不推断状态；`run.started` 新带 `session_id` 就是为了让多 run 事件按权威锚点归属，而不是靠"goal 文本恰好等于用户原话"猜。
 4. **工具调用有影子副本**：`shadow.prepare → invoke → commit`（`tools/invocation.py:322-362`），配合 `files.changes` / `files.restore` 实现文件级回滚。
 5. **装配层注入而非互相 import**：`WorkflowEngine`/`Scheduler` 只接收回调，由 `CoreApp` 在 `app.py:2344-2402` 装配——这就是为什么这三个子系统能各自单测而不起 daemon。
-6. **"发送在途"按会话记账，不是窗口级开关**：`sendingSids: Set<string>` + 每 run 一个流式槽位（`streams: Map<runId,…>`），所以同一窗口里两个工作区能各跑一条任务、各流各的字（详见 [17 号评估](17-质量评估-多工作区并行能力.md)）。
+6. **"发送在途"按会话记账，不是窗口级开关**：`sendingSids: Set<string>` + 每 run 一个流式槽位（`streams: Map<runId,…>`），所以同一窗口里两个工作区能各跑一条任务、各流各的字；GUI 还能一进程开多扇窗并排看两个工作区（详见 [17 号评估](17-质量评估-多工作区并行能力.md)）。

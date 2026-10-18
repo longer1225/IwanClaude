@@ -15,7 +15,8 @@ interface IwanBridge {
   setSettings(patch: Record<string, unknown>): Promise<Record<string, unknown>>
   openPath(p: string): Promise<string>
   pickFile(): Promise<string | null>
-  // 自绘顶栏窗口控制：最小化/最大化切换/关闭 + 最大化态订阅（初值靠 winIsMaximized 补查）
+  // 自绘顶栏窗口控制：新窗口/最小化/最大化切换/关闭 + 最大化态订阅（初值靠 winIsMaximized 补查）
+  newWindow(): void
   winMinimize(): void
   winToggleMaximize(): void
   winClose(): void

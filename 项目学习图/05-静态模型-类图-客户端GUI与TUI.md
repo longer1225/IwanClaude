@@ -246,6 +246,7 @@ classDiagram
 1. **daemon 是唯一事实源，客户端只做归约**：`Store` 的每个字段几乎都能对应到一条事件（`runningSids` ← `run.started/finished`，`metaCwd` ← 磁盘 meta + `session.created`，`contextPct` ← `llm.usage`）。GUI 里唯一的"本地真相"是 `useGui`（主题/项目表/置顶），它落 `~/.iwan/gui.json`，daemon 完全不知道——这是 VS Code 的 "settings vs runtime" 双轨。
 2. **事件 → 视图要走"归属表"**：`runOwner: Map<run_id, sid>` 把只有 `run_id` 的事件（`llm.token`/`step.*`/`tool.*`）路由到正确会话的线程；`run.started` 现在自带 `session_id`，所以归属不再靠 `goal === 用户原话` 猜（`store.ts:509-531`）。
 3. **TUI 的状态是"每标签一份"**：`_SessionState` 把 widgets/busy/pending 审批/子 Agent 计时全挂在会话上（`tui/models/session_state.py`），切标签 = 换一组 widget 指针，不动后台 run——这是它能"后台会话继续跑"的原因。
+4. **GUI 可以一进程多窗**：每扇窗有自己的 renderer（独立 zustand store、独立 `activeSid`），主进程只有一个 `RpcTransport`，事件用 `broadcast()` 发给所有窗口，窗口控制按 `BrowserWindow.fromWebContents(e.sender)` 定位发起者。两扇窗并排即可分别盯着两个工作区的运行；关掉一扇不影响另一扇（run 在 daemon 里，窗口只是观察者）。
 
 ## 客户端级并发的历史坑（已修，详见 17 号评估）
 

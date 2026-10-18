@@ -3,23 +3,109 @@
 // 【学习要点】安全红线照抄官方纪律：渲染进程 nodeIntegration=false、
 // contextIsolation=true——页面代码摸不到 node，一切 TCP/文件系统能力
 // 都经 preload 的两个白名单通道过来。这也是 Codex/Electron 应用的标准分层。
-import { app, BrowserWindow, ipcMain, dialog, shell, Menu } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, shell, Menu, type WebContents } from 'electron'
 import path from 'node:path'
 import { RpcTransport } from './rpc-transport'
 import { ensureDaemon } from './daemon'
 import { registerFsBridge } from './fs-bridge'
 
-let win: BrowserWindow | null = null
+let win: BrowserWindow | null = null // 最近创建的窗口（devtest/自检锚点；业务代码一律按 sender 定位）
+let primaryWin: BrowserWindow | null = null
 let transport: RpcTransport | null = null
+// 缓存最近一次连接状态：渲染层挂载晚于 connected 时，靠 ui:status 补查兜底（否则永远卡在连接中）
+let lastStatus = 'connecting'
+let bootstrapped = false
+let devtestWired = false
 
-// 创建主窗口：1440x900 起始、无边框 + 渲染层自绘顶栏（2026-09-28 用户拍板推翻
-// 复刻篇 §3 的"frameless 不做"决策：原生黑框与暖色主题割裂，去框更显专业）
+// 向所有存活窗口广播：daemon 只有一条连接，事件天然是共享的（多客户端语义同 TUI）
+function broadcast(channel: string, payload: unknown): void {
+  for (const w of BrowserWindow.getAllWindows()) {
+    if (w.isDestroyed()) continue
+    try {
+      w.webContents.send(channel, payload)
+    } catch {
+      // 窗口正在销毁的竞态（isDestroyed 检查与 send 之间）：丢这一帧即可，
+      // 下一帧照常送——绝不能因为一扇窗将死而打断给其它窗口的广播
+    }
+  }
+}
+
+// 从 ipc 事件反查发起窗口：窗口控制/目录对话框必须作用在"发起者"上，
+// 否则多窗口时会去最小化/关闭另一扇窗（单窗口时代用模块级 win 只是侥幸成立）
+function senderWindow(e: { sender: WebContents }): BrowserWindow | null {
+  return BrowserWindow.fromWebContents(e.sender)
+}
+
+// 一次性装配：daemon 连接 + 文件桥 + ipc 通道。窗口可以开很多个，这些只能装一次
+// （ipcMain.handle 重复注册会直接抛错，且重连环只该有一个）
+function bootstrap(): void {
+  if (bootstrapped) return
+  bootstrapped = true
+  transport = new RpcTransport()
+  registerFsBridge() // 文件树/任务/meta/配置/GUI设置 五路磁盘桥
+  transport.on('event', (ev) => broadcast('iwan:event', ev))
+  transport.on('status', (s) => {
+    lastStatus = s
+    broadcast('iwan:status', s)
+  })
+  registerIpc()
+  transport.start(ensureDaemon).catch((err) =>
+    console.warn('[main] daemon 连接最终失败:', String(err))
+  )
+}
+
+// 注册所有 ipc 通道（只注册一次）：rpc 转发 + 目录选择 + 窗口控制
+function registerIpc(): void {
+  ipcMain.handle('ui:status', () => lastStatus)
+
+  ipcMain.handle('rpc:request', async (_e, method: string, params: Record<string, unknown>) => {
+    try {
+      const result = await transport?.request(method, params ?? {})
+      return { ok: true, result }
+    } catch (err) {
+      return { ok: false, error: String(err instanceof Error ? err.message : err) }
+    }
+  })
+
+  // 目录选择对话框："选择项目"按钮专用——返回绝对路径或 null（父窗口取发起者）
+  ipcMain.handle('ui:pick-directory', async (e) => {
+    const parent = senderWindow(e)
+    const r = parent
+      ? await dialog.showOpenDialog(parent, { properties: ['openDirectory'], title: '选择项目目录' })
+      : await dialog.showOpenDialog({ properties: ['openDirectory'], title: '选择项目目录' })
+    return r.canceled ? null : r.filePaths[0]
+  })
+
+  // ===== 自绘顶栏的窗口控制三件套 =====
+  // 【学习要点】控制走 ipcRenderer.send（单向、即发即忘）而非 invoke——
+  // 最小化/关闭没有"返回值"要等，invoke 反而给渲染层留一个永不 settle 的
+  // Promise 悬崖（关窗瞬间）；状态回传用事件推送 + 挂载补查双通道。
+  // 一律按 sender 定位窗口：多窗口时"最小化"只能最小化你点的那扇。
+  ipcMain.on('win:minimize', (e) => senderWindow(e)?.minimize())
+  ipcMain.on('win:toggle-maximize', (e) => {
+    const w = senderWindow(e)
+    if (!w) return
+    if (w.isMaximized()) w.unmaximize()
+    else w.maximize()
+  })
+  ipcMain.on('win:close', (e) => senderWindow(e)?.close())
+  ipcMain.handle('win:is-maximized', (e) => !!senderWindow(e)?.isMaximized())
+
+  // 再开一扇窗：两个工作区并排、各跑各的任务（共用同一条 daemon 连接，
+  // 事件按 run→session 归属分流到各自线程，见 renderer store 的 runOwner）
+  ipcMain.on('win:new', () => {
+    if (app.isReady()) createWindow()
+  })
+}
+
+// 创建一扇窗口：每个窗口有独立的 renderer 状态（独立 zustand store），
+// 共享主进程的 transport 与文件桥——这就是"多个工作区同时跑"的窗口级实现
 function createWindow(): void {
   // 原生菜单栏随 frame 一起消失；非 mac 直接卸载，避免隐藏菜单仍截获
   // Ctrl+R 等加速器。mac 保留——darwin 无 frame 菜单是惯例例外，卸载等于
   // 丢掉复制/粘贴加速器兜底（我们只发 Windows，这行是防坑不是功能）
   if (process.platform !== 'darwin') Menu.setApplicationMenu(null)
-  win = new BrowserWindow({
+  const w = new BrowserWindow({
     width: 1440,
     height: 900,
     minWidth: 980,
@@ -38,81 +124,41 @@ function createWindow(): void {
     }
   })
 
-  transport = new RpcTransport()
-  registerFsBridge() // 文件树/任务/meta/配置/GUI设置 五路磁盘桥
-  transport.on('event', (ev) => win?.isDestroyed() || win?.webContents.send('iwan:event', ev))
-  // 缓存最近一次状态：渲染层挂载晚于 connected 时，靠 ui:status 补查兜底（否则永远卡在连接中）
-  let lastStatus = 'connecting'
-  transport.on('status', (s) => {
-    lastStatus = s
-    if (!win?.isDestroyed()) win?.webContents.send('iwan:status', s)
-  })
-  ipcMain.handle('ui:status', () => lastStatus)
-  transport.start(ensureDaemon).catch((err) =>
-    console.warn('[main] daemon 连接最终失败:', String(err))
-  )
+  win = w
+  if (!primaryWin) primaryWin = w
 
-  ipcMain.handle('rpc:request', async (_e, method: string, params: Record<string, unknown>) => {
-    try {
-      const result = await transport?.request(method, params ?? {})
-      return { ok: true, result }
-    } catch (err) {
-      return { ok: false, error: String(err instanceof Error ? err.message : err) }
-    }
-  })
-
-  // 目录选择对话框："选择项目"按钮专用——返回绝对路径或 null
-  ipcMain.handle('ui:pick-directory', async () => {
-    const r = await dialog.showOpenDialog(win!, { properties: ['openDirectory'], title: '选择项目目录' })
-    return r.canceled ? null : r.filePaths[0]
-  })
-
-  // ===== 自绘顶栏的窗口控制三件套 =====
-  // 【学习要点】控制走 ipcRenderer.send（单向、即发即忘）而非 invoke——
-  // 最小化/关闭没有"返回值"要等，invoke 反而给渲染层留一个永不 settle 的
-  // Promise 悬崖（关窗瞬间）；状态回传用事件推送 + 挂载补查双通道，与
-  // iwan:status 同一套模式：推送会丢（时序），补查兜底（.is-maximized）。
-  ipcMain.on('win:minimize', () => win?.minimize())
-  ipcMain.on('win:toggle-maximize', () => {
-    if (!win) return
-    if (win.isMaximized()) win.unmaximize()
-    else win.maximize()
-  })
-  ipcMain.on('win:close', () => win?.close())
-  ipcMain.handle('win:is-maximized', () => !!win?.isMaximized())
+  // 最大化态推送：只发本窗口（多窗口各自独立最大化，互不串）
   const pushMax = (maximized: boolean): void => {
-    // 必须先后判 null 与 destroyed：win?.isDestroyed() 在 win 为 null 时得
-    // undefined，取反后为真——"没销毁"和"不存在"是两回事
-    if (win && !win.isDestroyed()) win.webContents.send('win:maximized', maximized)
+    if (!w.isDestroyed()) w.webContents.send('win:maximized', maximized)
   }
-  win.on('maximize', () => pushMax(true))
-  win.on('unmaximize', () => pushMax(false))
+  w.on('maximize', () => pushMax(true))
+  w.on('unmaximize', () => pushMax(false))
 
   // 菜单卸载后开发期仍要能开 DevTools：F12 / Ctrl+Shift+I（仅 dev 构建生效，
   // 生产包没有 ELECTRON_RENDERER_URL，快捷键不劫持）
   if (process.env.ELECTRON_RENDERER_URL) {
-    win.webContents.on('before-input-event', (_e, input) => {
+    w.webContents.on('before-input-event', (_e, input) => {
       const k = input.key.toLowerCase()
       if (input.type === 'keyDown' && (k === 'f12' || (input.control && input.shift && k === 'i'))) {
-        win?.webContents.toggleDevTools()
+        w.webContents.toggleDevTools()
       }
     })
   }
 
   // 外部链接一律交给系统浏览器，应用内永不导航到远端
-  win.webContents.setWindowOpenHandler(({ url }) => {
+  w.webContents.setWindowOpenHandler(({ url }) => {
     void shell.openExternal(url)
     return { action: 'deny' }
   })
 
   // 渲染层诊断三件套：页面空白时靠 stdout 里的这些行定位（console/加载失败/崩溃）
-  win.webContents.on('console-message', (_e, level, message, line, sourceId) => {
+  w.webContents.on('console-message', (_e, level, message, line, sourceId) => {
     console.log(`[renderer:${level}] ${message} (${sourceId.split('/').pop()}:${line})`)
   })
-  win.webContents.on('did-fail-load', (_e, code, desc, url) => {
+  w.webContents.on('did-fail-load', (_e, code, desc, url) => {
     console.warn(`[renderer] did-fail-load ${code} ${desc} ${url}`)
   })
-  win.webContents.on('render-process-gone', (_e, details) => {
+  w.webContents.on('render-process-gone', (_e, details) => {
     console.warn(`[renderer] process-gone reason=${details.reason} code=${details.exitCode}`)
   })
 
@@ -121,7 +167,9 @@ function createWindow(): void {
   // 这张发车门票）——UI=5 的 git 链会真 commit/discard，绝不允许再顺带发对话
   const testPrompt = process.env.IWAN_GUI_TEST_PROMPT ?? ''
   const testUi = process.env.IWAN_GUI_TEST_UI ?? ''
-  if (process.env.ELECTRON_RENDERER_URL && (testPrompt || testUi)) {
+  // 只在第一扇窗装配一次：多窗口时若每扇都注入，自检脚本会同时驱动多个页面互相干扰
+  if (!devtestWired && process.env.ELECTRON_RENDERER_URL && (testPrompt || testUi)) {
+    devtestWired = true
     const prompt = JSON.stringify(testPrompt)
     win.webContents.on('did-finish-load', () => {
       void win?.webContents
@@ -1254,26 +1302,30 @@ function createWindow(): void {
   }
 
   if (process.env.ELECTRON_RENDERER_URL) {
-    void win.loadURL(process.env.ELECTRON_RENDERER_URL)
+    void w.loadURL(process.env.ELECTRON_RENDERER_URL)
   } else {
-    void win.loadFile(path.join(__dirname, '../renderer/index.html'))
+    void w.loadFile(path.join(__dirname, '../renderer/index.html'))
   }
-  win.on('closed', () => {
-    win = null
+  w.on('closed', () => {
+    // 多窗口下"最新窗口"要回落到还活着的那扇；主窗口引用也一并清掉
+    if (primaryWin === w) primaryWin = null
+    if (win === w) win = primaryWin
   })
 }
 
-// 单实例锁：第二次启动聚焦已有窗口——桌面应用的基本礼貌（daemon 才是可以多开的）
+// 单实例锁仍在（避免一次双击起两个 Electron 进程抢同一端口语义不清），
+// 但"再启动一次"的语义从"聚焦旧窗"改成"再开一扇窗"：用户要的是并行看两个工作区
 if (!app.requestSingleInstanceLock()) {
   app.quit()
 } else {
   app.on('second-instance', () => {
-    if (win) {
-      if (win.isMinimized()) win.restore()
-      win.focus()
-    }
+    if (!app.isReady()) return
+    createWindow()
   })
-  void app.whenReady().then(createWindow)
+  void app.whenReady().then(() => {
+    bootstrap()
+    createWindow()
+  })
   app.on('window-all-closed', () => {
     if (process.platform !== 'darwin') app.quit()
   })

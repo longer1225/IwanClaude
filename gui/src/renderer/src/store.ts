@@ -402,6 +402,17 @@ export async function openSession(sid: string): Promise<void> {
   }
 }
 
+// 强制重拉某个会话的历史并替换内存线程：只给"迟到窗口"对齐尾巴用
+async function reloadThread(sid: string): Promise<void> {
+  try {
+    const r = await rpc<SessionGetHistoryResult>('session.get_history', { session_id: sid })
+    useStore.getState().setThread(sid, historyToMsgs(r.messages))
+    useStore.getState().markHistoryLoaded(sid)
+  } catch {
+    // 重拉失败保持现状：旧线程仍可读，下次打开会话会再试
+  }
+}
+
 // 重命名会话（乐观更新 + session.renamed 事件回声兜底一致）
 export async function renameSession(sid: string, title: string): Promise<void> {
   const t = title.trim()
@@ -771,8 +782,16 @@ export function handleBusEvent(ev: BusEvent): void {
       return
     }
     case 'session.waiting_for_input': {
-      st.markRunning(ev.session_id, false)
-      st.setLastRun(ev.session_id, ev.last_run_id)
+      const sid = ev.session_id
+      // 【学习要点】迟到窗口自愈：本窗口可能是 run 跑到一半才打开的（多窗口/多客户端
+      // 常见），那次 run.started 没收到 → 无归属的 llm.token 会被严格归属纪律丢弃，
+      // 线程里就缺尾段。daemon 在 run 正常结束发本事件并带 last_run_id：若这个 run
+      // 本窗口没见过、且该会话的线程正在被本窗口显示，就重拉一次历史把尾巴对齐。
+      // 只在"已显示过的线程"上重拉，避免给所有会话白拉一遍历史。
+      const missed = st.threads[sid] !== undefined && st.lastRunId[sid] !== ev.last_run_id
+      st.markRunning(sid, false)
+      st.setLastRun(sid, ev.last_run_id)
+      if (missed) void reloadThread(sid)
       return
     }
     case 'schedule.fired': {

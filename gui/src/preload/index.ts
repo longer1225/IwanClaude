@@ -58,6 +58,9 @@ contextBridge.exposeInMainWorld('iwan', {
   // 单选文件对话框（附件）
   pickFile: (): Promise<string | null> => ipcRenderer.invoke('ui:pick-file'),
   // ===== 自绘顶栏的窗口控制（fire-and-forget，理由见主进程注释） =====
+  // 新窗口：两扇窗并排看两个工作区各自跑任务（每个窗口独立 renderer 状态，
+  // 共用主进程那条 daemon 连接；事件按 run→session 归属各自落线程）
+  newWindow: (): void => ipcRenderer.send('win:new'),
   winMinimize: (): void => ipcRenderer.send('win:minimize'),
   winToggleMaximize: (): void => ipcRenderer.send('win:toggle-maximize'),
   winClose: (): void => ipcRenderer.send('win:close'),
