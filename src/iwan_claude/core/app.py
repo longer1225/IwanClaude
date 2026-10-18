@@ -1447,7 +1447,16 @@ class CoreApp:
         if cmd.decision not in ("allow", "deny", "ask"):
             return TrustRespondResult(
                 ok=False, trust=self._permission_manager.get_trust(cmd.session_id))
-        # 会话内存态立即生效（deny 从下一枚工具调用起拦）
+        # 【顺序很重要】先落盘、再改内存、最后唤醒闸门：
+        # 旧实现是"先改内存后落盘"，磁盘写失败时 RPC 报错、GUI 显示"答复失败"，
+        # 但内存里信任档已经变了——会话实际被放行，界面与事实相反。现在落盘失败
+        # 直接抛错，内存不动、闸门不唤醒（发送继续等，最终按超时 fail-closed）。
+        if cmd.persistent:
+            if cmd.decision == "ask":
+                self._trust_store.revoke(cwd)
+            else:
+                self._trust_store.set_decision(cwd, cmd.decision)
+        # 会话内存态：deny 从下一枚工具调用起拦
         if session is not None:
             self._permission_manager.set_trust(cmd.session_id, cmd.decision)
         # 唤醒被信任闸门挂起的发送：同目录等待的会话一并放行/拒绝。答复可能只带
@@ -1456,11 +1465,6 @@ class CoreApp:
         if self._trust_gate is not None:
             for sid in self._trust_gate.resolve(cmd.session_id, cwd, cmd.decision):
                 self._permission_manager.set_trust(sid, cmd.decision)
-        if cmd.persistent:
-            if cmd.decision == "ask":
-                self._trust_store.revoke(cwd)
-            else:
-                self._trust_store.set_decision(cwd, cmd.decision)
         # 生效值：持久答复以重查结果为准（inherit 可能让祖先决定继续赢）
         effective = self._trust_store.lookup(cwd) if cmd.persistent else cmd.decision
         from iwan_claude.core.bus.events import TrustChangedEvent
