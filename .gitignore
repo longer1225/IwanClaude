@@ -63,3 +63,6 @@ $null
 # â”€â”€ Local Configs â”€â”€
 config.local.toml
 *.local.toml
+# pytest ÁÙÊ±Ä¿Â¼£¨Ä³Ð©»·¾³ TMP Ö¸Ïò²Ö¿âÊ±»á²úÉú£©
+pytest-of-*/
+
