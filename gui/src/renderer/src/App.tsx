@@ -48,9 +48,11 @@ const EMPTY: never[] = []
 
 export default function App() {
   const status = useStore((s) => s.status)
+  const statusDetail = useStore((s) => s.statusDetail)
   const activeSid = useStore((s) => s.activeSid)
   const thread = useStore((s) => (activeSid ? s.threads[activeSid] ?? EMPTY : EMPTY))
   const setStatus = useStore((s) => s.setStatus)
+  const setStatusDetail = useStore((s) => s.setStatusDetail)
   const [booted, setBooted] = useState(false)
   const guiHydrate = useGui((s) => s.applyFromDisk)
   const hydrated = useGui((s) => s.hydrated)
@@ -91,13 +93,17 @@ export default function App() {
     }
     const offEvent = onDaemonEvent(handleBusEvent)
     const offStatus = onConnStatus(applyStatus)
+    // 连接失败原因：推送 + 挂载补查（与 status 同一套双通道，避免首帧丢失）
+    const offDetail = window.iwan.onStatusDetail(setStatusDetail)
+    void window.iwan.getStatusDetail().then(setStatusDetail).catch(() => undefined)
     // 补查当前状态：主进程可能在我们挂载前就 connected 了（事件已错过）
     void getStatus().then(applyStatus).catch(() => undefined)
     return () => {
       offEvent()
       offStatus()
+      offDetail()
     }
-  }, [setStatus])
+  }, [setStatus, setStatusDetail])
 
   const empty = !activeSid || thread.length === 0
 
@@ -140,9 +146,22 @@ export default function App() {
           )}
           {status !== 'connected' && (
             <div className="conn-banner">
-              {status === 'connecting' && '正在连接 iwan-core…（首次会自动启动 daemon，冷启动需要几十秒）'}
-              {status === 'reconnecting' && '与 daemon 的连接断开，正在重连…'}
-              {status === 'error' && '无法连接 daemon —— 可手动运行：uv run iwan-core'}
+              {/* 有可读原因（daemon 启动日志尾部）就优先展示它：缺 key/配置错误这类
+                  问题必须在界面上一眼看到，而不是让用户对着"正在连接…"干等两分钟 */}
+              {statusDetail ? (
+                <>
+                  <b>daemon 启动/连接失败：</b>
+                  {statusDetail}
+                  <span className="conn-hint">（正在自动重试；修好后可等它自己连上）</span>
+                </>
+              ) : (
+                <>
+                  {status === 'connecting' &&
+                    '正在连接 iwan-core…（首次会自动启动 daemon，冷启动需要几十秒）'}
+                  {status === 'reconnecting' && '与 daemon 的连接断开，正在重连…'}
+                  {status === 'error' && '无法连接 daemon —— 可手动运行：uv run iwan-core'}
+                </>
+              )}
             </div>
           )}
         </main>

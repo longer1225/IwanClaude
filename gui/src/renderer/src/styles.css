@@ -742,6 +742,8 @@ input { font: inherit; color: inherit; }
   z-index: 10;
 }
 :root[data-theme='dark'] .conn-banner { color: #e8c76a; }
+/* 失败原因后的括号提示：同色弱化，避免横幅变成两行 */
+.conn-hint { margin-left: 6px; opacity: 0.75; }
 
 /* ---------------- 右侧面板 ---------------- */
 .right-panel {

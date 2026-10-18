@@ -66,3 +66,7 @@ config.local.toml
 # pytest 临时目录（某些环境 TMP 指向仓库时会产生）
 pytest-of-*/
 
+
+# 临时目录（测试/工具在本仓库根落下的随机 tmp*）
+tmp*/
+

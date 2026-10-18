@@ -23,10 +23,15 @@ async def _rpc(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, rid: 
 # 功能：非 git 目录评审回 ok=False+非空错误+空会话号；坏参数形状走 JSON-RPC error 通道
 # 设计：ok=False 时 session_id 必须是空串（GUI 靠它区分"会话已开"与"没开"），
 # error 只断非空不锁文案——git stderr 随语言环境变，锁全文会碎；两条非法参数
-# （缺 pr_number / pr_number 非整数）都应在进 handler 前被判别联合拦下
+# （缺 pr_number / pr_number 非整数）都应在进 handler 前被判别联合拦下。
+# 【为什么先 git init】tmp_path 常落在用户家目录下，而家目录本身可能是 git 仓库
+# （本机 C:\Users\<user> 就是），collect_context 会顺着向上找到它、判定"是仓库"，
+# 于是"非 git 目录应拒绝"的前提失效（偶发翻红）。先 git init 一个**无 origin** 的
+# 仓库，把拒绝原因固定成"未配置 origin 远端"，与环境无关。
 async def test_pr_review_rejection_channels(
     running_daemon: subprocess.Popen[bytes], free_port: int, tmp_path
 ) -> None:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=False)
     reader, writer = await asyncio.open_connection("127.0.0.1", free_port)
     try:
         r = await _rpc(reader, writer, "p1", "pr.review",

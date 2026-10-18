@@ -22,7 +22,15 @@ def free_port() -> int:
 
 
 @pytest.fixture
-async def running_daemon(free_port: int) -> AsyncGenerator[subprocess.Popen[bytes], None]:
+def daemon_env() -> dict[str, str]:
+    # 用例级 fixture：返回要追加进 daemon 子进程的环境变量（默认空）
+    return {}
+
+
+@pytest.fixture
+async def running_daemon(
+    free_port: int, daemon_env: dict[str, str]
+) -> AsyncGenerator[subprocess.Popen[bytes], None]:
     tmp_dir = Path(tempfile.mkdtemp(prefix="iwan_daemon_"))
     env = os.environ.copy()
     env["IWAN_PORT"] = str(free_port)
@@ -36,10 +44,22 @@ async def running_daemon(free_port: int) -> AsyncGenerator[subprocess.Popen[byte
     env["IWAN_LOG_LEVEL"] = "WARNING"
     env["IWAN_SESSIONS_DIR"] = str(tmp_dir / "sessions")
     env["IWAN_POLICY_FILE"] = str(tmp_dir / "policy.toml")
+    # 信任文件同样关进 tmp：否则 daemon 会读用户真实 ~/.iwan/trust.toml，
+    # 目录被标成 deny/allow 时信任相关用例会随机翻红（也与"测试不碰用户数据"冲突）
+    env["IWAN_TRUST_FILE"] = str(tmp_dir / "trust.toml")
     # 插件安装目录与账本一起改道临时目录：集成测试的 set_enabled 绝不写用户 ~/.iwan
     env["IWAN_PLUGINS_DIR"] = str(tmp_dir / "plugins")
     # 关语音预热：测试 daemon 不拖百兆模型进内存、不依赖模型缓存存在
     env["IWAN_SPEECH_PREWARM"] = "0"
+    # LLM：daemon 启动期就会构造 provider（会话摘要用），缺 key 直接 SystemExit
+    # ——不注入假 key 的话，整套集成测试都会死在 "Daemon did not start"。
+    # 没有真实 key 的环境用假 key + 死端口 base_url：daemon 能起，万一有用例触发
+    # run 也会立刻 llm_error（不联网、不烧 token）；有真 key 的环境保持原样。
+    if not (env.get("DEEPSEEK_API_KEY") or env.get("ANTHROPIC_API_KEY")):
+        env["DEEPSEEK_API_KEY"] = "test-key-not-validated"
+        env["IWAN_LLM_BASE_URL"] = "http://127.0.0.1:9"
+    # 用例级覆盖（例如信任闸门用例要把信任超时压短）
+    env.update(daemon_env)
 
     # 启动 daemon 子进程，将 stderr 重定向到临时日志以便排查启动失败
     stderr_path = tmp_dir / "daemon_stderr.log"

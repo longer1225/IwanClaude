@@ -5,6 +5,8 @@ interface IwanBridge {
   onStatus(cb: (status: string) => void): () => void
   pickDirectory(): Promise<string | null>
   getStatus(): Promise<string>
+  getStatusDetail(): Promise<string>
+  onStatusDetail(cb: (detail: string) => void): () => void
   readDir(root: string, rel: string): Promise<Array<{ name: string; dir: boolean }>>
   readFile(root: string, rel: string): Promise<{ text: string; truncated: boolean; size: number; binary: boolean }>
   sessionsMeta(ids: string[]): Promise<Record<string, { cwd: string; created_at: string; run_ids: string[] }>>

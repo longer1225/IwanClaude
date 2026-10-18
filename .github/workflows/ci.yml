@@ -1,0 +1,69 @@
+# CI：只跑"确定性、无外部依赖"的检查，避免随机红。
+#
+# 说明（为什么是现在这套）：
+# - 项目是 Windows 优先，先只在 windows-latest 上卡；Linux 差异等有需要再加矩阵。
+# - ruff / mypy 的基线尚未清（ruff ~400 条历史风格问题、mypy ~40 条），现在 gate 等于
+#   红着进 CI；因此它们作为 advisory 任务（continue-on-error），清完再摘掉该开关。
+# - 协议文档与 TS 类型是"生成物"，必须与模型同步，否则客户端会按旧协议解析——这两步 gate。
+# - GUI 的 e2e（gui/scripts/e2e-parallel.mjs）需要真实桌面窗口 + CDP，CI 里没有桌面，
+#   只在本地跑；CI 只做 typecheck + build（构建能过 = 主进程/渲染层/预加载都能编译）。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: Python（协议同步 + 单测）
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: 安装依赖
+        run: uv sync --frozen
+      - name: WIRE_PROTOCOL.md 与模型同步
+        run: uv run python scripts/gen_protocol_doc.py --check
+      - name: GUI TS 类型与模型同步
+        run: uv run python scripts/gen_ts_types.py --check
+      - name: 单元测试
+        run: uv run pytest tests/unit -q
+
+  python-advisory:
+    name: Python 静态检查（advisory，暂不 gate）
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --frozen
+      - name: ruff
+        run: uv run ruff check src tests
+      - name: mypy
+        run: uv run mypy src
+
+  gui:
+    name: GUI（typecheck + build）
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: gui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: gui/package-lock.json
+      - name: 安装依赖
+        run: npm ci
+      - name: 类型检查
+        run: npm run typecheck
+      - name: 构建（main/preload/renderer）
+        run: npm run build

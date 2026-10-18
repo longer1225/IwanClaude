@@ -304,7 +304,21 @@ export function Composer({ booted }: { booted: boolean }) {
     } catch (err) {
       // 失败把原文放回输入框：一条报错不该吃掉用户刚打的字
       setText((prev) => prev || value)
-      window.alert(`发送失败：${String(err instanceof Error ? err.message : err)}`)
+      const msg = String(err instanceof Error ? err.message : err)
+      // daemon 的 SESSION_BUSY（-32012）= 该会话已有 run 在跑。给可读提示，
+      // 而不是弹原生 alert 让用户以为是程序故障（同会话串行是刻意的）
+      if (msg.includes('-32012') || /session busy/i.test(msg)) {
+        const sid = useStore.getState().activeSid
+        if (sid) {
+          useStore.getState().pushMsg(sid, {
+            id: `busy-${Date.now()}`,
+            role: 'notice',
+            text: '⏳ 该会话正在运行：等这一轮结束，或先在侧栏停止/转向；其它工作区可以照常发'
+          })
+        }
+      } else {
+        window.alert(`发送失败：${msg}`)
+      }
     } finally {
       taRef.current?.focus()
     }

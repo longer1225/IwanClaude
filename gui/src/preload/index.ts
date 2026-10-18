@@ -27,6 +27,13 @@ contextBridge.exposeInMainWorld('iwan', {
   },
   // 补查当前连接状态（渲染层挂载晚于首个 status 事件时兜底）
   getStatus: (): Promise<string> => ipcRenderer.invoke('ui:status'),
+  // 连接失败的可读原因（daemon 启动日志尾部提炼；空串=没有额外信息）
+  getStatusDetail: (): Promise<string> => ipcRenderer.invoke('ui:status-detail'),
+  onStatusDetail: (cb: (detail: string) => void): (() => void) => {
+    const h = (_e: unknown, d: string): void => cb(d)
+    ipcRenderer.on('iwan:status-detail', h)
+    return () => ipcRenderer.removeListener('iwan:status-detail', h)
+  },
   // 文件桥：项目目录树 / 文本预览（渲染层只能浏览传入 root 以内的路径）
   readDir: (root: string, rel: string): Promise<Array<{ name: string; dir: boolean }>> =>
     ipcRenderer.invoke('fs:readDir', root, rel),

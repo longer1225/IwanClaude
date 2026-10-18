@@ -61,6 +61,8 @@ export interface SessionMeta {
 
 interface State {
   status: string
+  // 连接失败的可读原因（daemon 启动日志尾部）：空串表示没有额外信息
+  statusDetail: string
   sessions: SessionMeta[]
   activeSid: string | null
   threads: Record<string, Msg[]>
@@ -89,6 +91,7 @@ interface State {
   notices: Record<string, number>
   bumpNotice(sid: string, delta: number): void
   setStatus(s: string): void
+  setStatusDetail(detail: string): void
   setActive(sid: string | null): void
   setCwd(cwd: string | null): void
   upsertSession(meta: SessionMeta): void
@@ -168,6 +171,7 @@ function consumeEcho(sid: string, text: string): boolean {
 
 export const useStore = create<State>((set, get) => ({
   status: 'connecting',
+  statusDetail: '',
   sessions: [],
   activeSid: null,
   threads: {},
@@ -187,6 +191,7 @@ export const useStore = create<State>((set, get) => ({
   wfLiveRunId: '',
   notices: {},
   setStatus: (s) => set({ status: s }),
+  setStatusDetail: (detail) => set({ statusDetail: detail }),
   setActive: (sid) => set({ activeSid: sid }),
   setCwd: (cwd) => {
     if (cwd) localStorage.setItem(LS_CWD_KEY, cwd)

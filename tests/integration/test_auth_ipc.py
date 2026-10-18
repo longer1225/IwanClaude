@@ -33,6 +33,13 @@ async def token_daemon(free_port: int) -> AsyncGenerator[int, None]:
     env["IWAN_POLICY_FILE"] = str(tmp_dir / "policy.toml")
     env["IWAN_SPEECH_PREWARM"] = "0"
     env["IWAN_TOKEN"] = TEST_TOKEN
+    # 与 tests/conftest.py 的 running_daemon 同一套隔离：daemon 启动期会构造 provider
+    # （摘要用），缺 key 直接 SystemExit——不注入假 key 的话，鉴权用例全部卡在
+    # "daemon 未就绪"。假 key + 死端口 = 能启动且不会真联网。
+    if not (env.get("DEEPSEEK_API_KEY") or env.get("ANTHROPIC_API_KEY")):
+        env["DEEPSEEK_API_KEY"] = "test-key-not-validated"
+        env["IWAN_LLM_BASE_URL"] = "http://127.0.0.1:9"
+    env["IWAN_TRUST_FILE"] = str(tmp_dir / "trust.toml")
     proc = subprocess.Popen(
         [sys.executable, "-m", "iwan_claude.core"],
         env=env,

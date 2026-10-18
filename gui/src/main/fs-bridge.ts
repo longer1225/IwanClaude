@@ -186,12 +186,21 @@ async function settingsGet(): Promise<Record<string, unknown>> {
 }
 
 // 合并写 GUI 设置（浅合并，顶层键级覆盖；写失败冒泡给渲染层提示）
+// 【学习要点】多窗口共用一个 gui.json：必须串行化"读-合并-写"，否则两个窗口同时
+// 保存时，后发者会基于各自读到的旧快照覆盖对方刚写的字段（last-write-wins 丢更新）。
+// 一条 Promise 链排队即可；某次失败不掐断链条，只把错误交给对应调用方。
+let settingsWriteChain: Promise<unknown> = Promise.resolve()
+
 async function settingsSet(patch: Record<string, unknown>): Promise<Record<string, unknown>> {
-  const cur = await settingsGet()
-  const next = { ...cur, ...patch }
-  await fs.mkdir(IWAN_DIR, { recursive: true })
-  await fs.writeFile(GUI_SETTINGS_PATH, JSON.stringify(next, null, 2), 'utf-8')
-  return next
+  const run = settingsWriteChain.then(async () => {
+    const cur = await settingsGet()
+    const next = { ...cur, ...patch }
+    await fs.mkdir(IWAN_DIR, { recursive: true })
+    await fs.writeFile(GUI_SETTINGS_PATH, JSON.stringify(next, null, 2), 'utf-8')
+    return next
+  })
+  settingsWriteChain = run.catch(() => undefined)
+  return run
 }
 
 // 读 RAG 检索质量评估结果（~/.iwan/rag_eval_latest.json，由 rag.eval --run 落盘；缺文件报空态）

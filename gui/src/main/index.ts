@@ -6,7 +6,7 @@
 import { app, BrowserWindow, ipcMain, dialog, shell, Menu, type WebContents } from 'electron'
 import path from 'node:path'
 import { RpcTransport } from './rpc-transport'
-import { ensureDaemon } from './daemon'
+import { ensureDaemon, describeDaemonFailure } from './daemon'
 import { registerFsBridge } from './fs-bridge'
 
 let win: BrowserWindow | null = null // 最近创建的窗口（devtest/自检锚点；业务代码一律按 sender 定位）
@@ -14,6 +14,10 @@ let primaryWin: BrowserWindow | null = null
 let transport: RpcTransport | null = null
 // 缓存最近一次连接状态：渲染层挂载晚于 connected 时，靠 ui:status 补查兜底（否则永远卡在连接中）
 let lastStatus = 'connecting'
+// 连接失败的可读原因（daemon 启动日志尾部提炼）：空串=没有额外信息。
+// 存在 store 里让渲染层直接展示"daemon 启动失败：DEEPSEEK_API_KEY ... not set"，
+// 而不是干等 120 次重试后只看到一句"无法连接 daemon"
+let statusDetail = ''
 let bootstrapped = false
 let devtestWired = false
 
@@ -44,19 +48,38 @@ function bootstrap(): void {
   transport = new RpcTransport()
   registerFsBridge() // 文件树/任务/meta/配置/GUI设置 五路磁盘桥
   transport.on('event', (ev) => broadcast('iwan:event', ev))
+  // 失败原因提炼：只在"没连上"的状态下尝试，连上即清空（避免把历史日志当现行错误）
+  const refreshDetail = (): void => {
+    const detail = describeDaemonFailure()
+    if (detail === statusDetail) return
+    statusDetail = detail
+    broadcast('iwan:status-detail', detail)
+  }
   transport.on('status', (s) => {
     lastStatus = s
+    if (s === 'connected') {
+      if (statusDetail) {
+        statusDetail = ''
+        broadcast('iwan:status-detail', '')
+      }
+    } else if (s !== 'connecting') {
+      refreshDetail()
+    }
     broadcast('iwan:status', s)
   })
   registerIpc()
-  transport.start(ensureDaemon).catch((err) =>
+  // ensureDaemon 的退出回调：daemon 一退出就读日志尾部，把原因立刻推给界面（仍在重试）
+  transport.start(() => ensureDaemon(() => refreshDetail())).catch((err) => {
+    refreshDetail()
     console.warn('[main] daemon 连接最终失败:', String(err))
-  )
+  })
 }
 
 // 注册所有 ipc 通道（只注册一次）：rpc 转发 + 目录选择 + 窗口控制
 function registerIpc(): void {
   ipcMain.handle('ui:status', () => lastStatus)
+  // 失败原因补查（渲染层挂载晚于首个事件时兜底，与 ui:status 同模式）
+  ipcMain.handle('ui:status-detail', () => statusDetail)
 
   ipcMain.handle('rpc:request', async (_e, method: string, params: Record<string, unknown>) => {
     try {

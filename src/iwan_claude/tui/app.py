@@ -1132,7 +1132,7 @@ class IwanTuiApp(App[None]):
             sid = getattr(current, "session_id", None)
             if sid is not None and sid in self._sessions:
                 # 找到有效会话 ID 且非忙碌状态时切换
-                if sid != self._session_id and not self._busy:
+                if sid != self._session_id and not self._pending_permission_blocks:
                     self._switch_session(sid)
                 return  # 处理完成，直接返回
             current = current.parent  # 继续向上遍历
@@ -1428,6 +1428,15 @@ class IwanTuiApp(App[None]):
         try:
             idx = int(index_str) - 1
         except ValueError:
+            return
+        # 【设计】与点击标签同一套守卫：只在"有未答审批"时禁止切走。原因不是忙碌，
+        # 而是 —— _switch_session 会移除 PermissionSelect 并清空旧会话的 pending 块，
+        # 切走后 TUI 就再也答不了那张卡（daemon 侧会挂到超时）。"正在跑"不再拦：
+        # run 活在 daemon 里，切走只是换视图，而且 Alt+N 一直是这个语义。
+        if self._pending_permission_blocks:
+            self._append(
+                Static("[yellow]有待审批请求，先答复再切换会话[/yellow]", classes="log-line")
+            )
             return
         # 检查序号有效性
         if 0 <= idx < len(self._session_order):

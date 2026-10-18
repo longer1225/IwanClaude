@@ -99,6 +99,17 @@ function handle(sock, msg) {
       const sid = params.session_id
       const content = String(params.content ?? '')
       const runId = 'run-' + (++seq)
+      // 信任闸门回包：daemon 在"未获信任"时直接拒绝，不建 run、不落消息
+      if (content.includes('TRUST-BLOCK')) {
+        emit({ type: 'session.message_received', session_id: sid, content })
+        reply({
+          run_id: '',
+          skill_match: null,
+          trust_blocked: true,
+          trust_reason: '测试：该目录尚未获得信任，任务未启动'
+        })
+        return
+      }
       const sess = sessions.find((s) => s.id === sid)
       if (sess) {
         sess.status = 'running'
@@ -348,6 +359,17 @@ try {
   await sleep(900) // 留出 waiting_for_input 触发重拉历史的时间
   const textLate = await w3.evaluate('document.body.innerText')
   ok('迟到窗口补到完整尾巴（20/20）', textLate.includes('回A-20'), 'has20=' + textLate.includes('回A-20'))
+
+  // ===== 阶段 4：信任闸门拦下时的界面回声（假 daemon 直接回 trust_blocked）=====
+  await w1.evaluate(WAIT_IDLE_JS)
+  await w1.evaluate(NEW_CHAT_JS)
+  ok('窗口1 发 TRUST-BLOCK', (await w1.evaluate(SEND_JS('TRUST-BLOCK 未信任目录'))) === 'sent')
+  await sleep(1200)
+  const textT = await w1.evaluate('document.body.innerText')
+  ok('界面提示"任务未启动"', textT.includes('任务未启动'), 'len=' + textT.length)
+  ok('提示里带拒绝原因', textT.includes('尚未获得信任'))
+  // 新会话线程里只有用户气泡 + 提示，不应出现任何流式回复
+  ok('被拦时不产生助手回复', !textT.includes('回A-') && !textT.includes('回B-'))
 
   w1.close()
   w2.close()

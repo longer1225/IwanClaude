@@ -1310,6 +1310,12 @@ def _apply_env(config: IwanConfig) -> None:
                 f"Config error: IWAN_TRUST_TIMEOUT_S must be a number, got: {trust_timeout!r}"
             )
 
+    # 信任文件也支持 env 覆盖：集成测试必须把 trust.toml 关进 tmp 目录，
+    # 否则测试会读到用户真实的信任决定（目录被 trust/deny 时用例随机翻红）
+    trust_file = os.environ.get("IWAN_TRUST_FILE")
+    if trust_file is not None:
+        config.permission.trust_file = trust_file
+
     perm_mode = os.environ.get("IWAN_PERMISSION_MODE")
     if perm_mode is not None:
         from iwan_claude.core.permissions.manager import PERMISSION_MODES

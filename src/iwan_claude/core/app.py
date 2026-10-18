@@ -1175,6 +1175,23 @@ class CoreApp:
         assert self._sessions is not None
         tid = str(task.get("id", ""))
         title = f"定时·{task.get('name', '')}"[:40]
+        # 【设计】无人值守路径的信任策略：目录被标 deny 的定时任务直接跳过并记账，
+        # 而不是先建会话、再让它在工具审批上干等 600s（那是"看着像卡死"的另一来源）。
+        # ask 只告警不拦：定时任务没人能回答信任卡，而闸门只挂在 RPC 入口。
+        fire_cwd = str(task.get("cwd", "")) or os.getcwd()
+        # getattr 而非直取：单测会用 object.__new__(CoreApp) 造半成品实例（不跑
+        # __init__），直取属性会把"没这属性"变成 AttributeError 而不是跳过检查
+        trust_store = getattr(self, "_trust_store", None)
+        if trust_store is not None:
+            fire_trust = trust_store.lookup(fire_cwd)
+            if fire_trust == "deny":
+                logger.warning(
+                    "schedule: 目录不可信，跳过触发 task=%s cwd=%s", tid, fire_cwd)
+                return False, f"目录不可信，已跳过：{fire_cwd}"
+            if fire_trust == "ask":
+                logger.warning(
+                    "schedule: 目录未信任（ask），将在无人工审批的路径上运行 task=%s cwd=%s",
+                    tid, fire_cwd)
         all_sessions = self._sessions.list_sessions()
         sid = self._sched_sessions.get(tid, "")
         session = next(
@@ -2545,6 +2562,10 @@ class CoreApp:
         addr = await server.start()
         logger.info("iwan-core %s listening addr=%s", iwan_claude.__version__, addr)
         logger.info("config: %s", self._config)
+        # 端口已监听 = 启动成功：清掉上一次的失败标记（GUI 读它显示"起不来"的原因，
+        # 不清就会把历史错误当成现在的问题）
+        from iwan_claude.core.startup import clear_startup_error
+        clear_startup_error()
 
         # ===== 语音模型后台预热 =====
         # 桌面 App 通行做法：启动不挡端口、首次按 🎤 不付模型加载的等待。
@@ -2675,5 +2696,21 @@ def run() -> None:
     1. 创建一个新的事件循环
     2. 运行传入的异步函数（CoreApp().run()）
     3. 函数完成后关闭事件循环
+
+    【启动期失败兜底】GUI 拉起 daemon 时拿不到子进程输出（Windows 下 detached +
+    重定向不可靠），所以这里把启动期异常/SystemExit 的原因写到
+    IWAN_STARTUP_ERROR_FILE 指定的文件里（GUI 指定路径并读取），界面才能显示
+    "为什么起不来"而不是一直转圈。入口点 iwan-core 与 python -m 都经过这里。
     """
-    asyncio.run(CoreApp().run())
+    from iwan_claude.core.startup import write_startup_error
+    try:
+        asyncio.run(CoreApp().run())
+    except SystemExit as exc:
+        # SystemExit 的 code 通常就是我们写给用户的提示（缺 key / 配置写错）
+        if exc.code not in (0, None):
+            write_startup_error(str(exc.code))
+        raise
+    except BaseException:
+        import traceback
+        write_startup_error(traceback.format_exc(limit=6))
+        raise
