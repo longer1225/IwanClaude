@@ -8,7 +8,8 @@
     "dev": "node scripts/run-gui.mjs dev",
     "build": "electron-vite build",
     "start": "node scripts/run-gui.mjs preview",
-    "typecheck": "tsc --noEmit -p tsconfig.json"
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test:e2e": "node scripts/e2e-parallel.mjs"
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.11.0",
@@ -30,3 +31,4 @@
     "vite": "^5.4.11"
   }
 }
+

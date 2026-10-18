@@ -20,6 +20,11 @@ uv run pytest tests/ -v               # all
 # Single test
 uv run pytest tests/unit/test_envelope.py::test_request_roundtrip -v
 
+# GUI typecheck / build / 端到端（真 Electron 窗口 + 假 daemon，验证多任务并行与回复归属）
+cd gui && npm run typecheck
+cd gui && npm run build
+cd gui && npm run test:e2e
+
 # Regenerate WIRE_PROTOCOL.md after changing bus models
 uv run python scripts/gen_protocol_doc.py
 
