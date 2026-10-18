@@ -231,6 +231,7 @@ from iwan_claude.core.workflow.engine import (  # noqa: E402  工作流引擎装
 )
 from iwan_claude.core.workflow.store import WorkflowStore  # noqa: E402  工作流定义/运行存储（W1）
 from iwan_claude.core.trust import TrustStore, normalize_dir_key    # Layer 0 信任门
+from iwan_claude.core.trust.gate import TrustGate                   # Layer 0 信任闸门（未答复不启动 run）
 from iwan_claude.core.shadow import ShadowStore                     # Layer 4 文件回滚
 from iwan_claude.core.run_registry import add_steer, request_cancel  # 活跃运行注册表：取消/修正
 from iwan_claude.core.runner import AgentRunner              # Agent 运行器
@@ -327,6 +328,8 @@ class CoreApp:
         self._memory: Any | None = None
         # Layer 0 项目信任存储（start 时按 [permission] trust_file 初始化）
         self._trust_store: TrustStore | None = None
+        # Layer 0 信任闸门：ask 时挂起 send_message，直到答复或超时（B 档语义）
+        self._trust_gate: TrustGate | None = None
         # M2 定时任务：存储 + 调度器（run() 里创建并启动；None=未启动）
         self._schedule_store: ScheduleStore | None = None
         self._scheduler: Scheduler | None = None
@@ -1274,18 +1277,11 @@ class CoreApp:
             else:
                 trust = self._trust_store.lookup(effective_cwd)
             self._permission_manager.set_trust(session.id, trust)
-            if trust == "ask":
-                # 未决目录：广播 trust.requested 供在线客户端弹信任对话框。
-                # 只通知不等待——会话照常可用（ask=写操作逐次审批的现状语义）
-                from iwan_claude.core.bus.events import TrustRequestedEvent
-                await self._bus.publish(
-                    TrustRequestedEvent(
-                        session_id=session.id,
-                        cwd=effective_cwd,
-                        has_instruction_files=_has_instruction_files(effective_cwd),
-                        ts=_now(),
-                    )
-                )
+            if trust == "ask" and self._trust_gate is not None:
+                # 未决目录：先把信任卡推给在线客户端（只弹卡，不阻塞 create——
+                # TUI 会批量建会话做浏览，卡在 create 上等于把界面焊死）；
+                # 真正的阻塞点在 send_message，见 _session_send_handler 的闸门
+                await self._trust_gate.note(session.id, effective_cwd)
         return SessionCreateResult(
             session_id=session.id, status=session.status, auto_mode=auto_mode,
             permission_mode=permission_mode, effort_level=effort_level, model_preset=model_preset,
@@ -1320,6 +1316,38 @@ class CoreApp:
             self._permission_manager.set_trust(
                 cmd.session_id, self._trust_store.lookup(sess.cwd or os.getcwd())
             )
+
+        # ===== Layer 0 信任闸门（B 档：未答复不启动 run）=====
+        # ask 未决 → 挂起本次发送，直到客户端答复 trust.respond 或超时；
+        # 超时/拒绝都按 fail-closed 收口：不建 run、不落用户消息，直接返回
+        # trust_blocked 给客户端提示。deny 目录同样在这里被拦下（不靠工具层兜底）。
+        if self._trust_gate is not None and self._permission_manager is not None:
+            sess = self._sessions._get_session(cmd.session_id)
+            gate_cwd = sess.cwd or os.getcwd()
+            verdict = await self._trust_gate.check(
+                cmd.session_id, gate_cwd, self._permission_manager.get_trust(cmd.session_id)
+            )
+            if not verdict.allowed:
+                # 超时按拒绝钉死内存档（与用户显式 deny 同语义），并广播信任变更，
+                # 让还举着卡片的客户端把按钮收掉、看到"已拒绝/超时"的回声
+                self._permission_manager.set_trust(cmd.session_id, "deny")
+                from iwan_claude.core.bus.events import TrustChangedEvent
+                await self._bus.publish(
+                    TrustChangedEvent(
+                        session_id=cmd.session_id,
+                        cwd=normalize_dir_key(gate_cwd),
+                        decision="deny",
+                        persistent=False,
+                        ts=_now(),
+                    )
+                )
+                logger.info(
+                    "session.send_message blocked by trust gate session=%s cwd=%s reason=%s",
+                    cmd.session_id, gate_cwd, verdict.reason,
+                )
+                return SessionSendMessageResult(
+                    run_id="", trust_blocked=True, trust_reason=verdict.reason,
+                )
 
         # 发送消息并等待任务完成
         result = await self._sessions.send_message(
@@ -1422,6 +1450,12 @@ class CoreApp:
         # 会话内存态立即生效（deny 从下一枚工具调用起拦）
         if session is not None:
             self._permission_manager.set_trust(cmd.session_id, cmd.decision)
+        # 唤醒被信任闸门挂起的发送：同目录等待的会话一并放行/拒绝。答复可能只带
+        # cwd（CLI `iwan trust grant`），所以按目录批量解析；解析到的会话逐个
+        # 落内存信任档，否则它们挂在闸门里等到的只是一个"没有生效"的答复
+        if self._trust_gate is not None:
+            for sid in self._trust_gate.resolve(cmd.session_id, cwd, cmd.decision):
+                self._permission_manager.set_trust(sid, cmd.decision)
         if cmd.persistent:
             if cmd.decision == "ask":
                 self._trust_store.revoke(cwd)
@@ -1669,6 +1703,9 @@ class CoreApp:
         
         # 关闭会话
         await self._sessions.close(cmd.session_id)
+        # 会话已终：作废其信任闸门（否则被挂起的发送要等满超时才收口）
+        if self._trust_gate is not None:
+            self._trust_gate.forget(cmd.session_id)
         
         # 返回关闭状态
         return SessionCloseResult(status="closed")
@@ -2214,6 +2251,15 @@ class CoreApp:
             "trust: store=%s inherit=%s entries=%d",
             trust_path, self._config.permission.trust_inherit,
             len(self._trust_store.entries()),
+        )
+        # ===== 信任闸门（B 档：未答复不启动 run）=====
+        # 卡片仍由 create 先弹（体验），但真正的阻塞点在 _session_send_handler：
+        # ask 未决时挂起发送，超时按拒绝收口；只有 RPC 入口走闸门，所以定时任务/
+        # 工作流子 Agent 这些无人值守路径天然豁免，不会被信任卡挂死。
+        self._trust_gate = TrustGate(
+            publish=self._bus.publish,
+            timeout_s=self._config.permission.trust_timeout_s,
+            has_instruction_files=_has_instruction_files,
         )
         logger.info(
             "permission manager: timeout_s=%.1f  default_mode=%s  persistent=%d entries"

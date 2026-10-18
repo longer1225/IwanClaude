@@ -507,10 +507,12 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
 |---|---|---|
 | `run_id` | `string` | no |
 | `skill_match` | `object | null` | no |
+| `trust_blocked` | `boolean` | no |
+| `trust_reason` | `string` | no |
 
 ```json
 {
-  "description": "发送消息响应 - 服务器返回的发送消息响应\n\n【字段说明】\n- run_id: str - 运行 ID（空字符串表示未启动 run，如技能待确认）\n- skill_match: dict | None - 自动匹配到的技能信息（name/score/description），\n  非空时 TUI 应弹出确认控件，用户确认后重新发送\n\n【两种响应场景】\n1. 正常执行：run_id 非空，skill_match 为 None\n2. 技能待确认：run_id 为空，skill_match 包含匹配信息",
+  "description": "发送消息响应 - 服务器返回的发送消息响应\n\n【字段说明】\n- run_id: str - 运行 ID（空字符串表示未启动 run，如技能待确认/信任未决）\n- skill_match: dict | None - 自动匹配到的技能信息（name/score/description），\n  非空时 TUI 应弹出确认控件，用户确认后重新发送\n- trust_blocked: bool - True 表示 Layer 0 信任闸门拦下了本次发送（未启动 run、\n  未落用户消息）；客户端应提示 trust_reason，而不是当成发送失败\n- trust_reason: str - 被拦原因（未答复超时/用户拒绝/目录被标记不可信）\n\n【三种响应场景】\n1. 正常执行：run_id 非空，skill_match 为 None\n2. 技能待确认：run_id 为空，skill_match 包含匹配信息\n3. 信任未决/拒绝：run_id 为空，trust_blocked=True，trust_reason 说明原因",
   "properties": {
     "run_id": {
       "default": "",
@@ -529,6 +531,16 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
       ],
       "default": null,
       "title": "Skill Match"
+    },
+    "trust_blocked": {
+      "default": false,
+      "title": "Trust Blocked",
+      "type": "boolean"
+    },
+    "trust_reason": {
+      "default": "",
+      "title": "Trust Reason",
+      "type": "string"
     }
   },
   "title": "SessionSendMessageResult",

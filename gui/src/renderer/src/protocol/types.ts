@@ -509,6 +509,8 @@ export interface SessionCreateResult {
 export interface SessionSendMessageResult {
   run_id?: string
   skill_match?: Record<string, unknown> | null
+  trust_blocked?: boolean
+  trust_reason?: string
 }
 
 export interface SessionGetHistoryResult {

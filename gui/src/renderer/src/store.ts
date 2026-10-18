@@ -910,6 +910,16 @@ export async function sendMessage(text: string): Promise<void> {
       runOwner.set(res.run_id, sid)
       st.setLastRun(sid, res.run_id)
     }
+    // 【学习要点】信任闸门（Layer 0 B 档）会在"未答复信任"时直接拦下本次发送：
+    // 不建 run、不落用户消息，回包里带 trust_blocked。这条分支必须先生效，否则
+    // 用户会看到气泡进了 daemon 却什么都没发生（和当年的 skill_match 黑洞同型）。
+    if (res.trust_blocked) {
+      st.pushMsg(sid, {
+        id: nextId(),
+        role: 'notice',
+        text: `🔒 任务未启动（消息未发给 agent）：${res.trust_reason || '该目录尚未获得信任'}`
+      })
+    }
     // 【学习要点】skill_match 不是错误而是"半成品协议"：daemon 自动匹配到技能时
     // 不起 run、把决定权抛回客户端出确认卡（TUI 的 SkillConfirm 同款语义）。GUI
     // 缺这个分支时用户气泡成了黑洞——消息明明送到了 daemon，界面却永远沉默

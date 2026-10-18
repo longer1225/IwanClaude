@@ -231,16 +231,22 @@ class SessionSendMessageResult(BaseModel):
     发送消息响应 - 服务器返回的发送消息响应
 
     【字段说明】
-    - run_id: str - 运行 ID（空字符串表示未启动 run，如技能待确认）
+    - run_id: str - 运行 ID（空字符串表示未启动 run，如技能待确认/信任未决）
     - skill_match: dict | None - 自动匹配到的技能信息（name/score/description），
       非空时 TUI 应弹出确认控件，用户确认后重新发送
+    - trust_blocked: bool - True 表示 Layer 0 信任闸门拦下了本次发送（未启动 run、
+      未落用户消息）；客户端应提示 trust_reason，而不是当成发送失败
+    - trust_reason: str - 被拦原因（未答复超时/用户拒绝/目录被标记不可信）
 
-    【两种响应场景】
+    【三种响应场景】
     1. 正常执行：run_id 非空，skill_match 为 None
     2. 技能待确认：run_id 为空，skill_match 包含匹配信息
+    3. 信任未决/拒绝：run_id 为空，trust_blocked=True，trust_reason 说明原因
     """
     run_id: str = ""
     skill_match: dict[str, Any] | None = None
+    trust_blocked: bool = False
+    trust_reason: str = ""
 
 
 class SessionGetHistoryCommand(BaseModel):

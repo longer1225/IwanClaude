@@ -2402,6 +2402,14 @@ class IwanTuiApp(App[None]):
             # 检查是否正常启动了 run
             run_id = result.get("run_id", "")
             if not run_id:
+                # 信任闸门拦下（Layer 0 B 档）：run 没启动，用户消息也没落盘——
+                # 明确告知原因，别让"回车没反应"被误读成卡死
+                if result.get("trust_blocked"):
+                    self._append(Static(
+                        f"[yellow]🔒 任务未启动（消息未发给 agent）："
+                        f"{result.get('trust_reason', '该目录尚未获得信任')}[/yellow]",
+                        classes="log-line",
+                    ))
                 # 未启动 run 也未返回 skill_match（异常情况）
                 self._busy = False
                 prompt = self._prompt()

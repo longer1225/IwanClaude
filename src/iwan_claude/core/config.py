@@ -197,6 +197,8 @@ class PermissionConfig:
             形如 "bash" 或 "bash(git status:*)"；空列表 = 关闭规则引擎
         trust_file: 项目信任决定持久化路径（S9 Layer 0；与 policy.toml 平级）
         trust_inherit: 子目录是否继承祖先目录的信任决定（false = 仅精确匹配）
+        trust_timeout_s: 信任闸门等待上限（秒）；未答复期间 send_message 挂起，
+            超时按拒绝收口（fail-closed，不启动 run）；0 = 不超时
     """
     # 审批超时秒数；0 表示不超时。60→600：定时/后台会话弹审批时人往往不在场，
     # 60 秒几乎必然超时拒绝（fail-closed 语义不变），10 分钟给"回头再点"留窗口
@@ -207,6 +209,9 @@ class PermissionConfig:
     allow: list[str] = field(default_factory=list)
     trust_file: str = "~/.iwan/trust.toml"
     trust_inherit: bool = True
+    # Layer 0 信任闸门的等待上限（秒）：未答复期间 send_message 挂起，超时按拒绝
+    # 收口（fail-closed，不启动 run）。0 = 不超时（一直等客户端答复）
+    trust_timeout_s: float = 120.0
 
 
 @dataclass
@@ -790,6 +795,7 @@ def _apply_toml(config: IwanConfig, data: dict[str, Any]) -> None:
             raise SystemExit("Config error: [permission] must be a table")
         unknown_perm: set[str] = set(perm.keys()) - {
             "timeout_s", "mode", "deny", "ask", "allow", "trust_file", "trust_inherit",
+            "trust_timeout_s",
         }
         if unknown_perm:
             raise SystemExit(f"Unknown [permission] keys: {', '.join(sorted(unknown_perm))}")
@@ -819,6 +825,12 @@ def _apply_toml(config: IwanConfig, data: dict[str, Any]) -> None:
             if not isinstance(val, (int, float)) or val < 0:
                 raise SystemExit("Config error: permission.timeout_s must be a non-negative number")
             config.permission.timeout_s = float(val)
+        if "trust_timeout_s" in perm:
+            val = perm["trust_timeout_s"]
+            if not isinstance(val, (int, float)) or val < 0:
+                raise SystemExit(
+                    "Config error: permission.trust_timeout_s must be a non-negative number")
+            config.permission.trust_timeout_s = float(val)
         # 声明式规则在启动期逐条 parse——规则笔误要当场炸，不能静默不生效
         # （函数内 import：permissions→policy→sandbox→config 存在回边，顶层 import 会成环）
         from iwan_claude.core.permissions.rules import parse_rule
@@ -1282,6 +1294,20 @@ def _apply_env(config: IwanConfig) -> None:
         except ValueError:
             raise SystemExit(
                 f"Config error: IWAN_PERMISSION_TIMEOUT_S must be a number, got: {perm_timeout!r}"
+            )
+
+    trust_timeout = os.environ.get("IWAN_TRUST_TIMEOUT_S")
+    if trust_timeout is not None:
+        try:
+            trust_timeout_val = float(trust_timeout)
+            if trust_timeout_val < 0:
+                raise SystemExit(
+                    f"Config error: IWAN_TRUST_TIMEOUT_S must be >= 0, got: {trust_timeout!r}"
+                )
+            config.permission.trust_timeout_s = trust_timeout_val
+        except ValueError:
+            raise SystemExit(
+                f"Config error: IWAN_TRUST_TIMEOUT_S must be a number, got: {trust_timeout!r}"
             )
 
     perm_mode = os.environ.get("IWAN_PERMISSION_MODE")

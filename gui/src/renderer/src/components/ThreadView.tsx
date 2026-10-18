@@ -63,7 +63,10 @@ function TrustCard({ m, sid }: { m: Msg; sid: string }) {
         <button className="card-btn" disabled={busy} onClick={() => act('allow', true)}>总是允许</button>
         <button className="card-btn danger" disabled={busy} onClick={() => act('deny', false)}>拒绝</button>
       </div>
-      <div className="card-hint">不信任的目录里，agent 将拒绝读写该项目的任何文件。</div>
+      <div className="card-hint">
+        在答复前，该目录里的任务不会启动（超时按拒绝）。"总是"会写入信任文件；
+        拒绝则本轮不执行。
+      </div>
     </div>
   )
 }
