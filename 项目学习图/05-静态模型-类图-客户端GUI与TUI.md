@@ -247,10 +247,12 @@ classDiagram
 2. **事件 → 视图要走"归属表"**：`runOwner: Map<run_id, sid>` 把只有 `run_id` 的事件（`llm.token`/`step.*`/`tool.*`）路由到正确会话的线程；`run.started` 现在自带 `session_id`，所以归属不再靠 `goal === 用户原话` 猜（`store.ts:509-531`）。
 3. **TUI 的状态是"每标签一份"**：`_SessionState` 把 widgets/busy/pending 审批/子 Agent 计时全挂在会话上（`tui/models/session_state.py`），切标签 = 换一组 widget 指针，不动后台 run——这是它能"后台会话继续跑"的原因。
 
-## 已知的客户端级限制（会在 17 号图详述）
+## 客户端级并发的历史坑（已修，详见 17 号评估）
 
-- GUI 的 `Composer.sending` 是**窗口级**布尔（`Composer.tsx:136,280-291`），而 `session.send_message` 的响应要等整个 run 结束才返回（daemon 侧 `manager.py:489` `await run_task`），所以**一条 run 未结束前，同一窗口发不出第二条任务**。
-- GUI 的流式合并用单一 `activeStream` 槽位 + 全局 `closeStream()`（`store.ts:419-470`），并发两条 run 时会出现"A 的尾巴被 B 的 run.finished 关掉"的串台。
+- 修复前：`Composer.sending` 是**窗口级**布尔（组件只有一份实例），而 `session.send_message` 的响应要等整个 run 结束才返回（daemon 侧 `manager.py:489` `await run_task`），于是**一条 run 未结束前，同一窗口发不出第二条任务**。
+- 修复后：`sendingSids: Set<string>` 按会话记账，`sendMessage` 进入置位、整轮结束清零；`Composer` 只读当前会话那一位，A 在跑不影响 B。
+- 修复前：流式合并用单一 `activeStream` 槽位 + 无参 `closeStream()`，并发两条 run 时 A 的尾段会被 B 的 `run.finished` 连坐丢掉。
+- 修复后：`streams: Map<runId, …>`，`flushTokens` 遍历所有活跃流、同帧一次 `setState`；`closeStream(runId)` 只关自己；断线时 `resetStreams()` 清光标。
 
 ## 代码锚点
 

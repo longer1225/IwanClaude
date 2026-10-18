@@ -9,7 +9,7 @@
 // M4c 补订 ssh.*——漏订的后果是"终端能开能敲却零输出"：字节流事件被 daemon
 // 在广播前按 fnmatch 静默过滤，GUI 侧完全无感知，排查时最容易怀疑错方向。
 import { useEffect, useState } from 'react'
-import { useStore, handleBusEvent, refreshSessionList } from './store'
+import { useStore, handleBusEvent, refreshSessionList, resetStreams } from './store'
 import { onConnStatus, onDaemonEvent, rpc, getStatus } from './rpc'
 import { useGui } from './guiHelpers'
 import { Sidebar } from './components/Sidebar'
@@ -85,6 +85,9 @@ export default function App() {
     const applyStatus = (s: string): void => {
       setStatus(s)
       if (s === 'connected') onConnected()
+      // 断线时在途 run 已随连接消失：清流式槽位并把残留的光标态收掉，
+      // 否则重连后那些线程会永远挂着一个 ▍（事件不会再来，没人替它关）
+      else resetStreams()
     }
     const offEvent = onDaemonEvent(handleBusEvent)
     const offStatus = onConnStatus(applyStatus)

@@ -66,6 +66,13 @@ interface State {
   threads: Record<string, Msg[]>
   selectedCwd: string | null
   runningSids: Set<string>
+  // 【学习要点】"发送在途"必须按会话记，不能是 Composer 里的窗口级布尔：daemon 的
+  // session.send_message 要整轮 run 跑完才回包，若用窗口级标志，A 工作区在跑时 B 工作区
+  // 连回车都发不出去（用户只能看到一个毫无反应的发送键）。这里按 sid 记，锁的是"同一会话
+  // 别重复提交"，而不是"整个窗口只能有一个任务"。
+  sendingSids: Set<string>
+  // 还没有 sid 的那一瞬间（session.create 在途）的防重入：此时没有 key 可挂 flag
+  creatingSession: boolean
   contextPct: Record<string, number>
   lastRunId: Record<string, string>
   loadedHistory: Set<string>
@@ -91,6 +98,8 @@ interface State {
   patchMsg(sid: string, id: string, patch: Partial<Msg>): void
   setThread(sid: string, msgs: Msg[]): void
   markRunning(sid: string, running: boolean): void
+  markSending(sid: string, sending: boolean): void
+  setCreatingSession(v: boolean): void
   setContextPct(sid: string, pct: number): void
   setLastRun(sid: string, runId: string): void
   markHistoryLoaded(sid: string): void
@@ -164,6 +173,8 @@ export const useStore = create<State>((set, get) => ({
   threads: {},
   selectedCwd: localStorage.getItem(LS_CWD_KEY),
   runningSids: new Set(),
+  sendingSids: new Set(),
+  creatingSession: false,
   contextPct: {},
   lastRunId: {},
   loadedHistory: new Set(),
@@ -225,6 +236,14 @@ export const useStore = create<State>((set, get) => ({
       else next.delete(sid)
       return { runningSids: next }
     }),
+  markSending: (sid, sending) =>
+    set((st) => {
+      const next = new Set(st.sendingSids)
+      if (sending) next.add(sid)
+      else next.delete(sid)
+      return { sendingSids: next }
+    }),
+  setCreatingSession: (v) => set({ creatingSession: v }),
   setThread: (sid, msgs) => set((st) => ({ threads: { ...st.threads, [sid]: msgs } })),
   setLastRun: (sid, runId) => set((st) => ({ lastRunId: { ...st.lastRunId, [sid]: runId } })),
   // 【学习要点】Set 是引用类型——mutate 后必须换一个新 Set 再 set，
@@ -416,29 +435,38 @@ export async function steerRun(sid: string, message: string): Promise<boolean> {
 // llm.token 缓冲（不进 store，避免每 token 触发 React 渲染）
 const tokenBuf = new Map<string, string[]>()
 let flushScheduled = false
-let activeStream: { sid: string; msgId: string; runId: string } | null = null
-// 【学习要点】每个 run 的流式气泡按"段"编号：工具调用会 closeStream 切断文本流，
+// 【学习要点】流式槽位必须按 run 记，不能是单个 activeStream：两个工作区（或"聊天中定时
+// 任务触发"）会同时有两条 run 在吐 token。单槽时代 flushTokens 只写当前槽，另一条的字滞留在
+// 缓冲里；任何一条 run.finished 又调无参 closeStream() —— 另一条的尾段 token 永远不会被写入，
+// 用户看到半句话 + 一条裸的"✓ 完成"。改成 Map<runId, 段坐标> 后每条流各写各的。
+const streams = new Map<string, { sid: string; msgId: string }>()
+// 【学习要点】每个 run 的流式气泡按"段"编号：工具调用会 closeStream(runId) 切断文本流，
 // 若新段仍用 stream-${runId} 同一 id，会被 ensureStreamMsg 找回旧气泡续写——
 // 结果就是 "第一段## 第二段标题" 粘连、Markdown 块级语法失效。段号保证每段独立成卡。
 const streamSegs = new Map<string, number>()
 
-// 把缓冲 token 一次性并入当前流式消息——每帧最多一次 setState
+// 把所有活跃流的缓冲 token 一次性并入各自消息——每帧最多一次 setState
 function flushTokens(): void {
   flushScheduled = false
-  if (!activeStream) return
-  const buf = tokenBuf.get(activeStream.sid)
-  if (!buf || buf.length === 0) return
-  const merged = buf.join('')
-  buf.length = 0
-  const { sid, msgId } = activeStream
-  useStore.setState((st) => ({
-    threads: {
-      ...st.threads,
-      [sid]: (st.threads[sid] ?? []).map((m) =>
-        m.id === msgId ? { ...m, text: m.text + merged } : m
+  if (streams.size === 0) return
+  // 先把缓冲取空并收集成批：同帧多条流共用一个 setState，渲染次数不随 run 数增长
+  const batches: Array<{ sid: string; msgId: string; text: string }> = []
+  for (const [runId, cur] of streams) {
+    const buf = tokenBuf.get(runId)
+    if (!buf || buf.length === 0) continue
+    batches.push({ sid: cur.sid, msgId: cur.msgId, text: buf.join('') })
+    buf.length = 0
+  }
+  if (batches.length === 0) return
+  useStore.setState((st) => {
+    const threads = { ...st.threads }
+    for (const b of batches) {
+      threads[b.sid] = (threads[b.sid] ?? []).map((m) =>
+        m.id === b.msgId ? { ...m, text: m.text + b.text } : m
       )
     }
-  }))
+    return { threads }
+  })
 }
 
 // 确保该 run 当前段有挂件的流式助手消息（首个 token 到达才建，空回复不留空气泡）
@@ -449,24 +477,48 @@ function ensureStreamMsg(runId: string): { sid: string; msgId: string } | null {
   const sid = runOwner.get(runId)
   if (!sid) return null
   const msgId = `stream-${runId}-${streamSegs.get(runId) ?? 0}`
-  if (!activeStream || activeStream.msgId !== msgId) {
+  const cur = streams.get(runId)
+  if (!cur || cur.msgId !== msgId) {
     if (!st.threads[sid]?.some((m) => m.id === msgId)) {
       st.pushMsg(sid, { id: msgId, role: 'assistant', text: '', streaming: true })
     }
-    activeStream = { sid, msgId, runId }
+    streams.set(runId, { sid, msgId })
   }
   return { sid, msgId }
 }
 
-// 结束当前流式块（工具调用/运行结束时）：去光标态 + 段号前进，下一批 token 开新气泡
-function closeStream(): void {
-  flushTokens()
-  if (activeStream) {
-    const { sid, msgId, runId } = activeStream
-    useStore.getState().patchMsg(sid, msgId, { streaming: false })
+// 结束某个 run 的流式段（工具调用/运行结束时）：先把它自己的尾巴写出来，再去光标、段号前进。
+// 传 runId 是硬要求：无参版本会把"别的 run 正在流的段落"一起关掉（并发丢尾的根因）。
+function closeStream(runId: string): void {
+  const cur = streams.get(runId)
+  flushTokens() // flush 覆盖所有流：既写本 run 的尾巴，也顺手把别的流已到的字落盘
+  if (!cur) {
     streamSegs.set(runId, (streamSegs.get(runId) ?? 0) + 1)
-    activeStream = null
+    tokenBuf.delete(runId)
+    return
   }
+  useStore.getState().patchMsg(cur.sid, cur.msgId, { streaming: false })
+  streamSegs.set(runId, (streamSegs.get(runId) ?? 0) + 1)
+  streams.delete(runId)
+  tokenBuf.delete(runId)
+}
+
+// 连接断了/daemon 重启：所有在途 run 都已消失，清掉槽位并把残留光标态收掉，
+// 否则切回来的线程会永远挂着一个 ▍（下面 run.started 会重新建流）
+export function resetStreams(): void {
+  streams.clear()
+  tokenBuf.clear()
+  streamSegs.clear()
+  useStore.setState((st) => {
+    const threads = { ...st.threads }
+    let touched = false
+    for (const [sid, list] of Object.entries(threads)) {
+      if (!list.some((m) => m.streaming)) continue
+      threads[sid] = list.map((m) => (m.streaming ? { ...m, streaming: false } : m))
+      touched = true
+    }
+    return touched ? { threads } : {}
+  })
 }
 
 let msgSeq = 0
@@ -497,8 +549,9 @@ export function handleBusEvent(ev: BusEvent): void {
     case 'llm.token': {
       const s = ensureStreamMsg(ev.run_id)
       if (!s) return
-      let buf = tokenBuf.get(s.sid)
-      if (!buf) tokenBuf.set(s.sid, (buf = []))
+      // 缓冲按 run 记（不是按 sid）：同一会话先后两个 run 的 token 也不该混进同一缓冲
+      let buf = tokenBuf.get(ev.run_id)
+      if (!buf) tokenBuf.set(ev.run_id, (buf = []))
       buf.push(ev.token)
       if (!flushScheduled) {
         flushScheduled = true
@@ -532,7 +585,7 @@ export function handleBusEvent(ev: BusEvent): void {
     }
     case 'run.finished': {
       const sid = runOwner.get(ev.run_id) // run 键事件严格归属：未知 run（如后台起标题）不许落到当前会话
-      closeStream()
+      closeStream(ev.run_id) // 只关本 run 的流式段：并发时别的 run 还在吐字
       if (sid) {
         st.markRunning(sid, false)
         const ok = ev.status === 'completed' || ev.status === 'success' || ev.status === 'ok'
@@ -545,7 +598,7 @@ export function handleBusEvent(ev: BusEvent): void {
       return
     }
     case 'tool.call_started': {
-      if (activeStream && runOwner.get(ev.run_id) === activeStream.sid) closeStream() // 工具打断文本块，下一段另起消息
+      closeStream(ev.run_id) // 工具打断本 run 的文本块，下一段另起消息（别的 run 的流不受影响）
       const sid = runOwner.get(ev.run_id) // run 键事件严格归属：未知 run（如后台起标题）不许落到当前会话
       if (sid)
         st.pushMsg(sid, {
@@ -785,63 +838,79 @@ export function handleBusEvent(ev: BusEvent): void {
 }
 
 // 发送一条用户消息并跑一轮——M0 的核心动作序列
+// 【学习要点】"发送在途"按会话记账（sendingSids），整轮 run 只锁这一个会话。daemon 的
+// session.send_message 要等 run 结束才回包，所以锁的语义必须是"同一会话别重复提交"，
+// 而不是"整个窗口只能有一个任务在跑"——后者会让 B 工作区在 A 跑着时连回车都发不出去。
 export async function sendMessage(text: string): Promise<void> {
   const st = useStore.getState()
   let sid = st.activeSid
   if (!sid) {
-    const r = await rpc<SessionCreateResult & Partial<SessionAttrs>>('session.create', {
-      mode: 'chat',
-      cwd: st.selectedCwd ?? undefined
-    })
-    sid = r.session_id
-    st.upsertSession({
-      id: sid,
-      title: '(未命名)',
-      status: 'active',
-      cwd: st.selectedCwd ?? undefined
-    })
-    st.setActive(sid)
-    // create 结果自带全套会话属性（daemon 已确认字段：auto_mode/permission_mode/...）
-    st.setAttrs(sid, {
-      permissionMode: r.permission_mode,
-      modelPreset: r.model_preset,
-      effortLevel: r.effort_level,
-      autoMode: r.auto_mode
-    })
+    // 还没有 sid 的这一小段（create 在途）没有 key 可挂 flag，用 creatingSession 防重入
+    if (st.creatingSession) return
+    st.setCreatingSession(true)
+    try {
+      const r = await rpc<SessionCreateResult & Partial<SessionAttrs>>('session.create', {
+        mode: 'chat',
+        cwd: st.selectedCwd ?? undefined
+      })
+      sid = r.session_id
+      st.upsertSession({
+        id: sid,
+        title: '(未命名)',
+        status: 'active',
+        cwd: st.selectedCwd ?? undefined
+      })
+      st.setActive(sid)
+      // create 结果自带全套会话属性（daemon 已确认字段：auto_mode/permission_mode/...）
+      st.setAttrs(sid, {
+        permissionMode: r.permission_mode,
+        modelPreset: r.model_preset,
+        effortLevel: r.effort_level,
+        autoMode: r.auto_mode
+      })
+    } finally {
+      st.setCreatingSession(false)
+    }
   }
-  st.pushMsg(sid, { id: nextId(), role: 'user', text })
-  // 【学习要点】daemon 的 send_message 会 await 整个 run 才带 run_id 返回——
-  // 首帧事件（run.started/tokens）必然赶在响应前到达。所以运行态不能在这里
-  // markRunning(true)（那会把已跑完的 run 又点绿），而是记一条"待认领"，由
-  // run.started 按 goal==原文 认领后驱动灯；响应回来只补路由表。
-  pendingClaims.set(sid, { text, ts: Date.now() })
-  for (const [oldSid, c] of pendingClaims) {
-    if (Date.now() - c.ts > 60_000) pendingClaims.delete(oldSid) // 认领证据保鲜，防旧文本误收编后来的同名 run
+  // 先落"在途"再打任何 await：同一会话的第二次回车从下一 tick 起就被这个 flag 挡住
+  st.markSending(sid, true)
+  try {
+    st.pushMsg(sid, { id: nextId(), role: 'user', text })
+    // 【学习要点】daemon 的 send_message 会 await 整个 run 才带 run_id 返回——
+    // 首帧事件（run.started/tokens）必然赶在响应前到达。所以运行态不能在这里
+    // markRunning(true)（那会把已跑完的 run 又点绿），而是记一条"待认领"，由
+    // run.started 按 goal==原文 认领后驱动灯；响应回来只补路由表。
+    pendingClaims.set(sid, { text, ts: Date.now() })
+    for (const [oldSid, c] of pendingClaims) {
+      if (Date.now() - c.ts > 60_000) pendingClaims.delete(oldSid) // 认领证据保鲜，防旧文本误收编后来的同名 run
+    }
+    const res = await rpc<SessionSendMessageResult>('session.send_message', { session_id: sid, content: text })
+    pendingClaims.delete(sid) // 响应已回，认领窗口关闭（无论成败，之后的事件都该按 owner 表走）
+    // run_id 在模型里带默认值（可选字段）；没有 run 就没什么可路由的，静默跳过
+    if (res.run_id) {
+      runOwner.set(res.run_id, sid)
+      st.setLastRun(sid, res.run_id)
+    }
+    // 【学习要点】skill_match 不是错误而是"半成品协议"：daemon 自动匹配到技能时
+    // 不起 run、把决定权抛回客户端出确认卡（TUI 的 SkillConfirm 同款语义）。GUI
+    // 缺这个分支时用户气泡成了黑洞——消息明明送到了 daemon，界面却永远沉默
+    // （录视频当天实拍撞出）。此路径 daemon 未记录消息，确认后重发不会双份。
+    const sm = res.skill_match
+    if (sm && typeof sm.name === 'string') {
+      st.pushMsg(sid, {
+        id: nextId(),
+        role: 'notice',
+        card: 'skill',
+        text: typeof sm.description === 'string' ? sm.description : '检测到可能匹配的技能',
+        skillName: sm.name,
+        skillQuery: text,
+        paramPreview: `置信度 ${String(sm.score ?? '?')} · 你的输入「${text}」`
+      })
+    }
+    st.markHistoryLoaded(sid) // 本窗口全程事件可见，无需再拉历史
+  } finally {
+    st.markSending(sid, false)
   }
-  const res = await rpc<SessionSendMessageResult>('session.send_message', { session_id: sid, content: text })
-  pendingClaims.delete(sid) // 响应已回，认领窗口关闭（无论成败，之后的事件都该按 owner 表走）
-  // run_id 在模型里带默认值（可选字段）；没有 run 就没什么可路由的，静默跳过
-  if (res.run_id) {
-    runOwner.set(res.run_id, sid)
-    st.setLastRun(sid, res.run_id)
-  }
-  // 【学习要点】skill_match 不是错误而是"半成品协议"：daemon 自动匹配到技能时
-  // 不起 run、把决定权抛回客户端出确认卡（TUI 的 SkillConfirm 同款语义）。GUI
-  // 缺这个分支时用户气泡成了黑洞——消息明明送到了 daemon，界面却永远沉默
-  // （录视频当天实拍撞出）。此路径 daemon 未记录消息，确认后重发不会双份。
-  const sm = res.skill_match
-  if (sm && typeof sm.name === 'string') {
-    st.pushMsg(sid, {
-      id: nextId(),
-      role: 'notice',
-      card: 'skill',
-      text: typeof sm.description === 'string' ? sm.description : '检测到可能匹配的技能',
-      skillName: sm.name,
-      skillQuery: text,
-      paramPreview: `置信度 ${String(sm.score ?? '?')} · 你的输入「${text}」`
-    })
-  }
-  st.markHistoryLoaded(sid) // 本窗口全程事件可见，无需再拉历史
 }
 
 // 技能确认卡的答复：use=true 带 skill_name 重发执行，false 带 skip_auto_skill 正常对话。
@@ -857,6 +926,7 @@ export async function respondSkill(sid: string, msgId: string, use: boolean): Pr
     text: use ? `▶ 用技能「${msg.skillName ?? ''}」执行` : '▶ 不用技能，按普通对话继续'
   })
   const claim = { text, ts: Date.now() }
+  st.markSending(sid, true)
   pendingClaims.set(sid, claim)
   markEcho(sid, text) // 重发会让 daemon 再广播一次原文——气泡已在，吞掉回声
   try {
@@ -873,6 +943,8 @@ export async function respondSkill(sid: string, msgId: string, use: boolean): Pr
     st.markHistoryLoaded(sid)
   } catch (err) {
     st.pushMsg(sid, { id: nextId(), role: 'notice', text: `⚠ 技能执行发起失败：${String(err instanceof Error ? err.message : err)}` })
+  } finally {
+    st.markSending(sid, false)
   }
 }
 

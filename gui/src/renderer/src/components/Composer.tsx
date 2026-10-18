@@ -7,6 +7,8 @@
 // 3) 六引擎全列，一个不少：这是本项目的核心能力面，GUI 不许提供"降级视图"。
 // 4) 运行中 Enter = 转向（run.steer 排队注入），发送键变停止键——同一输入框两种
 // 语义，用 placeholder 与图标形状明示，与 Codex 的排队输入同型。
+// 4b) "发送在途"标志按会话读 store.sendingSids，绝不放进组件 useState：Composer 全窗口
+// 只有一份实例，窗口级布尔＝A 工作区在跑时 B 工作区按回车毫无反应（曾经的真 bug）。
 // 5) 语音 v2 是"会话式流式"：点🎤开听，worklet 按能量 VAD 自动断句，每句
 // 转写完增量追加到输入框尾部——边说边出字。转写必有错字，输入框就是校对台；
 // 自动直接发送会把听错的词当金口。段与段之间用串行队列排话，防并发 RPC
@@ -130,10 +132,11 @@ export function Composer({ booted }: { booted: boolean }) {
   const attrs = useStore((s) => (activeSid ? s.sessionAttrs[activeSid] : undefined))
   const ctxPct = useStore((s) => (activeSid ? s.contextPct[activeSid] ?? 0 : 0))
   const status = useStore((s) => s.status)
+  // 本会话是否有一条 send_message 在途：按 sid 读，别的会话在跑不会连累这里
+  const sending = useStore((s) => (s.activeSid ? s.sendingSids.has(s.activeSid) : s.creatingSession))
   const sessionProject = useGui((s) => s.sessionProject)
   const metaCwd = useStore((s) => s.metaCwd)
   const [text, setText] = useState('')
-  const [sending, setSending] = useState(false)
   const taRef = useRef<HTMLTextAreaElement>(null)
   // 语音会话两态机：idle↔rec（v2 会话式：rec 期间用户持续说话，段段入队，
   // 不存在 V1 那种整钮 busy 禁用态——你还在说呢，凭什么把按钮焊死）
@@ -274,19 +277,35 @@ export function Composer({ booted }: { booted: boolean }) {
     }
   }
 
-  // 提交：空闲=发消息；运行中=把输入当转向指令排队
+  // 提交：运行中=把输入当转向指令（不受"发送在途"拦截）；空闲=发消息（本会话在途则忽略）
   const doSend = async (): Promise<void> => {
     const value = text.trim()
-    if (!value || sending || status !== 'connected') return
-    setSending(true)
+    if (!value || status !== 'connected') return
+    // 转向必须先判：本轮正在跑时 sending 恰好为 true，若先判 sending，Enter 就再也
+    // 转向不了——"运行中随时输入即转向"会变成假话（旧版正是如此）
+    if (running && activeSid) {
+      setText('')
+      try {
+        // steer 未被接受（例如 run 刚好结束）就把原文放回去，别吞掉这行输入
+        const accepted = await steerRun(activeSid, value)
+        if (!accepted) setText((prev) => prev || value)
+      } catch (err) {
+        setText((prev) => prev || value)
+        window.alert(`转向失败：${String(err instanceof Error ? err.message : err)}`)
+      } finally {
+        taRef.current?.focus()
+      }
+      return
+    }
+    if (sending) return // 同一会话已有在途发送：忽略重复回车（别的会话不受影响）
     setText('')
     try {
-      if (running && activeSid) await steerRun(activeSid, value)
-      else await sendMessage(value)
+      await sendMessage(value)
     } catch (err) {
+      // 失败把原文放回输入框：一条报错不该吃掉用户刚打的字
+      setText((prev) => prev || value)
       window.alert(`发送失败：${String(err instanceof Error ? err.message : err)}`)
     } finally {
-      setSending(false)
       taRef.current?.focus()
     }
   }
