@@ -22,6 +22,9 @@ from __future__ import annotations
 # datetime：日期时间处理（用于获取当前 UTC 时间）
 from datetime import UTC, datetime
 
+# sys：探测宿主平台，决定注入 Windows 还是 POSIX 环境提示
+import sys
+
 # 导入 iwan_claude 包，用于获取版本号
 import iwan_claude
 
@@ -91,6 +94,35 @@ Ask for clarification when:
 
 
 
+# 平台环境提示：Windows 上 bash 工具实为 PowerShell（常见 5.1，不支持 &&/|| 与 bash 专有
+# 语法），模型先验爱写 POSIX 命令会直接报错；这里显式纠偏并引导优先用 run_python 做复杂文件操作
+_WIN_ENV = """
+[Environment]
+You are running on Windows. The `bash` tool executes commands via **PowerShell**,
+most often Windows PowerShell 5.1, which does NOT support `&&`, `||`, or bash-only
+syntax. Write PowerShell-native commands:
+- Separate statements with `;` (NOT `&&`). Conditional chaining: `cmd1; if ($?) { cmd2 }`.
+- Use cmdlets, not coreutils: Get-ChildItem (not `ls -la`), Select-String (not grep),
+  Get-Content (not cat), Set-Content (not `echo >`), Remove-Item (not rm).
+  Aliases `dir`/`cd`/`type` work but prefer explicit cmdlets.
+- Quote paths containing spaces; both `/` and `\\` separators are accepted.
+- For reading/analyzing a project's file structure or anything multi-step, PREFER the
+  `run_python` tool (a Python script is far more portable than chained shell). It already
+  runs in the session's project directory — do NOT pass work_dir or hardcode another folder.
+"""
+
+_POSIX_ENV = """
+[Environment]
+You are running on a POSIX system; the `bash` tool uses the system shell (bash-compatible).
+Use standard commands; separate with `&&` or `;` as appropriate.
+"""
+
+
+def _environment_block() -> str:
+    # 按宿主平台返回环境/Shell 提示段（sys.platform 在 daemon 所在机器求值）
+    return _WIN_ENV if sys.platform == "win32" else _POSIX_ENV
+
+
 def build_base_system_prompt(
     model_name: str,
     *,
@@ -152,6 +184,8 @@ def build_base_system_prompt(
         + _TASK_WORKFLOW
         # --- 3. 工具使用指南
         + _TOOL_GUIDE
+        # --- 3.5 平台环境提示（Windows=PowerShell 语法纠偏 / POSIX）
+        + _environment_block()
         # --- 4. 安全规则
         + _SAFETY_RULES
     )

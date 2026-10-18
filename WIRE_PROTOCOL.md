@@ -6248,10 +6248,11 @@ Events sent over the IPC socket (daemon → client).
 | `run_id` | `string` | yes |
 | `goal` | `string` | yes |
 | `ts` | `string` | yes |
+| `session_id` | `string` | no |
 
 ```json
 {
-  "description": "运行开始事件 - Agent 运行开始时发送\n\n【字段说明】\n- type: Literal[\"run.started\"] - 事件类型\n- run_id: str - 运行 ID\n- goal: str - 运行目标\n- ts: str - 时间戳（ISO 8601）\n\n【设计目的】\n通知客户端 Agent 运行已开始，提供运行 ID 和目标。",
+  "description": "运行开始事件 - Agent 运行开始时发送\n\n【字段说明】\n- type: Literal[\"run.started\"] - 事件类型\n- run_id: str - 运行 ID\n- goal: str - 运行目标\n- ts: str - 时间戳（ISO 8601）\n- session_id: str - 归属会话 ID（客户端据此可靠路由；技能执行等 goal≠原文 场景必需）\n\n【设计目的】\n通知客户端 Agent 运行已开始，提供运行 ID、目标与归属会话。session_id 是\nrun 键事件严格归属的锚点：客户端靠它把首批 llm.token 认到正确会话，不必再\n依赖\"goal 文本 == 用户原话\"的脆弱猜测。",
   "properties": {
     "type": {
       "const": "run.started",
@@ -6269,6 +6270,11 @@ Events sent over the IPC socket (daemon → client).
     },
     "ts": {
       "title": "Ts",
+      "type": "string"
+    },
+    "session_id": {
+      "default": "",
+      "title": "Session Id",
       "type": "string"
     }
   },

@@ -39,12 +39,15 @@ export interface Msg {
   toolInput?: string
   toolOutput?: string
   streaming?: boolean
-  // 审批卡/信任卡：notice 的增强形态，带按钮；answered 有值=已答复（按钮消失留回声）
-  card?: 'approval' | 'trust'
+  // 审批卡/信任卡/技能卡：notice 的增强形态，带按钮；answered 有值=已答复（按钮消失留回声）
+  card?: 'approval' | 'trust' | 'skill'
   toolUseId?: string
   paramPreview?: string
   cwd?: string
   answered?: string
+  // 技能确认卡专用：skillName=匹配到的技能；skillQuery=原始输入（确认后要原样重发）
+  skillName?: string
+  skillQuery?: string
 }
 
 export interface SessionMeta {
@@ -136,6 +139,23 @@ const runOwner = new Map<string, string>()
 // goal（daemon 原样透传的用户消息）与哪条待认领完全相同，就把该 run 判给那个会话。
 // 别的客户端/background run 的 goal 不可能撞上正在发送的原文——认领是证据式的。
 const pendingClaims = new Map<string, { text: string; ts: number }>()
+
+// 【学习要点】技能重发去重：确认技能卡后 respondSkill 重发原文，daemon 会广播
+// SessionMessageReceivedEvent——但这条消息的气泡早在初次 sendMessage 时已显示，
+// 且线程末尾隔着"已答复卡"（非 user），noteRemoteUserMessage 的"末条比对"去重
+// 不成立，会再补一个气泡。解法：重发前把 (sid,原文) 记进短命抑制表，回声到达即
+// 消费掉——证据式认领的同一套思路，用在"我自己刚发过"这个方向上。
+const echoSuppress = new Map<string, number>()
+function markEcho(sid: string, text: string): void {
+  echoSuppress.set(`${sid}|${text}`, Date.now())
+}
+// 命中则吞掉这条远程回声；顺带清 15 秒前的陈旧记录
+function consumeEcho(sid: string, text: string): boolean {
+  const k = `${sid}|${text}`
+  const hit = echoSuppress.has(k)
+  for (const [key, ts] of echoSuppress) if (Date.now() - ts > 15_000) echoSuppress.delete(key)
+  return hit
+}
 
 export const useStore = create<State>((set, get) => ({
   status: 'connecting',
@@ -462,6 +482,7 @@ const trustNotices = new Map<string, string>()
 
 // 处理"其它客户端（TUI/CLI）也发了消息"：与本地已发送去重后回显
 function noteRemoteUserMessage(sid: string, content: string): void {
+  if (consumeEcho(sid, content)) return
   const thread = useStore.getState().threads[sid] ?? []
   const last = thread[thread.length - 1]
   if (last && last.role === 'user' && last.text === content) return
@@ -487,8 +508,13 @@ export function handleBusEvent(ev: BusEvent): void {
     }
     case 'run.started': {
       let sid = runOwner.get(ev.run_id) // run 键事件严格归属：未知 run（如后台起标题）不许落到当前会话
+      if (!sid && ev.session_id) {
+        // 首选权威锚点：daemon 在 run.started 直接给出归属会话（技能执行等 goal≠原文 也能对号）
+        sid = ev.session_id
+        runOwner.set(ev.run_id, ev.session_id)
+      }
       if (!sid) {
-        // 证据式认领：goal 与某条在途 send_message 的原文完全一致才收编
+        // 兜底（旧 daemon 无 session_id）：goal 与某条在途 send_message 的原文完全一致才收编
         for (const [csid, c] of pendingClaims) {
           if (c.text.trim() === ev.goal.trim()) {
             sid = csid
@@ -799,7 +825,55 @@ export async function sendMessage(text: string): Promise<void> {
     runOwner.set(res.run_id, sid)
     st.setLastRun(sid, res.run_id)
   }
+  // 【学习要点】skill_match 不是错误而是"半成品协议"：daemon 自动匹配到技能时
+  // 不起 run、把决定权抛回客户端出确认卡（TUI 的 SkillConfirm 同款语义）。GUI
+  // 缺这个分支时用户气泡成了黑洞——消息明明送到了 daemon，界面却永远沉默
+  // （录视频当天实拍撞出）。此路径 daemon 未记录消息，确认后重发不会双份。
+  const sm = res.skill_match
+  if (sm && typeof sm.name === 'string') {
+    st.pushMsg(sid, {
+      id: nextId(),
+      role: 'notice',
+      card: 'skill',
+      text: typeof sm.description === 'string' ? sm.description : '检测到可能匹配的技能',
+      skillName: sm.name,
+      skillQuery: text,
+      paramPreview: `置信度 ${String(sm.score ?? '?')} · 你的输入「${text}」`
+    })
+  }
   st.markHistoryLoaded(sid) // 本窗口全程事件可见，无需再拉历史
+}
+
+// 技能确认卡的答复：use=true 带 skill_name 重发执行，false 带 skip_auto_skill 正常对话。
+// 不重画用户气泡——原文气泡发送时已显示，daemon 侧此路径没记账，重发内容即"真正开跑"那条。
+export async function respondSkill(sid: string, msgId: string, use: boolean): Promise<void> {
+  const st = useStore.getState()
+  const msg = (st.threads[sid] ?? []).find((m) => m.id === msgId)
+  if (!msg?.skillQuery) return
+  const text = msg.skillQuery
+  st.patchMsg(sid, msgId, {
+    answered: use ? `use:${msg.skillName}` : 'skip',
+    card: undefined,
+    text: use ? `▶ 用技能「${msg.skillName ?? ''}」执行` : '▶ 不用技能，按普通对话继续'
+  })
+  const claim = { text, ts: Date.now() }
+  pendingClaims.set(sid, claim)
+  markEcho(sid, text) // 重发会让 daemon 再广播一次原文——气泡已在，吞掉回声
+  try {
+    const res = await rpc<SessionSendMessageResult>('session.send_message', {
+      session_id: sid,
+      content: text,
+      ...(use ? { skill_name: msg.skillName } : { skip_auto_skill: true })
+    })
+    if (pendingClaims.get(sid) === claim) pendingClaims.delete(sid)
+    if (res.run_id) {
+      runOwner.set(res.run_id, sid)
+      st.setLastRun(sid, res.run_id)
+    }
+    st.markHistoryLoaded(sid)
+  } catch (err) {
+    st.pushMsg(sid, { id: nextId(), role: 'notice', text: `⚠ 技能执行发起失败：${String(err instanceof Error ? err.message : err)}` })
+  }
 }
 
 // ==================== 卡片与选择器的动作面（协议命令全部真实存在） ====================

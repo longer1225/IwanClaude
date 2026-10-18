@@ -121,3 +121,34 @@ async def test_dead_connection_removed_after_failure() -> None:
     writer.write.reset_mock()  # type: ignore[attr-defined]
     await broadcaster.handle(event)  # no subscribers remain
     writer.write.assert_not_called()  # type: ignore[attr-defined]
+
+
+# 功能：同一连接重复 subscribe 同一 scope 必须幂等——事件只投一次（防 GUI 重连刷屏回归钉）
+# 设计：模拟长连接的客户端在每次 connected 时都重发订阅（真实事故：daemon 发 2 次
+#       trust，界面刷 4+ 张卡），三连 subscribe 后单次 handle 断言 write.call_count==1；
+#       旧版无条件 append 会得到 3，这条测试就是它存在的意义
+async def test_resubscribe_same_writer_scope_is_idempotent() -> None:
+    broadcaster = IpcEventBroadcaster()
+    writer = _make_writer()
+    broadcaster.subscribe(writer, topics=["run.*"], scope="global")
+    broadcaster.subscribe(writer, topics=["run.*"], scope="global")
+    broadcaster.subscribe(writer, topics=["trust.*", "run.*"], scope="global")
+
+    await broadcaster.handle(_run_started())
+
+    writer.write.assert_called_once()  # type: ignore[attr-defined]
+
+
+# 功能：幂等收敛只影响同 scope——同连接的 global 订阅重发不得误杀 run: 订阅
+# 设计：先挂 run:abc 再重发 global 两次，发布 run:abc 事件断言仍收到一次，
+#       钉住"替换仅限 (writer,scope) 对"的边界，防把并存语义改成全清
+async def test_resubscribe_global_preserves_run_scope() -> None:
+    broadcaster = IpcEventBroadcaster()
+    writer = _make_writer()
+    broadcaster.subscribe(writer, topics=["run.*"], scope="run:abc")
+    broadcaster.subscribe(writer, topics=["run.*"], scope="global")
+    broadcaster.subscribe(writer, topics=["run.*"], scope="global")
+
+    await broadcaster.handle(_run_started("abc"))
+
+    assert writer.write.call_count == 2  # type: ignore[attr-defined]  # global 1 份 + run:abc 1 份

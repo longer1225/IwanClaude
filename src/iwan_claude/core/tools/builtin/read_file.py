@@ -110,15 +110,14 @@ class ReadFileTool(BaseTool):
         # 1. 验证并提取参数
         path_str = ReadFileParams.model_validate(params).path
 
-        # 2. 验证路径是否在沙箱允许范围内
-        validate_path(path_str, "read")
-
-        # 3. 检查路径遍历攻击
+        # 2. 检查路径遍历攻击
         if ".." in Path(path_str).parts:
             raise PermissionError(f"path traversal not allowed: {path_str}")
 
+        # 3. 验证并取沙箱根解析后的绝对路径（相对路径若按进程 cwd 解析会读错目录）
+        path = validate_path(path_str, "read")
+
         # 4. 读取文件内容
-        path = Path(path_str)
         raw = path.read_bytes()  # 文件不存在时抛出 FileNotFoundError
 
         # 5. 处理大小限制（阈值从全局配置读取）

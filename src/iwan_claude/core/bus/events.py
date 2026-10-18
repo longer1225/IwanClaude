@@ -61,14 +61,18 @@ class RunStartedEvent(BaseModel):
     - run_id: str - 运行 ID
     - goal: str - 运行目标
     - ts: str - 时间戳（ISO 8601）
+    - session_id: str - 归属会话 ID（客户端据此可靠路由；技能执行等 goal≠原文 场景必需）
 
     【设计目的】
-    通知客户端 Agent 运行已开始，提供运行 ID 和目标。
+    通知客户端 Agent 运行已开始，提供运行 ID、目标与归属会话。session_id 是
+    run 键事件严格归属的锚点：客户端靠它把首批 llm.token 认到正确会话，不必再
+    依赖"goal 文本 == 用户原话"的脆弱猜测。
     """
     type: Literal["run.started"] = "run.started"
     run_id: str
     goal: str
     ts: str
+    session_id: str = ""
 
 
 class RunFinishedEvent(BaseModel):

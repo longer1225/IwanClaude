@@ -1065,17 +1065,24 @@ class AgentRunner:
         # 加载全局上下文（用户目录下的 .iwan/context.md）
         global_ctx = load_context_file(Path("~/.iwan/context.md").expanduser())
         
-        # 加载项目上下文（当前目录下的 .iwan/context.md）
-        project_ctx = load_context_file(Path(".iwan/context.md"))
-        
-        # 加载 CLAUDE.md 配置并渲染为 prompt
-        claude_md_config = load_claude_md()
+        # 项目根 = 会话打开的目录（session.cwd），无会话时退回进程 cwd。
+        # 下面三样项目级上下文都必须按它加载——否则多会话场景会把 agent 自身源码目录
+        # （daemon 进程 cwd）误当项目根，模型的世界观就错了（曾致写文件写到 iwanclaude）。
+        proj_root = (
+            Path(session.cwd) if (session is not None and session.cwd) else Path.cwd()
+        )
+
+        # 加载项目上下文（项目根下的 .iwan/context.md）
+        project_ctx = load_context_file(proj_root / ".iwan" / "context.md")
+
+        # 加载 CLAUDE.md 配置并渲染为 prompt（按项目根，不是进程目录）
+        claude_md_config = load_claude_md(proj_root)
         claude_md_prompt = render_claude_md_prompt(claude_md_config)
 
         # 加载 AGENTS.md（项目级用户自定义 agent 指导，可选）
         # 文件不存在时为空字符串，不影响现有功能
         agents_md_context = ""
-        agents_md_path = Path("AGENTS.md")
+        agents_md_path = proj_root / "AGENTS.md"
         if agents_md_path.exists():
             try:
                 agents_md_context = agents_md_path.read_text(encoding="utf-8")
@@ -1116,6 +1123,7 @@ class AgentRunner:
             memory_context=memory_context,   # 跨会话记忆
             recovery_context=recovery_context, # 崩溃恢复上下文（从快照注入）
             agents_md_context=agents_md_context, # AGENTS.md 项目级指导
+            working_dir=str(proj_root),          # 会话真实工作目录（告诉模型项目根）
         )
         
         # 记录预填充消息的数量，用于后续保存时跳过已存在的消息
@@ -1134,8 +1142,12 @@ class AgentRunner:
             snapshot_writer = SnapshotWriter(run_path / "snapshot.json", goal=goal)
             bus.subscribe(snapshot_writer.handle)
 
-            # 发布运行开始事件
-            await bus.publish(RunStartedEvent(run_id=run_id, goal=goal, ts=_now()))
+            # 发布运行开始事件（带归属会话：客户端按 session_id 可靠路由 token，
+            # 不再依赖 goal==原文 的猜测——技能执行的 goal 是模板展开文本，必然不等）
+            await bus.publish(RunStartedEvent(
+                run_id=run_id, goal=goal, ts=_now(),
+                session_id=session.id if session is not None else "",
+            ))
 
             # 标记是否被取消
             cancelled = False

@@ -56,7 +56,13 @@ def _validate_rel_root(root_str: str) -> Path:
     """
     if ".." in Path(root_str).parts:
         raise PermissionError(f"path traversal not allowed in root: {root_str}")
-    return Path(root_str)
+    # 相对根按沙箱根（会话目录）解析，不用进程 cwd——默认 "." 的搜索否则会跑错项目
+    root_path = Path(root_str)
+    if not root_path.is_absolute():
+        sb = get_sandbox()
+        if sb.enabled:
+            root_path = sb.root / root_path
+    return root_path
 
 
 def _simplify_pattern_basename(pat: str) -> str | None:
@@ -1020,7 +1026,8 @@ class GlobTool(BaseTool):
 
         # 3. 执行 glob 查找
         try:
-            root = Path(p.path)
+            # 复用上方按沙箱根解析的绝对 root_path，别用 Path(p.path)（相对会按进程 cwd 解析）
+            root = root_path
             # 使用 pathlib.Path.glob 原生支持 ** 递归匹配
             matches: list[Path] = []
             for cur in root.glob(p.pattern):

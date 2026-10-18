@@ -121,6 +121,17 @@ class IpcEventBroadcaster:
             >>> sub_id = broadcaster.subscribe(writer, ["run.*"], scope="run:abc123")
         """
         sub_id = f"sub-{uuid.uuid4().hex[:8]}"
+        # 【学习要点】订阅必须对 (writer, scope) 幂等：客户端↔daemon 是一条长连接，
+        # GUI 每次 status=connected（首挂、getStatus 补查、断线重连、dev 严格模式重挂）
+        # 都会重发一遍 event.subscribe。若像早先那样无条件 append，同一 writer 会堆出
+        # N 份订阅，handle() 便把每个事件按 N 份重复下发——实测 daemon 只发 2 次
+        # trust.requested、GUI 却刷出 4+ 张卡、消息"回很多遍"皆源于此。旧订阅只有
+        # 写失败时才被清理，重连复用同一连接永不清，故必须在订阅入口就地收敛：
+        # 同连接同 scope 视为"更新我的订阅"，先撤旧的再记新的（global 与 run:x 可并存）。
+        self._subscriptions = [
+            s for s in self._subscriptions
+            if not (s.writer is writer and s.scope == scope)
+        ]
         sub = _Subscription(sub_id=sub_id, writer=writer, topics=topics, scope=scope)
         self._subscriptions.append(sub)
         return sub_id

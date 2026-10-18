@@ -57,8 +57,8 @@ def _validate_rel_path(path_str: str, operation: str = "access") -> Path:
     """
     if ".." in Path(path_str).parts:
         raise PermissionError(f"path traversal not allowed: {path_str}")
-    validate_path(path_str, operation)
-    return Path(path_str)
+    # 用沙箱根解析后的绝对路径（见 editor._validate_rel_path 同注释）
+    return validate_path(path_str, operation)
 
 
 def _now_iso() -> str:

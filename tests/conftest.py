@@ -29,6 +29,10 @@ async def running_daemon(free_port: int) -> AsyncGenerator[subprocess.Popen[byte
     env["IWAN_LOG_FILE"] = ""
     # 测试 daemon 恒为免鉴权：用户 shell 里残留的 IWAN_TOKEN 不得泄进测试实例
     env["IWAN_TOKEN"] = ""
+    # 同理隔离 GitHub 令牌：测试 daemon 的 cwd 是仓库根，会自动加载 .env 里的真实
+    # IWAN_GITHUB_TOKEN——一旦带上它，连"非 git/匿名"类负向用例都可能因真拉到 PR 而翻红。
+    # 配置层 IWAN_GITHUB_TOKEN 用 `is not None` 判定，故显式设空即可盖过 .env 的值。
+    env["IWAN_GITHUB_TOKEN"] = ""
     env["IWAN_LOG_LEVEL"] = "WARNING"
     env["IWAN_SESSIONS_DIR"] = str(tmp_dir / "sessions")
     env["IWAN_POLICY_FILE"] = str(tmp_dir / "policy.toml")

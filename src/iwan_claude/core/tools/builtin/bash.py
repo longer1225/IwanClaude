@@ -190,7 +190,11 @@ class BashTool(BaseTool):
     name = "bash"
     description = (
         "Execute a shell command and return its output (stdout + stderr combined). "
-        "On Windows this uses PowerShell, on macOS/Linux the system shell. "
+        "On Windows this runs **PowerShell** (commonly Windows PowerShell 5.1, which does NOT "
+        "support `&&`, `||`, or bash-only syntax): separate statements with `;`, use cmdlets "
+        "(Get-ChildItem not `ls -la`, Select-String not `grep`), and prefer the run_python tool "
+        "for anything multi-step. On macOS/Linux it uses the system shell. "
+        "The command runs inside the current session's project directory (do not cd elsewhere). "
         "Non-interactive only — commands requiring user input will hang and time out. "
         "Prefer short, focused commands. Output is truncated at 64 KB."
     )
@@ -333,7 +337,16 @@ class BashTool(BaseTool):
                 # -NoProfile：不加载用户配置文件，避免环境变量污染
                 # -NonInteractive：非交互模式，防止命令等待用户输入
                 # -Command：指定要执行的命令（需要特殊转义）
-                ps_command = _quote_powershell(command)
+                # 【学习要点】命令前缀强制控制台输出编码为 UTF-8：中文 Windows 上
+                # powershell.exe 默认用系统 ANSI 码页(GBK)输出，而本工具按 UTF-8 解码
+                # 子进程 stdout → 中文（文件名/输出）全乱码。先把 [Console]::OutputEncoding
+                # 与 $OutputEncoding 设成 UTF-8，PS 就以 UTF-8 写管道，解码正确。POSIX 分支
+                # 无此问题，故只在 Windows 分支加。
+                _utf8_preamble = (
+                    "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; "
+                    "$OutputEncoding=[System.Text.Encoding]::UTF8; "
+                )
+                ps_command = _utf8_preamble + _quote_powershell(command)
                 proc = await asyncio.create_subprocess_exec(
                     "powershell.exe",
                     "-NoProfile",

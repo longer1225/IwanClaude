@@ -17,9 +17,18 @@ from iwan_claude.core.tools.builtin.editor import (
 
 
 @pytest.fixture(autouse=True)
-def reset_sandbox() -> None:
+def reset_sandbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import iwan_claude.core.sandbox as sb_module
     sb_module._sandbox_manager = None
+    # get_sandbox 优先读 _active_sandbox 上下文变量（async 测试间会泄漏）——清成 None，
+    # 才能回落到下面 init_sandbox 设的默认根。
+    sb_module._active_sandbox.set(None)
+    # 模拟生产：会话沙箱根 = 项目目录。工具把相对路径按沙箱根解析（见 editor._validate_rel_path），
+    # 故测试必须把根设到 tmp 并与 chdir 一致，否则相对 "x.txt" 会落到别处。
+    from iwan_claude.core.config import SandboxConfig
+    from iwan_claude.core.sandbox import init_sandbox
+    monkeypatch.chdir(tmp_path)
+    init_sandbox(SandboxConfig(enabled=True, root=str(tmp_path)))
 
 
 # ── Helpers: line preservation roundtrip ──────────────────────────────────────

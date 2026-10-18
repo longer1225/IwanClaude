@@ -841,6 +841,7 @@ export type BusEvent =
     run_id: string;
     goal: string;
     ts: string;
+    session_id?: string;
   }
   | {
     type: 'run.finished';

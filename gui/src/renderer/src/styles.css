@@ -439,7 +439,27 @@ input { font: inherit; color: inherit; }
   gap: 12px;
 }
 
-.msg { line-height: 1.65; }
+.msg { line-height: 1.65; position: relative; }
+/* 悬停显现的复制钮：绝对定位脱离消息 flex 流，不挤动正文；hover 才浮现避免常驻噪音 */
+.msg-copy {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--card-bg);
+  color: var(--text-secondary);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+.msg:hover .msg-copy { opacity: 0.9; }
+.msg-copy:hover { color: var(--text-primary); border-color: var(--text-secondary); }
 .msg-user { display: flex; justify-content: flex-end; }
 .msg-user .bubble {
   background: var(--card-bg);
@@ -522,6 +542,8 @@ input { font: inherit; color: inherit; }
   box-shadow: 0 2px 10px rgb(31 31 31 / 5%);
 }
 .card-trust { border-left-color: var(--accent); }
+.card-skill { border-left-color: var(--accent-skill, #7c5cff); }
+.card-desc { font-size: 13px; color: var(--text-secondary); margin-bottom: 6px; }
 .card-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
 .card-title { font-weight: 600; font-size: 13.5px; }
 .card-preview {

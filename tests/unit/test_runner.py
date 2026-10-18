@@ -309,3 +309,40 @@ async def test_session_registers_note_save_tool(tmp_path: Path) -> None:
     await runner.run_and_capture("remember", run_id="run-1", session=session, store=store)
 
     assert "Use Python 3.12" in store.read_notes("sess-1")
+
+
+# 功能：验证带 session 运行时 run.started 事件携带该 session_id（客户端可靠路由 token 的锚点）
+# 设计：run_and_capture 传真实 Session，用 extra_handlers 收集事件断言 started.session_id=="sess-b1"；
+#       这是修"技能执行回显空白"的根因测试——技能 run 的 goal 是模板展开文本≠原文，
+#       客户端唯一能对号入座的就是这个 session_id，丢了它 token 会被严格归属整条丢弃
+async def test_run_started_event_carries_session_id(tmp_path: Path) -> None:
+    from iwan_claude.core.session.model import Session
+    from iwan_claude.core.session.store import SessionStore
+
+    store = SessionStore(tmp_path / "sessions")
+    session = Session(
+        id="sess-b1", mode="chat", status="active", title="", created_at="t", updated_at="t"
+    )
+    store.write_meta(session)
+    collected: list[BaseModel] = []
+
+    async def _collect(e: BaseModel) -> None:
+        collected.append(e)
+
+    runner = AgentRunner(
+        _config(), provider=_EndTurnProvider(), extra_handlers=[_collect],  # type: ignore[arg-type]
+        runs_dir=tmp_path / "runs",
+    )
+    await runner.run_and_capture("hi", run_id="run-b1", session=session, store=store)
+
+    started = next(e for e in collected if e.type == "run.started")  # type: ignore[attr-defined]
+    assert started.session_id == "sess-b1"  # type: ignore[attr-defined]
+
+
+# 功能：验证无 session 运行时 run.started 的 session_id 为空串（向后兼容，不崩不报错）
+# 设计：复用 _run 助手（走 runner.run 不传 session），断言 started.session_id==""；
+#       钉住默认值语义——旧客户端/无会话场景字段留空，客户端据此回退到 goal 文本认领
+async def test_run_started_session_id_empty_without_session(tmp_path: Path) -> None:
+    events = await _run(goal="no session here", tmp_path=tmp_path)
+    started = next(e for e in events if e.type == "run.started")  # type: ignore[attr-defined]
+    assert started.session_id == ""  # type: ignore[attr-defined]

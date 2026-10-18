@@ -78,6 +78,9 @@ class ExecutionContext:
     recovery_context: str = ""
     # AGENTS.md 项目级指导文件内容（用户自定义 agent 行为规则，注入 system prompt 末尾）
     agents_md_context: str = ""
+    # 本次 run 的真实工作目录（= 会话打开的项目根）。显式告诉模型，避免它靠
+    # CLAUDE.md 或进程 cwd 猜项目根——多会话/无 CLAUDE.md 时会猜错。
+    working_dir: str = ""
 
     # 初始化消息历史，优先使用 session 完整回放内容
     def __post_init__(self) -> None:
@@ -117,6 +120,21 @@ class ExecutionContext:
         """
         # 确定基础 prompt（优先使用 override）
         parts = [self.system_prompt_override if self.system_prompt_override else base]
+
+        # 【学习要点】紧跟 base 立刻声明真实工作目录：这是"哪个项目"的唯一权威锚点。
+        # 缺了它，模型只能从 CLAUDE.md 内容或工具报错里反推项目根，一旦 CLAUDE.md 是从
+        # daemon 进程目录（agent 自身源码目录）加载的，就会把"打开 A 文件夹"误当成在
+        # iwanclaude 仓库里干活，把文件写到错误的地方。放在最前，优先级压过一切上下文。
+        if self.working_dir.strip():
+            wd = self.working_dir.strip()
+            parts.append(
+                "\n\n[Working Directory]\n"
+                f"The project root you are working in is: {wd}\n"
+                "All relative file paths and shell/python commands run from HERE. Create, "
+                "read, and edit files under this directory unless the user names another path. "
+                "This is the folder the user opened — it is NOT the directory containing the "
+                "assistant's own source code. Never assume a different project root."
+            )
         
         # 追加全局上下文
         if self.global_context.strip():

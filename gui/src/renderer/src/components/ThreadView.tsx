@@ -11,7 +11,7 @@ import { useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { Msg } from '../store'
-import { respondPermission, respondTrust } from '../store'
+import { respondPermission, respondSkill, respondTrust } from '../store'
 import { Icon } from './Icon'
 
 // 审批卡：daemon permission.requested 生成，四键对应 permission.respond 的合法 decision
@@ -68,14 +68,70 @@ function TrustCard({ m, sid }: { m: Msg; sid: string }) {
   )
 }
 
+// 技能确认卡：daemon 自动匹配到技能但不自启，把"要不要用"交给用户（对齐 TUI）
+function SkillCard({ m, sid }: { m: Msg; sid: string }) {
+  const [busy, setBusy] = useState(false)
+  const act = (use: boolean): void => {
+    if (busy) return
+    setBusy(true)
+    void respondSkill(sid, m.id, use).finally(() => setBusy(false))
+  }
+  return (
+    <div className="msg card card-skill">
+      <div className="card-head">
+        <Icon name="sparkle" size={14} />
+        <span className="card-title">匹配到技能「{m.skillName}」，用它执行吗？</span>
+      </div>
+      <div className="card-desc">{m.text}</div>
+      {m.paramPreview && <pre className="card-preview">{m.paramPreview}</pre>}
+      <div className="card-actions">
+        <button className="card-btn primary" disabled={busy} onClick={() => act(true)}>用技能执行</button>
+        <button className="card-btn" disabled={busy} onClick={() => act(false)}>按普通对话继续</button>
+      </div>
+      <div className="card-hint">技能是对某类请求的预设流程；不确定就选普通对话，agent 会照常处理。</div>
+    </div>
+  )
+}
+
+// 单条消息的悬停复制钮：navigator.clipboard 写文本，成功短暂切✓回执。
+// 【学习要点】复制走 async clipboard API，需用户手势触发（点击）才允许写——正是
+// 放在按钮 onClick 里而非渲染期自动调用；无剪贴板权限的极端环境降级 execCommand。
+function CopyBtn({ text }: { text: string }) {
+  const [done, setDone] = useState(false)
+  if (!text) return null
+  const copy = async (): Promise<void> => {
+    try {
+      await navigator.clipboard.writeText(text)
+    } catch {
+      const ta = document.createElement('textarea')
+      ta.value = text
+      ta.style.position = 'fixed'
+      ta.style.opacity = '0'
+      document.body.appendChild(ta)
+      ta.select()
+      try { document.execCommand('copy') } catch { /* 尽力而为 */ }
+      document.body.removeChild(ta)
+    }
+    setDone(true)
+    setTimeout(() => setDone(false), 1200)
+  }
+  return (
+    <button className="msg-copy" title={done ? '已复制' : '复制文本'} onClick={() => void copy()}>
+      <Icon name={done ? 'check' : 'copy'} size={13} />
+    </button>
+  )
+}
+
 // 单条消息按角色分派渲染形态
 function MsgRow({ m, sid }: { m: Msg; sid: string }) {
   if (m.card === 'approval') return <ApprovalCard m={m} sid={sid} />
   if (m.card === 'trust') return <TrustCard m={m} sid={sid} />
+  if (m.card === 'skill') return <SkillCard m={m} sid={sid} />
   if (m.role === 'user') {
     return (
       <div className="msg msg-user">
         <div className="bubble">{m.text}</div>
+        <CopyBtn text={m.text} />
       </div>
     )
   }
@@ -87,6 +143,7 @@ function MsgRow({ m, sid }: { m: Msg; sid: string }) {
         <span className="tool-icon">{icon}</span>
         <span className="tool-name">{m.toolName}</span>
         {m.text && <span className="tool-meta">{m.text}</span>}
+        <CopyBtn text={(m.toolOutput || m.toolInput || m.text) ?? ''} />
         {hasDetail && (
           <details className="tool-detail">
             <summary>详情</summary>
@@ -106,6 +163,7 @@ function MsgRow({ m, sid }: { m: Msg; sid: string }) {
         <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.text}</ReactMarkdown>
         {m.streaming && <span className="cursor">▍</span>}
       </div>
+      {!m.streaming && <CopyBtn text={m.text} />}
     </div>
   )
 }

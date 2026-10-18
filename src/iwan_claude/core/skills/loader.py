@@ -581,26 +581,30 @@ class SkillLoader:
         # 初始化最佳匹配
         best_skill: Skill | None = None
         best_score = 0.0
-        
+        best_kw_len = 0  # 命中技能里最长匹配关键词的字符数（供"命令性门控"判定关键词占比）
+
         # 遍历所有可用 Skill
         for skill in self.list_all_skills():
             # 跳过手动触发的 Skill
             if skill.invocation == InvocationType.MANUAL:
                 continue
-            
+
             # 计算匹配度分数
             score = 0.0
-            
+            kw_hit_len = 0  # 本技能命中的最长关键词长度
+
             # 匹配 keywords
             for keyword in skill.keywords:
                 kw_lower = keyword.lower()
                 # 完整匹配（在字符串中）
                 if kw_lower in user_lower:
                     score += 2.0
+                    kw_hit_len = max(kw_hit_len, len(kw_lower))
                 # 词匹配（在词集合中）
                 if kw_lower in user_tokens:
                     score += 1.0
-            
+                    kw_hit_len = max(kw_hit_len, len(kw_lower))
+
             # 匹配 description
             if skill.description:
                 # 将描述分割为词集合
@@ -608,17 +612,32 @@ class SkillLoader:
                 # 计算词重叠数
                 overlap = user_tokens & desc_tokens
                 score += len(overlap) * 0.5
-            
+
             # 更新最佳匹配
             if score > best_score:
                 best_score = score
                 best_skill = skill
-        
+                best_kw_len = kw_hit_len
+
         # 判断是否超过阈值
         threshold = 2.0
-        if best_score >= threshold:
-            return best_skill, best_score
-        return None, 0.0
+        if best_skill is None or best_score < threshold:
+            return None, 0.0
+
+        # 【学习要点】命令性门控：自动技能匹配只在输入"像一条针对该技能的短命令"、
+        # 或命中了足够"专有"的多字关键词时才触发。内置技能关键词里有总结/文档/测试
+        # 这类高频通用词（多为 ≤2 字），作子串会嵌进几乎任何工作句子（"读一下项目
+        # 总结架构"→summarize、"实现登录并做好测试"→tests），把明确要 agent 干活的
+        # 请求劫持成技能。判据：短输入直接放行；长输入仅当 [关键词占比≥60%] 或
+        # [关键词是≥4字专有短语（代码审查/单元测试/安全扫描）] 才放行，否则交回
+        # agent——漏报只是少个建议（agent 照样能做，且技能仍可斜杠显式调用），
+        # 误报才是打扰，所以误差方向刻意偏向抑制。
+        stripped = user_input.strip()
+        dominant = best_kw_len >= max(1, len(stripped)) * 0.6
+        distinctive = best_kw_len >= 4
+        if len(stripped) > 12 and not (dominant or distinctive):
+            return None, 0.0
+        return best_skill, best_score
 
     async def install_from_url(self, url: str, global_install: bool = False) -> tuple[str, bool]:
         """

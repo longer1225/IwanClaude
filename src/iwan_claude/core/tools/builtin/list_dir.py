@@ -129,15 +129,12 @@ class ListDirTool(BaseTool):
         path_str = p.path
         max_depth = p.max_depth
 
-        # 2. 验证路径是否在沙箱允许范围内
-        validate_path(path_str, "read")
-
-        # 3. 检查路径遍历攻击
+        # 2. 检查路径遍历攻击
         if ".." in Path(path_str).parts:
             raise PermissionError(f"path traversal not allowed: {path_str}")
 
-        # 4. 验证路径是否存在且为目录
-        root = Path(path_str)
+        # 3/4. 验证并取沙箱根解析后的绝对目录（相对 path 含默认 "." 若按进程 cwd 解析会列错目录）
+        root = validate_path(path_str, "read")
         if not root.exists():
             raise FileNotFoundError(f"no such directory: {path_str}")
         if not root.is_dir():

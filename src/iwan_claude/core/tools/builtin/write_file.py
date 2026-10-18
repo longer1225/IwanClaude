@@ -71,8 +71,9 @@ def _validate_rel_path(path_str: str, operation: str = "write") -> Path:
     """
     if ".." in Path(path_str).parts:
         raise PermissionError(f"path traversal not allowed: {path_str}")
-    validate_path(path_str, operation)
-    return Path(path_str)
+    # 用沙箱根解析后的绝对路径（见 editor._validate_rel_path 同注释）：相对路径留到
+    # open 时按进程 cwd 解析会写到错误目录，与 validate 的沙箱根不一致。
+    return validate_path(path_str, operation)
 
 
 @dataclass

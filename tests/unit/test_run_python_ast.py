@@ -187,6 +187,23 @@ async def test_safe_code_executes(tmp_path: Path) -> None:
     assert "42" in result.content
 
 
+# 功能：验证不传 work_dir 时脚本的工作目录 = 会话沙箱根，而非 daemon 进程目录
+# 设计：绑定沙箱到一个独立 proj 目录，跑只读 os.getcwd() 断言输出落在 proj；修复前
+#       proc_cwd 缺省为 None 会继承 daemon 进程 cwd（通常是 iwanclaude 源码目录），
+#       正是用户"打开 A 文件夹、python 脚本却读到 iwanclaude"那起事故的回归钉
+async def test_default_cwd_is_sandbox_root(tmp_path: Path) -> None:
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    init_sandbox(SandboxConfig(enabled=True, root=str(proj)))
+    result = await RunPythonTool().invoke({
+        "code": "import os; print(os.getcwd())",
+        "use_venv": False,
+        "timeout": 30,
+    })
+    assert result.is_error is not True
+    assert str(proj).lower().replace("\\", "/") in str(result.content).lower().replace("\\", "/")
+
+
 # 功能：验证 work_dir 越出沙箱或含路径遍历时被拒绝
 # 设计：work_dir 与写路径同级敏感（决定相对路径解析基准），必须走同一硬校验；
 #       '..' 遍历单独有专属错误信息，便于模型自我纠正

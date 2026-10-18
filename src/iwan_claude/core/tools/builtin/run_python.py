@@ -60,7 +60,7 @@ from typing import ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from iwan_claude.core.sandbox import scrub_env, validate_path
+from iwan_claude.core.sandbox import get_sandbox, scrub_env, validate_path
 from iwan_claude.core.tools.base import BaseTool, ToolResult
 
 # 输出最大字节数兜底值：128 KB，防止大输出导致内存问题
@@ -506,7 +506,16 @@ class RunPythonTool(BaseTool):
             
             try:
                 # 构建子进程工作目录
-                proc_cwd = str(work_path.resolve()) if work_path is not None else None
+                # 【学习要点】work_dir 缺省时绝不能留 None——None 会让子进程继承 daemon
+                # 进程的 cwd（通常是项目源码目录），导致脚本读到"错误的项目"（用户打开
+                # A 文件夹、脚本却在 iwanclaude 源码目录跑）。与 bash 工具对齐：缺省落
+                # 到当前会话沙箱根，脚本的相对路径/CWD 才等于会话项目目录。
+                proc_cwd: str | None
+                if work_path is not None:
+                    proc_cwd = str(work_path.resolve())
+                else:
+                    _sb = get_sandbox()
+                    proc_cwd = str(_sb.root) if _sb.enabled else None
                 # 构建命令行参数
                 argv = [interpreter, str(script_path), *list(p.args)]
                 # 配置 stderr 处理方式
@@ -643,7 +652,16 @@ def _child_env(env: dict[str, str], venv_path: Path | None) -> dict[str, str]:
         配置好的环境变量字典
     """
     if venv_path is None:
+        # 无 venv 也强制 UTF-8（见下）——早返回前设好，两条路径统一
+        env["PYTHONUTF8"] = "1"
+        env["PYTHONIOENCODING"] = "utf-8"
         return env
+    # 【学习要点】强制子进程 Python 以 UTF-8 读写 stdin/stdout/stderr：中文 Windows 上
+    # 输出被重定向到 PIPE 时，CPython 默认按系统 ANSI 代码页（GBK/cp936）编码，而本工具
+    # 统一按 UTF-8 解码（errors=replace）→ 中文全变乱码，agent 看到"刚才输出乱码"就是它。
+    # PYTHONUTF8=1 开 UTF-8 模式，PYTHONIOENCODING=utf-8 兜底旧解释器；跨平台无害。
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
     # 设置 VIRTUAL_ENV 环境变量
     env["VIRTUAL_ENV"] = str(venv_path.resolve())
     # 将虚拟环境的可执行目录添加到 PATH 最前面

@@ -79,8 +79,11 @@ def _validate_rel_path(path_str: str, operation: str = "access") -> Path:
     """
     if ".." in Path(path_str).parts:
         raise PermissionError(f"path traversal not allowed: {path_str}")
-    validate_path(path_str, operation)
-    return Path(path_str)
+    # 【学习要点】用 validate_path 返回的【沙箱根解析后的绝对路径】，绝不返回
+    # Path(path_str)——相对路径留到 open 时按进程 cwd 解析，与 validate 用的沙箱根
+    # （会话目录）不一致，导致"校验放行 A、实际读写 B"（用户表现为写文件落到
+    # iwanclaude 而非打开的课件目录）。绝对路径让校验与 I/O 基准统一。
+    return validate_path(path_str, operation)
 
 
 def _backup_timestamp() -> str:
@@ -121,8 +124,19 @@ def _backup_destination(cwd: Path, rel_source: Path) -> Path:
     src/main.py → .iwan/backups/20240115T103045123456Z__src_main.py.bak
     """
     ts = _backup_timestamp()
+    # 【学习要点】rel_source 现在可能是绝对路径（工具按沙箱根解析后传入）。绝对路径的
+    # parts 含盘符 "C:\"，直接 "_".join 会把反斜杠塞进文件名 → Windows WinError 123。
+    # 绝对且位于 cwd 下则先 relative_to(cwd) 取回干净的相对段；不在 cwd 下退用文件名。
+    # 相对路径（旧调用）保持原样展开 parts，行为不变。
+    if rel_source.is_absolute():
+        try:
+            name_src: Path = rel_source.relative_to(cwd)
+        except ValueError:
+            name_src = Path(rel_source.name)
+    else:
+        name_src = rel_source
     # 将路径部件用下划线连接，确保备份文件在同一目录下
-    safe = "_".join(rel_source.parts) if rel_source.parts else "root"
+    safe = "_".join(name_src.parts) if name_src.parts else "root"
     backup_dir = cwd / _BACKUP_SUBDIR
     return backup_dir / f"{ts}__{safe}.bak"
 
