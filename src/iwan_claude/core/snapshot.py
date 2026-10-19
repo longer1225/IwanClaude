@@ -37,8 +37,8 @@ from typing import Any
 
 from iwan_claude.core.bus.events import (
     StepFinishedEvent,
-    ToolCallFinishedEvent,
     ToolCallFailedEvent,
+    ToolCallFinishedEvent,
     ToolCallStartedEvent,
 )
 
@@ -275,7 +275,9 @@ def read_snapshot(snapshot_path: Path) -> dict[str, Any] | None:
     if not snapshot_path.exists():
         return None
     try:
-        return json.loads(snapshot_path.read_text(encoding="utf-8"))
+        # json.loads 返回 Any；显式断言成"字典或 None"，非字典（数组/标量）按损坏处理
+        data: Any = json.loads(snapshot_path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else None
     except (json.JSONDecodeError, OSError):
         logger.warning("snapshot read failed: %s", snapshot_path, exc_info=True)
         return None

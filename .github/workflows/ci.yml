@@ -2,8 +2,8 @@
 #
 # 说明（为什么是现在这套）：
 # - 项目是 Windows 优先，先只在 windows-latest 上卡；Linux 差异等有需要再加矩阵。
-# - ruff / mypy 的基线尚未清（ruff ~400 条历史风格问题、mypy ~40 条），现在 gate 等于
-#   红着进 CI；因此它们作为 advisory 任务（continue-on-error），清完再摘掉该开关。
+# - ruff / mypy 基线已清零（ruff 0 条、mypy strict 0 错误），作为守门任务；
+#   存量里的 87 处 noqa 是 ratchet：新代码再犯会直接失败。
 # - 协议文档与 TS 类型是"生成物"，必须与模型同步，否则客户端会按旧协议解析——这两步 gate。
 # - GUI 的 e2e（gui/scripts/e2e-parallel.mjs）需要真实桌面窗口 + CDP，CI 里没有桌面，
 #   只在本地跑；CI 只做 typecheck + build（构建能过 = 主进程/渲染层/预加载都能编译）。
@@ -35,17 +35,16 @@ jobs:
       - name: 单元测试
         run: uv run pytest tests/unit -q
 
-  python-advisory:
-    name: Python 静态检查（advisory，暂不 gate）
+  python-lint:
+    name: Python 静态检查（ruff + mypy，已清零，守门）
     runs-on: windows-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
       - run: uv sync --frozen
       - name: ruff
         run: uv run ruff check src tests
-      - name: mypy
+      - name: mypy（strict）
         run: uv run mypy src
 
   gui:

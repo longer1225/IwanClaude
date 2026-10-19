@@ -304,7 +304,7 @@ class LangGraphPipelineLoop:
                 "The executor agent will follow your plan to complete the task."
             )
 
-        messages = [{"role": "user", "content": plan_prompt}]
+        messages: list[dict[str, object]] = [{"role": "user", "content": plan_prompt}]
 
         try:
             response = await self._provider.chat(
@@ -455,7 +455,7 @@ class LangGraphPipelineLoop:
             "Respond with either 'APPROVED: <summary>' or 'NEEDS_REWORK: <issues>'."
         )
 
-        messages = [{"role": "user", "content": eval_prompt}]
+        messages: list[dict[str, object]] = [{"role": "user", "content": eval_prompt}]
 
         try:
             response = await self._provider.chat(

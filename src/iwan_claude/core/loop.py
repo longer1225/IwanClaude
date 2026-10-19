@@ -25,6 +25,7 @@ from __future__ import annotations
 # datetime：日期时间处理
 # TYPE_CHECKING：类型检查时才导入，避免循环导入
 import asyncio
+import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -32,17 +33,16 @@ from typing import TYPE_CHECKING
 from iwan_claude.core.bus.events import StepFinishedEvent, StepStartedEvent
 
 # 导入核心组件
-from iwan_claude.core.compact.compactor import Compactor       # 会话压缩器
-from iwan_claude.core.context import ExecutionContext           # 执行上下文
-from iwan_claude.core.effort import get_effort_params           # 努力等级参数查询
-from iwan_claude.core.events.bus import EventBus                # 事件总线
-from iwan_claude.core.llm.base import LLMProvider               # LLM 提供者接口
+from iwan_claude.core.compact.compactor import Compactor  # 会话压缩器
+from iwan_claude.core.context import ExecutionContext  # 执行上下文
+from iwan_claude.core.effort import get_effort_params  # 努力等级参数查询
+from iwan_claude.core.events.bus import EventBus  # 事件总线
+from iwan_claude.core.llm.base import LLMProvider  # LLM 提供者接口
 from iwan_claude.core.permissions.manager import PermissionManager  # 权限管理器
 from iwan_claude.core.run_registry import pop_steers, steer_as_message  # 运行中修正队列
 from iwan_claude.core.system_prompt import build_base_system_prompt  # 构建基础 system prompt
-from iwan_claude.core.tools.invocation import invoke_tool       # 工具调用函数
-from iwan_claude.core.tools.registry import ToolRegistry        # 工具注册表
-import logging
+from iwan_claude.core.tools.invocation import invoke_tool  # 工具调用函数
+from iwan_claude.core.tools.registry import ToolRegistry  # 工具注册表
 
 # 类型检查时的导入（避免循环导入）
 if TYPE_CHECKING:
@@ -241,7 +241,7 @@ class AgentLoop:
                 # LLM 返回了工具调用，执行每个工具
                 for tc in response.tool_calls:
                     # 努力等级限制：如果达到最大文件读取数，跳过后续读操作
-                    if self._effort_params.max_files_read > 0 and tc.name in ("read_file", "list_dir", "file_exists", "file_stat"):
+                    if self._effort_params.max_files_read > 0 and tc.name in ("read_file", "list_dir", "file_exists", "file_stat"):  # noqa: E501
                         if files_read_count >= self._effort_params.max_files_read:
                             context.add_tool_result(
                                 tc.id,

@@ -210,7 +210,7 @@ class AddContextTool(BaseTool):
         if end > total_lines:
             end = total_lines
         if start > end:
-            return ToolResult(content="Start line must be less than or equal to end line", is_error=True, error_type="schema_error")
+            return ToolResult(content="Start line must be less than or equal to end line", is_error=True, error_type="schema_error")  # noqa: E501
 
         # 5. 提取指定行范围的内容（Python 切片是左闭右开，所以 end 不需要 +1）
         selected_lines = lines[start - 1:end]

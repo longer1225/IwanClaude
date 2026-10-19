@@ -21,8 +21,6 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-
 from iwan_claude.cli import daemon_guard
 from iwan_claude.cli.daemon_guard import (
     _acquire_pid_lock,
@@ -297,7 +295,6 @@ class TestEnsureDaemon:
         # 写当前进程 PID（活着），模拟别人正在起
         pid_file.write_text(str(os.getpid()))
 
-        spawn_count = [0]
         call_count = [0]
 
         def fake_connect(_h: str, _p: int) -> bool:

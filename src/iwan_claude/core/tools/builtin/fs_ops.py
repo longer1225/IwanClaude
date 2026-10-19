@@ -703,8 +703,10 @@ class FileExistsTool(BaseTool):
 
 def _human_size(num_bytes: int) -> str:
     step = 1024.0
+    # 单独用浮点变量推进：直接 num_bytes /= step 会把 int 参数改成 float（mypy 报 assignment）
+    size = float(num_bytes)
     for unit in ("B", "KB", "MB", "GB", "TB"):
-        if abs(num_bytes) < step:
-            return f"{num_bytes:.2f} {unit}"
-        num_bytes /= step
-    return f"{num_bytes:.2f} PB"
+        if abs(size) < step:
+            return f"{size:.2f} {unit}"
+        size /= step
+    return f"{size:.2f} PB"

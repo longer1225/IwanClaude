@@ -48,23 +48,24 @@ from typing import Any  # 类型注解工具，表示任意类型
 log = logging.getLogger(__name__)  # 获取当前模块的日志记录器
 
 # Textual 框架导入 - 构建终端 UI 的核心框架
-from textual import events  # 事件系统，处理键盘、鼠标等输入事件
-from textual.app import App, ComposeResult  # App 基类和组件组合返回类型
-from textual.binding import Binding  # 快捷键绑定定义
-from textual.containers import Horizontal, VerticalScroll  # 布局容器（水平排列、垂直滚动）
-from textual.css.query import NoMatches  # CSS 查询异常，当查询的组件不存在时抛出
-from textual.widget import Widget  # Widget 基类，所有 UI 组件的父类
-from textual.widgets import Label, Static  # 静态文本标签和可更新的静态组件
+from textual import events  # 事件系统，处理键盘、鼠标等输入事件  # noqa: E402
+from textual.app import App, ComposeResult  # App 基类和组件组合返回类型  # noqa: E402
+from textual.binding import Binding  # 快捷键绑定定义  # noqa: E402
+from textual.containers import Horizontal, VerticalScroll  # 布局容器（水平排列、垂直滚动）  # noqa: E402
+from textual.css.query import NoMatches  # CSS 查询异常，当查询的组件不存在时抛出  # noqa: E402
+from textual.dom import DOMNode  # 节点基类：parent 链遍历用（Widget 的超类）  # noqa: E402
+from textual.widget import Widget  # Widget 基类，所有 UI 组件的父类  # noqa: E402
+from textual.widgets import Label, Static  # 静态文本标签和可更新的静态组件  # noqa: E402
 
 # 项目内部模块导入
-from iwan_claude.core.config import IwanConfig  # 应用配置类，包含 host、port 等
-from iwan_claude.core.skills.loader import SkillLoader  # 技能加载器，用于获取可用 Skill 列表
-from iwan_claude.core.transport.socket_client import IpcError, SocketClient  # IPC 通信客户端和错误类型
+from iwan_claude.core.config import IwanConfig  # 应用配置类，包含 host、port 等  # noqa: E402
+from iwan_claude.core.skills.loader import SkillLoader  # 技能加载器，用于获取可用 Skill 列表  # noqa: E402
+from iwan_claude.core.transport.socket_client import IpcError, SocketClient  # IPC 通信客户端和错误类型  # noqa: E402
 
 # 从子模块导入已拆分的组件和工具函数
-from iwan_claude.tui.formatters import _preview, _params_str, _param_summary  # 文本格式化工具函数
-from iwan_claude.tui.models import _SessionState  # 会话状态数据类
-from iwan_claude.tui.widgets import (  # 所有自定义 UI 组件
+from iwan_claude.tui.formatters import _preview  # 文本格式化工具函数  # noqa: E402
+from iwan_claude.tui.models import _SessionState  # 会话状态数据类  # noqa: E402
+from iwan_claude.tui.widgets import (  # 所有自定义 UI 组件  # noqa: E402
     ChatTextArea,
     FileChangesSelect,
     LLMStreamBlock,
@@ -75,7 +76,6 @@ from iwan_claude.tui.widgets import (  # 所有自定义 UI 组件
     ToolCallBlock,
     TrustSelect,
 )
-
 
 # 五态权限模式的 Shift+Tab 循环顺序（对齐 Claude Code 的档位递进方向：
 # 越靠后越放行，bypassPermissions 垫底收尾——危险档要多按几下才到）
@@ -238,7 +238,7 @@ class IwanTuiApp(App[None]):
         "[bold cyan]██║██║███╗██║██╔══██║██║╚██╗██║██║     ██║     ██╔══██║██║   ██║██║  ██║██╔══╝  [/bold cyan]\n"
         "[bold cyan]██║╚███╔███╔╝██║  ██║██║ ╚████║╚██████╗███████╗██║  ██║╚██████╔╝██████╔╝███████╗[/bold cyan]\n"
         "[bold cyan]╚═╝ ╚══╝╚══╝ ╚═╝  ╚═╝╚═╝  ╚═══╝ ╚═════╝╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚═════╝ ╚══════╝[/bold cyan]\n"
-        "[dim]  输入消息开始对话  ·  键入 / 查看命令  ·  F6 检查点  ·  Ctrl+T/W 新建/关闭会话  ·  Alt+1~9 切换会话  ·  Ctrl+Q 退出[/dim]"
+        "[dim]  输入消息开始对话  ·  键入 / 查看命令  ·  F6 检查点  ·  Ctrl+T/W 新建/关闭会话  ·  Alt+1~9 切换会话  ·  Ctrl+Q 退出[/dim]"  # noqa: E501
     )
 
     def __init__(
@@ -846,10 +846,8 @@ class IwanTuiApp(App[None]):
             if state.busy:
                 classes.append("busy")  # 忙碌会话添加 busy 类
 
-            # 创建标签 Label 组件
+            # 创建标签 Label 组件（session_id 是动态附加属性，见下一行的 ignore）
             label = Label(label_text, classes=" ".join(classes))
-            # 将 session_id 存储到 Label 对象上（用于点击事件识别）
-            # type: ignore 因为 Label 没有 session_id 属性，这是动态添加的
             label.session_id = sid  # type: ignore[attr-defined]
             # 将标签挂载到标签栏容器
             tabbar.mount(label)
@@ -1126,16 +1124,17 @@ class IwanTuiApp(App[None]):
         if widget is None:
             return
         # 向上遍历父元素链，查找带有 session_id 属性的控件
-        current = widget
+        # 用 DOMNode 而不是 Widget：parent 的类型本来就是 DOMNode | None
+        current: DOMNode | None = widget
         while current is not None:
             # 尝试获取 session_id 属性（在 _refresh_tabbar 中动态添加的）
             sid = getattr(current, "session_id", None)
             if sid is not None and sid in self._sessions:
-                # 找到有效会话 ID 且非忙碌状态时切换
+                # 找到有效会话 ID 且无待审批时切换（忙碌不拦：run 在 daemon 里）
                 if sid != self._session_id and not self._pending_permission_blocks:
                     self._switch_session(sid)
                 return  # 处理完成，直接返回
-            current = current.parent  # 继续向上遍历
+            current = current.parent
 
     def on_key(self, event: events.Key) -> None:
         """
@@ -1333,7 +1332,7 @@ class IwanTuiApp(App[None]):
             return
         # 检查引擎类型（legacy 引擎不使用 LangGraph，无检查点支持）
         if self._engine_type == "legacy":
-            self._append(Static("[yellow]checkpoints only available in LangGraph engines (langgraph/plan_execute/debate/pipeline)[/yellow]", classes="log-line"))
+            self._append(Static("[yellow]checkpoints only available in LangGraph engines (langgraph/plan_execute/debate/pipeline)[/yellow]", classes="log-line"))  # noqa: E501
             return
         # 在 worker 中执行检查点列表操作
         self.run_worker(self._do_checkpoint("list", ""), name="checkpoint", exclusive=False)
@@ -1560,7 +1559,7 @@ class IwanTuiApp(App[None]):
                     self.run_worker(self._do_checkpoint(cmd, arg), name="checkpoint", exclusive=False)
                 else:
                     # 参数不足时显示用法提示
-                    self._append(Static("[yellow]usage: /checkpoint list | /checkpoint restore <id>[/yellow]", classes="log-line"))
+                    self._append(Static("[yellow]usage: /checkpoint list | /checkpoint restore <id>[/yellow]", classes="log-line"))  # noqa: E501
             return
 
         # /files [run_id] 文件变更回滚面板（S9 Part C2）
@@ -1859,7 +1858,7 @@ class IwanTuiApp(App[None]):
 
         # 验证等级有效性
         if level not in ("minimal", "low", "medium", "high", "max"):
-            self._append(Static(f"[yellow]usage: /effort [minimal|low|medium|high|max], got {level!r}[/yellow]", classes="log-line"))
+            self._append(Static(f"[yellow]usage: /effort [minimal|low|medium|high|max], got {level!r}[/yellow]", classes="log-line"))  # noqa: E501
             return
 
         try:
@@ -1907,7 +1906,7 @@ class IwanTuiApp(App[None]):
 
         # 验证预设有效性
         if preset not in ("fast", "balanced", "powerful"):
-            self._append(Static(f"[yellow]usage: /model [fast|balanced|powerful], got {preset!r}[/yellow]", classes="log-line"))
+            self._append(Static(f"[yellow]usage: /model [fast|balanced|powerful], got {preset!r}[/yellow]", classes="log-line"))  # noqa: E501
             return
 
         try:
@@ -2059,9 +2058,9 @@ class IwanTuiApp(App[None]):
                     self._append(Static("[dim]  提示：检查点会在 agent 运行过程中自动创建[/dim]", classes="log-line"))
                 else:
                     # 显示检查点列表头部
-                    self._append(Static(f"[bold cyan]===== 检查点列表 ({len(checkpoints)}) =====[/bold cyan]", classes="log-line"))
-                    self._append(Static(f"[dim]  格式：[索引] 步骤号 | 时间 | 内容预览[/dim]", classes="log-line"))
-                    self._append(Static(f"[dim]  使用：/checkpoint restore <索引> 恢复到指定检查点[/dim]", classes="log-line"))
+                    self._append(Static(f"[bold cyan]===== 检查点列表 ({len(checkpoints)}) =====[/bold cyan]", classes="log-line"))  # noqa: E501
+                    self._append(Static("[dim]  格式：[索引] 步骤号 | 时间 | 内容预览[/dim]", classes="log-line"))
+                    self._append(Static("[dim]  使用：/checkpoint restore <索引> 恢复到指定检查点[/dim]", classes="log-line"))  # noqa: E501
                     self._append(Static("", classes="log-line"))
                     # 逆序显示检查点（最新的在前）
                     for i, cp in enumerate(reversed(checkpoints)):
@@ -2089,8 +2088,8 @@ class IwanTuiApp(App[None]):
                             ))
                     # 显示列表底部
                     self._append(Static("", classes="log-line"))
-                    self._append(Static(f"[bold cyan]====================================[/bold cyan]", classes="log-line"))
-                    self._append(Static(f"[dim]示例：/checkpoint restore 0 恢复到最近状态[/dim]", classes="log-line"))
+                    self._append(Static("[bold cyan]====================================[/bold cyan]", classes="log-line"))  # noqa: E501
+                    self._append(Static("[dim]示例：/checkpoint restore 0 恢复到最近状态[/dim]", classes="log-line"))
             except (IpcError, RuntimeError, OSError) as e:
                 self._append(Static(f"[red]checkpoint list error: {e}[/red]", classes="log-line"))
 
@@ -2115,7 +2114,7 @@ class IwanTuiApp(App[None]):
                     checkpoints = list_result.get("checkpoints", [])
                     # 验证索引有效性
                     if index < 0 or index >= len(checkpoints):
-                        self._append(Static(f"[red]✗ 索引 {index} 超出范围 (0-{len(checkpoints)-1})[/red]", classes="log-line"))
+                        self._append(Static(f"[red]✗ 索引 {index} 超出范围 (0-{len(checkpoints)-1})[/red]", classes="log-line"))  # noqa: E501
                         return
                     # 获取对应的检查点 ID（逆序索引）
                     checkpoint_id = checkpoints[-(index + 1)]["checkpoint_id"]
@@ -2125,7 +2124,7 @@ class IwanTuiApp(App[None]):
                     return
 
             # 执行恢复操作
-            self._append(Static(f"[dim]🔄 正在恢复检查点...[/dim]", classes="log-line"))
+            self._append(Static("[dim]🔄 正在恢复检查点...[/dim]", classes="log-line"))
             try:
                 result = await self._client.send_command(
                     "session.checkpoint.restore",
@@ -2148,7 +2147,7 @@ class IwanTuiApp(App[None]):
 
         # ========== 未知命令 ==========
         else:
-            self._append(Static("[yellow]用法：/checkpoint list | /checkpoint restore <index>[/yellow]", classes="log-line"))
+            self._append(Static("[yellow]用法：/checkpoint list | /checkpoint restore <index>[/yellow]", classes="log-line"))  # noqa: E501
 
     def _show_help(self) -> None:
         """
@@ -2170,10 +2169,10 @@ class IwanTuiApp(App[None]):
         # 斜杠命令部分
         self._append(Static("[bold]斜杠命令（输入 / 查看）：[/bold]", classes="log-line"))
         self._append(Static("  [cyan]/help[/cyan]            显示此帮助信息", classes="log-line"))
-        self._append(Static("  [cyan]/auto [default|acceptEdits|plan|auto|bypassPermissions][/cyan]  切换权限模式", classes="log-line"))
+        self._append(Static("  [cyan]/auto [default|acceptEdits|plan|auto|bypassPermissions][/cyan]  切换权限模式", classes="log-line"))  # noqa: E501
         self._append(Static("  [cyan]/effort [minimal|low|medium|high|max][/cyan]  切换努力等级", classes="log-line"))
         self._append(Static("  [cyan]/model [fast|balanced|powerful][/cyan]  切换模型预设", classes="log-line"))
-        self._append(Static("  [cyan]/engine [legacy|langgraph|plan_execute|debate|pipeline|auto][/cyan]  切换 Agent 引擎（auto=按任务自动选择）", classes="log-line"))
+        self._append(Static("  [cyan]/engine [legacy|langgraph|plan_execute|debate|pipeline|auto][/cyan]  切换 Agent 引擎（auto=按任务自动选择）", classes="log-line"))  # noqa: E501
         self._append(Static("  [cyan]/compact[/cyan]         压缩上下文窗口", classes="log-line"))
         self._append(Static("  [cyan]/checkpoint list[/cyan]  列出所有检查点", classes="log-line"))
         self._append(Static("  [cyan]/checkpoint restore <n>[/cyan]  恢复到指定检查点", classes="log-line"))
@@ -2189,7 +2188,7 @@ class IwanTuiApp(App[None]):
         self._append(Static("[bold]Skill（技能/提示词模板）：[/bold]", classes="log-line"))
         self._append(Static("  输入 /skill_name 手动触发技能", classes="log-line"))
         self._append(Static("  带有 🔄 标记的技能会根据关键词自动触发", classes="log-line"))
-        self._append(Static("  内置技能：review(🔍), summarize(📝), orchestrate(🎯), security(🔒), docs(📚), tests(🧪)", classes="log-line"))
+        self._append(Static("  内置技能：review(🔍), summarize(📝), orchestrate(🎯), security(🔒), docs(📚), tests(🧪)", classes="log-line"))  # noqa: E501
         self._append(Static("[bold cyan]====================[/bold cyan]", classes="log-line"))
 
     async def _do_get_history(self) -> None:
@@ -2215,7 +2214,7 @@ class IwanTuiApp(App[None]):
             )
             messages = result.get("messages", [])
             # 显示历史标题
-            self._append(Static(f"[bold cyan]===== 会话历史 ({len(messages)} 条) =====[/bold cyan]", classes="log-line"))
+            self._append(Static(f"[bold cyan]===== 会话历史 ({len(messages)} 条) =====[/bold cyan]", classes="log-line"))  # noqa: E501
             # 逐条显示历史消息
             for i, msg in enumerate(messages):
                 role = msg.get("role", "unknown")
@@ -2253,7 +2252,7 @@ class IwanTuiApp(App[None]):
                 {"session_id": self._session_id},
             )
             # 显示关闭成功
-            self._append(Static(f"[bold green]✓[/bold green] 会话已关闭", classes="log-line"))
+            self._append(Static("[bold green]✓[/bold green] 会话已关闭", classes="log-line"))
             # 重置会话状态
             self._session_id = None  # 清空当前会话（触发 setter 清空所有状态）
             self._busy = False  # 重置忙碌状态
@@ -2336,11 +2335,12 @@ class IwanTuiApp(App[None]):
         except (IpcError, RuntimeError, OSError) as e:
             self._append(Static(f"[red]recover error: {e}[/red]", classes="log-line"))
             self._busy = False
-            prompt = self._prompt()
-            if prompt is not None:
-                prompt.disabled = False
-                prompt.read_only = False
-                prompt.border_title = "type a message — enter to send, ⌘/⇧/⌥+enter for newline"
+            # 换个局部名：同一作用域里 prompt 已被窄化成非 None，再赋 Optional 会报错
+            prompt_after = self._prompt()
+            if prompt_after is not None:
+                prompt_after.disabled = False
+                prompt_after.read_only = False
+                prompt_after.border_title = "type a message — enter to send, ⌘/⇧/⌥+enter for newline"
             self._update_header("ready")
 
     async def _do_send_message(self, content: str, *, skip_auto_skill: bool = False, skill_name: str = "") -> None:
@@ -2934,7 +2934,7 @@ class IwanTuiApp(App[None]):
         }.get(self._permission_mode, "dim")
         auto_info = f"  [{mode_color}]mode:{self._permission_mode}[/{mode_color}]"
         # 努力等级显示
-        effort_color = {"minimal": "dim", "low": "cyan", "medium": "green", "high": "yellow", "max": "red"}.get(self._effort_level, "green")
+        effort_color = {"minimal": "dim", "low": "cyan", "medium": "green", "high": "yellow", "max": "red"}.get(self._effort_level, "green")  # noqa: E501
         effort_info = f"  [{effort_color}]effort:{self._effort_level}[/{effort_color}]"
         # 模型预设显示
         model_color = {"fast": "cyan", "balanced": "green", "powerful": "magenta"}.get(self._model_preset, "green")
@@ -3298,9 +3298,10 @@ class IwanTuiApp(App[None]):
         elif t == "session.renamed":
             # 会话重命名：更新本地标题并刷新标签栏
             new_title = event.get("title", "")
-            state = self._state
-            if state is not None:
-                state.title = new_title
+            # 换局部名：同作用域里 state 可能已被窄化成非 None，再赋 Optional 会报错
+            renamed_state = self._state
+            if renamed_state is not None:
+                renamed_state.title = new_title
             self._refresh_tabbar()
             self._update_header("ready")
 
@@ -3495,8 +3496,10 @@ class IwanTuiApp(App[None]):
                 # 恰好等价于原本想要的"finished 后 30 秒没等到 waiting_for_input"；
                 # 同时也不再误伤还没发 finished 的正常长任务
                 idle = time.monotonic() - self._last_activity_ts
-                state = getattr(self, "_header_state", "")
-                if state == "running" and idle > 30:
+                # 用独立局部名：同作用域的 state 已被窄化成 _SessionState，
+                # 再赋 str 会报 assignment（getattr 版本则报 arg-type）
+                header_state = self._header_state
+                if header_state == "running" and idle > 30:
                     logging.getLogger(__name__).warning(
                         "watchdog: force-unstick after %.0fs silent (no waiting_for_input event)", idle,
                     )

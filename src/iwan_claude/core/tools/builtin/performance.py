@@ -34,7 +34,6 @@ result = await profile_code_tool.invoke({
 """
 from __future__ import annotations
 
-import asyncio
 import cProfile
 import pstats
 from io import StringIO
@@ -170,12 +169,12 @@ class ProfileCodeTool(BaseTool):
                 # 创建模块规格
                 spec = importlib.util.spec_from_file_location("profile_module", str(file_path))
                 if spec is None:
-                    return ToolResult(content=f"Failed to load module: {file_path}", is_error=True, error_type="runtime_error")
+                    return ToolResult(content=f"Failed to load module: {file_path}", is_error=True, error_type="runtime_error")  # noqa: E501
                 
                 # 创建模块对象
                 module = importlib.util.module_from_spec(spec)
                 if spec.loader is None:
-                    return ToolResult(content=f"Module has no loader: {file_path}", is_error=True, error_type="runtime_error")
+                    return ToolResult(content=f"Module has no loader: {file_path}", is_error=True, error_type="runtime_error")  # noqa: E501
                 
                 # 执行模块
                 spec.loader.exec_module(module)
@@ -186,7 +185,7 @@ class ProfileCodeTool(BaseTool):
                     # 调用函数
                     func()
                 else:
-                    return ToolResult(content=f"Function '{p.function_name}' not found", is_error=True, error_type="runtime_error")
+                    return ToolResult(content=f"Function '{p.function_name}' not found", is_error=True, error_type="runtime_error")  # noqa: E501
             else:
                 # 文件模式：执行整个文件
                 exec(file_path.read_text(encoding="utf-8"))

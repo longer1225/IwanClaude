@@ -19,15 +19,14 @@ system_prompt 模块 - 构建 IwanClaude 专用的 system prompt
 """
 from __future__ import annotations
 
-# datetime：日期时间处理（用于获取当前 UTC 时间）
-from datetime import UTC, datetime
-
 # sys：探测宿主平台，决定注入 Windows 还是 POSIX 环境提示
 import sys
 
+# datetime：日期时间处理（用于获取当前 UTC 时间）
+from datetime import UTC, datetime
+
 # 导入 iwan_claude 包，用于获取版本号
 import iwan_claude
-
 
 # RAG 功能的引导提示词
 # 当启用 RAG 时，会追加到 system prompt 中
@@ -68,7 +67,7 @@ _TOOL_GUIDE = """
 - Parallelize independent tool calls: when you need to read 3 unrelated files, issue 3 read_file calls in ONE assistant turn. Do not call them serially across turns.
 - Run shell commands: use bash with explicit timeout for long-running commands. Avoid interactive prompts.
 - Review git changes: use git_diff before reporting done, to confirm your edits are correct and complete.
-"""
+"""  # noqa: E501
 
 # 安全规则与边界
 # 列出禁止行为和需要询问用户的场景，防止 LLM 做出危险操作

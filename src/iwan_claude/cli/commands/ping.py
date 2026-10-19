@@ -27,12 +27,12 @@ import time
 import iwan_claude
 
 # 导入 RPC 相关的数据模型
-from iwan_claude.core.bus.commands import PongResult           # Ping 响应的数据结构
-from iwan_claude.core.bus.envelope import (                   # JSON-RPC 响应封装
-    JsonRpcError,      # 错误响应
-    JsonRpcSuccess,    # 成功响应
+from iwan_claude.core.bus.commands import PongResult  # Ping 响应的数据结构
+from iwan_claude.core.bus.envelope import (  # JSON-RPC 响应封装
+    JsonRpcError,  # 错误响应
+    JsonRpcSuccess,  # 成功响应
 )
-from iwan_claude.core.config import IwanConfig                # 配置数据结构
+from iwan_claude.core.config import IwanConfig  # 配置数据结构
 
 
 # 同步入口函数：运行异步 ping 协程，处理连接异常

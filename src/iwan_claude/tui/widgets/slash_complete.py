@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # ---------------------------------------------------------------------------
 # 斜杠命令自动补全控件模块
 # 本模块从 app.py 中提取 SlashCompleteWidget 类。
@@ -7,10 +6,9 @@
 # ---------------------------------------------------------------------------
 
 # 从 textual.widgets 导入 Static，SlashCompleteWidget 继承 Static 以获得静态文本更新能力
-from textual.widgets import Static
-
 # 从 textual.message 导入 Message 基类，用于定义 Selected 消息
 from textual.message import Message
+from textual.widgets import Static
 
 
 class SlashCompleteWidget(Static):

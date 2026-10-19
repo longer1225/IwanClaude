@@ -36,52 +36,52 @@ from typing import Any
 from iwan_claude.core.bus.events import RunFinishedEvent, RunStartedEvent
 
 # 导入核心组件
-from iwan_claude.core.compact.compactor import Compactor       # 会话压缩器
+from iwan_claude.core.compact.compactor import Compactor  # 会话压缩器
 from iwan_claude.core.config import (
     IwanConfig,
-    resolve_checkpoint_db_path,               # checkpoint DB 路径解析（锚会话根）
+    resolve_checkpoint_db_path,  # checkpoint DB 路径解析（锚会话根）
 )
-from iwan_claude.core.context import ExecutionContext           # 执行上下文
-from iwan_claude.core.model_presets import get_model_preset     # 模型预设查询
-from iwan_claude.core.sandbox import init_sandbox              # 沙箱初始化
-from iwan_claude.core.events.bus import EventBus, EventHandler # 事件总线
-from iwan_claude.core.events.writer import EventWriter         # 事件写入器
-from iwan_claude.core.llm.base import LLMProvider              # LLM 提供者接口
-from iwan_claude.core.llm import create_provider_from_config   # 创建 LLM 提供者
-from iwan_claude.core.loop import AgentLoop                    # Legacy 执行循环
-from iwan_claude.core.mcp.server import McpServerManager       # MCP 服务器管理
-from iwan_claude.core.memory.loader import load_context_file   # 加载上下文文件
-from iwan_claude.core.memory.claude_md import (               # CLAUDE.md 处理
+from iwan_claude.core.context import ExecutionContext  # 执行上下文
+from iwan_claude.core.events.bus import EventBus, EventHandler  # 事件总线
+from iwan_claude.core.events.writer import EventWriter  # 事件写入器
+from iwan_claude.core.llm import create_provider_from_config  # 创建 LLM 提供者
+from iwan_claude.core.llm.base import LLMProvider  # LLM 提供者接口
+from iwan_claude.core.loop import AgentLoop  # Legacy 执行循环
+from iwan_claude.core.mcp.server import McpServerManager  # MCP 服务器管理
+from iwan_claude.core.memory.claude_md import (  # CLAUDE.md 处理
     load_claude_md,
     render_claude_md_prompt,
 )
-from iwan_claude.core.memory.manager import MemoryManager       # 跨会话记忆管理器
+from iwan_claude.core.memory.loader import load_context_file  # 加载上下文文件
+from iwan_claude.core.memory.manager import MemoryManager  # 跨会话记忆管理器
+from iwan_claude.core.model_presets import get_model_preset  # 模型预设查询
 from iwan_claude.core.permissions.manager import PermissionManager  # 权限管理
-from iwan_claude.core.runs import RUNS_DIR, new_run_id         # 运行相关工具
-from iwan_claude.core.session.model import Session             # 会话模型
-from iwan_claude.core.session.store import SessionStore        # 会话存储
-from iwan_claude.core.snapshot import SnapshotWriter           # 工作快照写入器（崩溃恢复）
-from iwan_claude.core.subagent.registry import BackgroundTaskRegistry  # 后台任务注册表
-from iwan_claude.core.subagent.tool import (                   # 子 Agent 工具
-    AgentResultTool,
-    BatchResultTool,
-    CancelAgentTool,
-    SpawnAgentTool,
-    SpawnAgentsTool,
-)
-from iwan_claude.core.rag.adaptive import AdaptiveRetriever    # 自适应检索器
-from iwan_claude.core.rag.chunker import DocumentChunker       # 文档分块器
+from iwan_claude.core.rag.adaptive import AdaptiveRetriever  # 自适应检索器
+from iwan_claude.core.rag.chunker import DocumentChunker  # 文档分块器
 from iwan_claude.core.rag.embedding import get_embedding_provider  # 嵌入提供者
 from iwan_claude.core.rag.index import KnowledgeIndexManager  # 知识索引管理器
-from iwan_claude.core.rag.llm_client import LLMClient         # 轻量 LLM 客户端
-from iwan_claude.core.rag.tools import (                      # RAG 工具
+from iwan_claude.core.rag.llm_client import LLMClient  # 轻量 LLM 客户端
+from iwan_claude.core.rag.tools import (  # RAG 工具
     ForgetKnowledgeTool,
     IndexKnowledgeTool,
     SearchKnowledgeTool,
 )
 from iwan_claude.core.rag.vectorstore import get_vector_store  # 向量存储
-from iwan_claude.core.task.manager import TaskManager          # 任务管理器
-from iwan_claude.core.tools.builtin import (                   # 内置工具
+from iwan_claude.core.runs import RUNS_DIR, new_run_id  # 运行相关工具
+from iwan_claude.core.sandbox import init_sandbox  # 沙箱初始化
+from iwan_claude.core.session.model import Session  # 会话模型
+from iwan_claude.core.session.store import SessionStore  # 会话存储
+from iwan_claude.core.snapshot import SnapshotWriter  # 工作快照写入器（崩溃恢复）
+from iwan_claude.core.subagent.registry import BackgroundTaskRegistry  # 后台任务注册表
+from iwan_claude.core.subagent.tool import (  # 子 Agent 工具
+    AgentResultTool,
+    BatchResultTool,
+    CancelAgentTool,
+    SpawnAgentsTool,
+    SpawnAgentTool,
+)
+from iwan_claude.core.task.manager import TaskManager  # 任务管理器
+from iwan_claude.core.tools.builtin import (  # 内置工具
     AddContextTool,
     AssignRoleTool,
     BashTool,
@@ -101,26 +101,29 @@ from iwan_claude.core.tools.builtin import (                   # 内置工具
     FileStatTool,
     FindFilesTool,
     GenerateDocsTool,
-    GlobTool,
     GitCheckoutTool,
     GitCommitTool,
     GitDiffTool,
     GitLogTool,
     GitStatusTool,
+    GlobTool,
     GrepSearchTool,
     HttpRequestTool,
     InsertAtLineTool,
     LintCodeTool,
+    ListCheckpointsTool,
+    ListCustomToolsTool,
     ListDirTool,
     ListRolesTool,
     MkdirTool,
     MultiEditTool,
     NoteSaveTool,
-    TodoWriteTool,
     PipManageTool,
     ProcessListTool,
     ReadFileTool,
+    ReloadToolsTool,
     RenameFileTool,
+    RestoreCheckpointTool,
     ReviewCodeTool,
     RunPythonTool,
     SecurityScanTool,
@@ -135,18 +138,15 @@ from iwan_claude.core.tools.builtin import (                   # 内置工具
     TaskGetTool,
     TaskListTool,
     TaskUpdateTool,
+    TodoWriteTool,
     UpdateReadmeTool,
     ViewFileTool,
     WebSearchTool,
     WriteFileTool,
-    ListCheckpointsTool,
-    ListCustomToolsTool,
-    ReloadToolsTool,
-    RestoreCheckpointTool,
 )
-from iwan_claude.core.tools.registry import ToolRegistry       # 工具注册表
-from iwan_claude.core.trace.provider import TracingProvider    # 跟踪包装器
-from iwan_claude.core.trace.writer import TraceWriter          # 跟踪写入器
+from iwan_claude.core.tools.registry import ToolRegistry  # 工具注册表
+from iwan_claude.core.trace.provider import TracingProvider  # 跟踪包装器
+from iwan_claude.core.trace.writer import TraceWriter  # 跟踪写入器
 
 
 # 裁剪 sqlite checkpoint 库：每 (thread, ns) 只留最近 keep_last 个，返回删除数
@@ -1225,6 +1225,11 @@ class AgentRunner:
                     )
                     # 选择结果只对本次 run 生效，不写回全局配置：每条消息可自适应不同引擎
 
+                # 五种引擎并列可选（这是产品设计：legacy/ReAct/PlanExecute/Debate/Pipeline）：
+                # 它们只共享 run(context) 这一调用约定，没有共同基类。这里用 Any 承接，
+                # 否则 mypy 会把第一个分支的类型强加给后面四个分支（报 assignment 错）。
+                loop: Any
+
                 if engine_name == "langgraph":
                     # 使用 LangGraph ReAct 引擎（chat→tools 循环，支持 checkpoint）
                     from iwan_claude.core.langgraph_loop import LangGraphAgentLoop
@@ -1238,7 +1243,7 @@ class AgentRunner:
                         session_id=session_id_str,
                         checkpointer=checkpointer,
                         has_rag=has_rag,
-                        effort_level=self._permission_manager.get_effort_level() if self._permission_manager else "medium",
+                        effort_level=self._permission_manager.get_effort_level() if self._permission_manager else "medium",  # noqa: E501
                     )
                 elif engine_name == "plan_execute":
                     # 使用 Plan & Execute 引擎（先规划再执行再反思，适合复杂多步任务）
@@ -1253,7 +1258,7 @@ class AgentRunner:
                         session_id=session_id_str,
                         checkpointer=checkpointer,
                         has_rag=has_rag,
-                        effort_level=self._permission_manager.get_effort_level() if self._permission_manager else "medium",
+                        effort_level=self._permission_manager.get_effort_level() if self._permission_manager else "medium",  # noqa: E501
                     )
                 elif engine_name == "debate":
                     # 使用 Debate 引擎（worker-critic 多智能体辩论，适合质量敏感任务）
@@ -1268,7 +1273,7 @@ class AgentRunner:
                         session_id=session_id_str,
                         checkpointer=checkpointer,
                         has_rag=has_rag,
-                        effort_level=self._permission_manager.get_effort_level() if self._permission_manager else "medium",
+                        effort_level=self._permission_manager.get_effort_level() if self._permission_manager else "medium",  # noqa: E501
                     )
                 elif engine_name == "pipeline":
                     # 使用 Pipeline 引擎（planner→executor→reviewer 三角色流水线协作）
@@ -1283,7 +1288,7 @@ class AgentRunner:
                         session_id=session_id_str,
                         checkpointer=checkpointer,
                         has_rag=has_rag,
-                        effort_level=self._permission_manager.get_effort_level() if self._permission_manager else "medium",
+                        effort_level=self._permission_manager.get_effort_level() if self._permission_manager else "medium",  # noqa: E501
                     )
                 else:
                     # 使用 Legacy 引擎（简单的循环实现）
@@ -1295,7 +1300,7 @@ class AgentRunner:
                         compact_threshold=self._config.compaction.auto_threshold,
                         session_id=session_id_str,
                         has_rag=has_rag,
-                        effort_level=self._permission_manager.get_effort_level() if self._permission_manager else "medium",
+                        effort_level=self._permission_manager.get_effort_level() if self._permission_manager else "medium",  # noqa: E501
                     )
                 
                 # ========== 第六步：执行 Agent 循环 ==========

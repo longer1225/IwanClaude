@@ -682,7 +682,7 @@ def _apply_toml(config: IwanConfig, data: dict[str, Any]) -> None:
         if "effort_level" in agent:
             val = agent["effort_level"]
             if not isinstance(val, str) or val not in ("minimal", "low", "medium", "high", "max"):
-                raise SystemExit("Config error: agent.effort_level must be 'minimal', 'low', 'medium', 'high', or 'max'")
+                raise SystemExit("Config error: agent.effort_level must be 'minimal', 'low', 'medium', 'high', or 'max'")  # noqa: E501
             config.agent.effort_level = val
         if "model_preset" in agent:
             val = agent["model_preset"]
@@ -1070,7 +1070,7 @@ def _apply_toml(config: IwanConfig, data: dict[str, Any]) -> None:
         rag = data["rag"]
         if not isinstance(rag, dict):
             raise SystemExit("Config error: [rag] must be a table")
-        unknown_rag: set[str] = set(rag.keys()) - {"enabled", "embedding_model", "embedding_base_url", "embedding_api_key_env", "max_chunk_size", "chunk_overlap", "top_k", "index_path", "rerank_enabled"}
+        unknown_rag: set[str] = set(rag.keys()) - {"enabled", "embedding_model", "embedding_base_url", "embedding_api_key_env", "max_chunk_size", "chunk_overlap", "top_k", "index_path", "rerank_enabled"}  # noqa: E501
         if unknown_rag:
             raise SystemExit(f"Unknown [rag] keys: {', '.join(sorted(unknown_rag))}")
         if "enabled" in rag:
@@ -1185,7 +1185,9 @@ def _apply_toml(config: IwanConfig, data: dict[str, Any]) -> None:
                 val = t[key_name]
                 if not isinstance(val, required_type):
                     raise SystemExit(f"Config error: tools.{key_name} must be {required_type.__name__}")
-                if must_positive and val <= 0:
+                # 独立的数值窄化：required_type 是变量，mypy 无法据此把 val 收窄成数字，
+                # 直接比较会报 int/object 不支持；显式判一次类型既修类型又加固校验
+                if must_positive and (not isinstance(val, (int, float)) or val <= 0):
                     raise SystemExit(f"Config error: tools.{key_name} must be positive")
                 setattr(config.tools, key_name, val)
 
@@ -1382,7 +1384,7 @@ def _apply_env(config: IwanConfig) -> None:
             val = int(sandbox_max_file_size)
             if val <= 0:
                 raise SystemExit(
-                    f"Config error: IWAN_SANDBOX_MAX_FILE_SIZE must be a positive integer, got: {sandbox_max_file_size!r}"
+                    f"Config error: IWAN_SANDBOX_MAX_FILE_SIZE must be a positive integer, got: {sandbox_max_file_size!r}"  # noqa: E501
                 )
             config.sandbox.max_file_size = val
         except ValueError:
@@ -1396,7 +1398,7 @@ def _apply_env(config: IwanConfig) -> None:
             val = int(sandbox_max_total_size)
             if val <= 0:
                 raise SystemExit(
-                    f"Config error: IWAN_SANDBOX_MAX_TOTAL_SIZE must be a positive integer, got: {sandbox_max_total_size!r}"
+                    f"Config error: IWAN_SANDBOX_MAX_TOTAL_SIZE must be a positive integer, got: {sandbox_max_total_size!r}"  # noqa: E501
                 )
             config.sandbox.max_total_size = val
         except ValueError:
@@ -1484,7 +1486,7 @@ def _apply_env(config: IwanConfig) -> None:
     if agent_engine is not None:
         # 环境变量同样校验，防止未检查的引擎名绕过配置层注入 runner
         if agent_engine not in ("legacy", "langgraph", "plan_execute", "debate", "pipeline", "auto"):
-            raise SystemExit("Config error: IWAN_AGENT_ENGINE must be one of legacy/langgraph/plan_execute/debate/pipeline/auto")
+            raise SystemExit("Config error: IWAN_AGENT_ENGINE must be one of legacy/langgraph/plan_execute/debate/pipeline/auto")  # noqa: E501
         config.agent.engine = agent_engine
 
     checkpoint_backend = os.environ.get("IWAN_AGENT_CHECKPOINT_BACKEND")

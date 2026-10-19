@@ -1,4 +1,4 @@
-"""
+﻿"""
 Chat 命令模块 - 命令行交互式聊天客户端
 
 【学习要点】
@@ -30,8 +30,8 @@ from typing import Any
 # 导入配置和客户端
 from iwan_claude.core.config import IwanConfig
 from iwan_claude.core.transport.socket_client import (
-    IpcError,       # IPC 通信错误
-    SocketClient,   # Socket 客户端
+    IpcError,  # IPC 通信错误
+    SocketClient,  # Socket 客户端
 )
 
 # 权限决策映射：用户输入的简短命令 -> 权限决策类型
@@ -315,7 +315,6 @@ async def _chat_async(config: IwanConfig) -> int:
                         for i, cp in enumerate(reversed(checkpoints)):
                             ts = cp.get("timestamp", "")
                             summary = cp.get("summary", "")
-                            node = cp.get("node", "")
                             print(f"  [{i}] step={cp['step']}  {ts}  {summary}")
                             print(f"     id: {cp['checkpoint_id']}  run: {cp.get('run_id') or '-'}")
                     print()
@@ -465,3 +464,4 @@ def cmd_chat(config: IwanConfig) -> None:
         sys.exit(130)
     # 根据异步函数的返回值退出
     sys.exit(exit_code)
+

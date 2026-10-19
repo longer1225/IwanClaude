@@ -45,7 +45,7 @@ dev = [
 # ---- Ruff：统一代码风格 ----
 [tool.ruff]
 src = ["src"]            # 分析路径，便于识别第一方代码
-line-length = 100        # 行长上限
+line-length = 120        # 行长上限（存量代码最长 111 列；100 会产出 280 条纯格式噪音）
 target-version = "py312" # 语法/规则按 Python 3.12
 
 [tool.ruff.lint]
@@ -68,6 +68,11 @@ explicit_package_bases = true # 明确包根，减少隐式命名空间误判
 module = ["faster_whisper.*"]
 ignore_missing_imports = true
 
+# PyYAML 无内联类型：只用到 safe_load，按库放行（不为一个 dev 依赖引入 stub 包）
+[[tool.mypy.overrides]]
+module = ["yaml", "yaml.*"]
+ignore_missing_imports = true
+
 # ---- Pytest：默认发现 tests/，异步用例自动管理 event loop ----
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -75,3 +80,4 @@ asyncio_mode = "auto"
 markers = [
     "integration: marks tests that call the real Anthropic API (require ANTHROPIC_API_KEY)",
 ]
+

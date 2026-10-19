@@ -12,11 +12,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from iwan_claude.core.events.bus import EventBus
 from iwan_claude.core.runner import RunOutcome
-from iwan_claude.core.session.manager import SendMessageResult, SessionManager
+from iwan_claude.core.session.manager import SessionManager
 from iwan_claude.core.session.model import Session
 from iwan_claude.core.session.store import SessionStore
 

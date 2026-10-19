@@ -54,11 +54,10 @@ result = await skill_install_tool.invoke({
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from iwan_claude.core.skills.loader import Skill, SkillLoader
+from iwan_claude.core.skills.loader import SkillLoader
 from iwan_claude.core.tools.base import BaseTool, ToolResult
 
 
@@ -266,9 +265,9 @@ class SkillCreateParams(BaseModel):
     # 技能名称（不使用 file_path 时必填）
     name: str | None = Field(default=None, description="Name of the new skill (required if not using file_path)")
     # 技能描述（不使用 file_path 时必填）
-    description: str | None = Field(default=None, description="Description of the skill (required if not using file_path)")
+    description: str | None = Field(default=None, description="Description of the skill (required if not using file_path)")  # noqa: E501
     # 系统提示词模板（不使用 file_path 时必填，使用 $ARGUMENTS 占位符）
-    system_prompt: str | None = Field(default=None, description="System prompt template (use $ARGUMENTS placeholder, required if not using file_path)")
+    system_prompt: str | None = Field(default=None, description="System prompt template (use $ARGUMENTS placeholder, required if not using file_path)")  # noqa: E501
     # 允许使用的工具列表
     allowed_tools: list[str] | None = Field(default=None, description="List of allowed tool names")
     # 本地 SKILL.md 文件路径（用于导入）
@@ -339,7 +338,7 @@ class SkillCreateTool(BaseTool):
             },
             "system_prompt": {
                 "type": "string",
-                "description": "System prompt template (use $ARGUMENTS placeholder for user input, required if not using file_path)",
+                "description": "System prompt template (use $ARGUMENTS placeholder for user input, required if not using file_path)",  # noqa: E501
             },
             "allowed_tools": {
                 "type": "array",
@@ -446,7 +445,7 @@ class SkillCreateTool(BaseTool):
         # 模式二：直接创建 - 验证必填参数
         if not p.name or not p.description or not p.system_prompt:
             return ToolResult(
-                content="Missing required parameters: name, description, and system_prompt are required when file_path is not provided.",
+                content="Missing required parameters: name, description, and system_prompt are required when file_path is not provided.",  # noqa: E501
                 is_error=True,
                 error_type="schema_error",
             )
@@ -582,7 +581,7 @@ class SkillInstallParams(BaseModel):
     # 技能的 URL（GitHub 仓库、ZIP 文件或 SKILL.md 文件）
     url: str = Field(description="URL of the skill to install")
     # 是否全局安装（安装到 ~/.iwan/skills），默认为 False（项目本地安装）
-    global_install: bool = Field(default=False, description="Install globally (in ~/.iwan/skills) instead of project-local")
+    global_install: bool = Field(default=False, description="Install globally (in ~/.iwan/skills) instead of project-local")  # noqa: E501
 
 
 class SkillInstallTool(BaseTool):

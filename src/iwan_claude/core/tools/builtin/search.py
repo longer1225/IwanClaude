@@ -34,7 +34,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
-from iwan_claude.core.sandbox import get_search_root, get_sandbox, validate_path
+from iwan_claude.core.sandbox import get_sandbox, get_search_root, validate_path
 from iwan_claude.core.tools.base import BaseTool, ToolResult
 
 
@@ -618,7 +618,7 @@ class GrepSearchTool(BaseTool):
                 "description": "Treat pattern as literal substring instead of regex.",
             },
             "max_matches": {"type": "integer", "default": 200},
-            "max_file_bytes": {"type": "integer", "default": 2097152, "description": "Skip files larger than this (bytes)."},
+            "max_file_bytes": {"type": "integer", "default": 2097152, "description": "Skip files larger than this (bytes)."},  # noqa: E501
         },
         "required": ["pattern"],
     }

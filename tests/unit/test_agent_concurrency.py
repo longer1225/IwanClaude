@@ -12,9 +12,7 @@ from iwan_claude.core.llm.types import LlmResponse, UsageStats
 from iwan_claude.core.subagent.registry import BackgroundTaskRegistry
 from iwan_claude.core.subagent.tool import (
     AgentResultTool,
-    BatchResultParams,
     BatchResultTool,
-    CancelAgentParams,
     CancelAgentTool,
     SpawnAgentParams,
     SpawnAgentsParams,

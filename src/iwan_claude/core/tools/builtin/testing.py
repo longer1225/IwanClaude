@@ -44,7 +44,6 @@ result = await test_coverage_tool.invoke({
 from __future__ import annotations
 
 import asyncio
-import subprocess
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -281,7 +280,7 @@ class GenerateTestsTool(BaseTool):
             lines.append(f"def test_{func}():")
             lines.append(f"    \"\"\"Test {func} function\"\"\"")
             lines.append(f"    result = {func}()")
-            lines.append(f"    assert result is not None")
+            lines.append("    assert result is not None")
             lines.append("")
 
         # 为每个类生成测试用例

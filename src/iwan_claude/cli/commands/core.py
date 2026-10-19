@@ -27,6 +27,7 @@ import signal
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 # 导入配置数据结构
 from iwan_claude.core.config import IwanConfig
@@ -226,7 +227,7 @@ def cmd_core_start(config: IwanConfig) -> None:
     current_cwd = Path.cwd()
 
     # 后台进程参数
-    popen_kwargs: dict = dict(
+    popen_kwargs: dict[str, Any] = dict(
         stdout=subprocess.DEVNULL,  # 标准输出重定向到空设备（丢弃）
         stderr=subprocess.DEVNULL,  # 标准错误重定向到空设备（丢弃）
         cwd=str(current_cwd),       # 设置子进程的工作目录为当前目录

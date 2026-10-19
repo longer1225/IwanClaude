@@ -24,7 +24,7 @@ Anthropic 格式：
 OpenAI 格式：
   {"role": "assistant", "content": "...", "tool_calls": [{"id": "...", "type": "function", "function": {"name": "...", "arguments": "..."}}]}
   {"role": "tool", "tool_call_id": "...", "content": "..."}
-"""
+"""  # noqa: E501
 from __future__ import annotations
 
 # asyncio：异步 I/O 框架
@@ -47,8 +47,6 @@ import httpx
 from iwan_claude.core.bus.events import LlmModelSelectedEvent, LlmTokenEvent, LlmUsageEvent
 
 # 导入配置类
-from iwan_claude.core.config import LlmConfig
-
 # 导入核心组件
 from iwan_claude.core.events.bus import EventBus
 from iwan_claude.core.llm.types import LlmResponse, ToolCallBlock, UsageStats
@@ -178,12 +176,12 @@ def _convert_messages_to_openai(
             elif role == "user":
                 # user：拆分出 text 和 tool_result
                 # OpenAI 里 tool_result 是 *独立* 的 role=tool 消息
-                text_parts: list[str] = []
+                user_text_parts: list[str] = []
                 for blk in content:
                     btype = blk.get("type")
                     if btype == "text":
-                        # 文本块，收集到 text_parts
-                        text_parts.append(blk.get("text", ""))
+                        # 文本块，收集到 user_text_parts
+                        user_text_parts.append(blk.get("text", ""))
                     elif btype == "tool_result":
                         # 工具结果块，转换为独立的 role=tool 消息
                         tc_id = blk.get("tool_use_id", "")
@@ -201,8 +199,8 @@ def _convert_messages_to_openai(
                             "content": f"[error] {tc_content}" if is_error else str(tc_content),
                         })
                 # 如果还有 text 部分（多个 tool_result 前后可能有少量 user 文字），追加为 user 消息
-                if text_parts:
-                    out.append({"role": "user", "content": "".join(text_parts)})
+                if user_text_parts:
+                    out.append({"role": "user", "content": "".join(user_text_parts)})
             else:
                 # system 或其他：简化处理，只保留文本部分
                 flat = []
@@ -277,7 +275,7 @@ class OpenAICompatibleProvider:
         api_key = os.environ.get(api_key_env) or os.environ.get("OPENAI_API_KEY")
         if not api_key:
             raise SystemExit(
-                f"OpenAI-compatible provider requires environment variable {api_key_env!r} (or OPENAI_API_KEY) to be set"
+                f"OpenAI-compatible provider requires environment variable {api_key_env!r} (or OPENAI_API_KEY) to be set"  # noqa: E501
             )
         self._api_key = api_key
         # 去掉 base_url 末尾的 /，再拼 /chat/completions
@@ -476,6 +474,10 @@ class OpenAICompatibleProvider:
                 run_id=run_id,
                 input_tokens=usage_in,
                 output_tokens=usage_out,
+                # OpenAI 兼容端点不提供 Anthropic 的两个缓存计数：按 0 上报，
+                # 而不是漏传（漏传会被 pydantic 判为缺必填字段，运行时直接抛错）
+                cache_read_input_tokens=usage_cached,
+                cache_creation_input_tokens=0,
                 context_pct=context_pct,
                 ts=_now(),
             ))

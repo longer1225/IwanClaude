@@ -349,7 +349,7 @@ class LangGraphDebateLoop:
             "respond with 'STUCK: <reason>'."
         )
 
-        messages = [{"role": "user", "content": eval_prompt}]
+        messages: list[dict[str, object]] = [{"role": "user", "content": eval_prompt}]
 
         try:
             response = await self._provider.chat(

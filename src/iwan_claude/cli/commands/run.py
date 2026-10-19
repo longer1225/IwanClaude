@@ -41,8 +41,8 @@ from typing import Any
 # 导入配置和客户端
 from iwan_claude.core.config import IwanConfig
 from iwan_claude.core.transport.socket_client import (
-    IpcError,       # IPC 通信错误
-    SocketClient,   # Socket 客户端
+    IpcError,  # IPC 通信错误
+    SocketClient,  # Socket 客户端
 )
 
 

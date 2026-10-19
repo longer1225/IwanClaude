@@ -43,9 +43,9 @@ from iwan_claude.core.context import ExecutionContext
 from iwan_claude.core.effort import get_effort_params
 from iwan_claude.core.events.bus import EventBus
 from iwan_claude.core.llm.base import LLMProvider
+from iwan_claude.core.message_blocks import _extract_user_goal
 from iwan_claude.core.permissions.manager import PermissionManager
 from iwan_claude.core.system_prompt import build_base_system_prompt
-from iwan_claude.core.message_blocks import _extract_user_goal
 from iwan_claude.core.tool_turn import maybe_compact, run_tool_turn
 from iwan_claude.core.tools.registry import ToolRegistry
 
@@ -254,8 +254,8 @@ class LangGraphPlanExecuteLoop:
             # 有之前的执行结果，说明是重新规划
             replan_count += 1
             replan_context = (
-                f"\n\n## Previous Attempt Results\n"
-                f"The previous plan was executed with these results:\n"
+                "\n\n## Previous Attempt Results\n"
+                "The previous plan was executed with these results:\n"
             )
             for i, result in enumerate(state["step_results"]):
                 replan_context += f"Step {i+1}: {result[:200]}\n"
@@ -272,7 +272,7 @@ class LangGraphPlanExecuteLoop:
             "Do not include any other text."
         )
 
-        messages = [
+        messages: list[dict[str, object]] = [
             {"role": "user", "content": plan_prompt},
         ]
 
@@ -480,7 +480,7 @@ class LangGraphPlanExecuteLoop:
             "- If not satisfied: NEEDS_REPLAN: <what needs to be done differently>\n"
         )
 
-        messages = [
+        messages: list[dict[str, object]] = [
             {"role": "user", "content": reflect_prompt},
         ]
 

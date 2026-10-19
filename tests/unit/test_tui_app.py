@@ -9,9 +9,12 @@ from iwan_claude.tui.app import (
     IwanTuiApp,
     LLMStreamBlock,
     ToolCallBlock,
-    _param_summary,
     _preview,
 )
+
+# _param_summary 的真源是 formatters；以前从 tui.app 间接导入，靠的是 app.py 里的
+# 顺手 re-export（ruff 把未使用的 re-export 清掉后这里就断了），改为直接依赖真源
+from iwan_claude.tui.formatters import _param_summary
 
 
 # 功能：验证 _preview 超出长度时截断并追加省略号

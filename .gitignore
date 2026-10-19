@@ -63,10 +63,16 @@ $null
 # ── Local Configs ──
 config.local.toml
 *.local.toml
-# pytest ��ʱĿ¼��ĳЩ���� TMP ָ��ֿ�ʱ�������
+# pytest ��ʱĿ¼��ĳЩ���� TMP ָ��ֿ�ʱ�������
 pytest-of-*/
 
 
-# ��ʱĿ¼������/�����ڱ��ֿ�����µ���� tmp*��
+# ��ʱĿ¼������/�����ڱ��ֿ�����µ���� tmp*��
 tmp*/
 
+
+# pytest 临时目录（某些环境 TMP 指向仓库时会产生）
+pytest-of-*/
+
+# 临时目录（测试/工具在本仓库根落下的随机 tmp*）
+tmp*/

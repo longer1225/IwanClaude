@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # ---------------------------------------------------------------------------
 # 可折叠的工具调用块模块
 # 本模块从 app.py 中提取 ToolCallBlock 类，负责在日志流中展示工具调用的摘要与详情。
@@ -9,12 +8,8 @@
 # time.perf_counter：高精度计时（工具运行中心跳秒数计算）
 import time
 
-# 从 textual.widget 导入 Widget 基类，ToolCallBlock 继承 Widget 而非 Static
-# 因为需要包含多个子 widget（摘要 + 详情）
-from textual.widget import Widget
-
-# 从 textual.widgets 导入 Static，用于创建摘要和详情子 widget
-from textual.widgets import Static
+# 从 typing 导入 Any，用于类型注解
+from typing import Any
 
 # 从 textual.app 导入 ComposeResult，compose() 方法的返回值类型
 from textual.app import ComposeResult
@@ -24,14 +19,18 @@ from textual.app import ComposeResult
 # 注意：Textual 8.x 版名为 escape，新版本才改名为 escape_markup
 from textual.markup import escape
 
-# 从 typing 导入 Any，用于类型注解
-from typing import Any
+# 从 textual.widget 导入 Widget 基类，ToolCallBlock 继承 Widget 而非 Static
+# 因为需要包含多个子 widget（摘要 + 详情）
+from textual.widget import Widget
+
+# 从 textual.widgets 导入 Static，用于创建摘要和详情子 widget
+from textual.widgets import Static
 
 # 从 iwan_claude.tui.formatters 导入工具参数格式化辅助函数
 # _params_str: 将参数转为格式化 JSON 字符串
 # _param_summary: 从参数中提取关键字段生成摘要
 # 注意：这两个函数实际定义在 app.py 中，后续将迁移至 formatters.py
-from iwan_claude.tui.formatters import _params_str, _param_summary
+from iwan_claude.tui.formatters import _param_summary, _params_str
 
 
 class ToolCallBlock(Widget):

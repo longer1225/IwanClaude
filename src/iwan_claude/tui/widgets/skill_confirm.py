@@ -16,6 +16,7 @@ TUI 弹出 SkillConfirm 控件 → 用户选择是否使用该技能
 """
 from __future__ import annotations
 
+from textual import events
 from textual.message import Message
 from textual.widgets import Static
 
@@ -113,9 +114,9 @@ class SkillConfirm(Static):
         self._original_content = original_content
         self._session_id = session_id
         self._cursor = 0
-        self._render()
+        self._refresh_lines()
 
-    def _render(self) -> None:
+    def _refresh_lines(self) -> None:
         """渲染控件内容"""
         lines: list[str] = []
         lines.append(
@@ -135,7 +136,7 @@ class SkillConfirm(Static):
 
         self.update("\n".join(lines))
 
-    def on_key(self, event) -> None:
+    def on_key(self, event: events.Key) -> None:
         """处理键盘事件"""
         from textual.events import Key
 
@@ -152,11 +153,11 @@ class SkillConfirm(Static):
         if key.name == "up" or char == "k":
             event.prevent_default()
             self._cursor = (self._cursor - 1) % len(self._CHOICES)
-            self._render()
+            self._refresh_lines()
         elif key.name == "down" or char == "j":
             event.prevent_default()
             self._cursor = (self._cursor + 1) % len(self._CHOICES)
-            self._render()
+            self._refresh_lines()
         elif key.name in ("enter", "return"):
             event.prevent_default()
             decision = self._CHOICES[self._cursor][0]

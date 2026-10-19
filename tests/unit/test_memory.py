@@ -16,13 +16,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from iwan_claude.core.memory.long_term import LongTermMemory, MemoryEntry
+from iwan_claude.core.memory.long_term import LongTermMemory
 from iwan_claude.core.memory.manager import MemoryManager
 from iwan_claude.core.memory.vector_memory import VectorMemory
-from iwan_claude.core.rag.chunker import Chunk
 from iwan_claude.core.rag.embedding import EmbeddingProvider
 from iwan_claude.core.rag.vectorstore import MemoryVectorStore
-
 
 # ======================================================================
 # LongTermMemory 测试
@@ -154,8 +152,8 @@ class TestLongTermMemory:
         memory = LongTermMemory(tmp_path / "memory.jsonl")
         memory.load()
 
-        e1 = memory.add("第一", type="fact")
-        e2 = memory.add("第二", type="fact")
+        memory.add("第一", type="fact")
+        memory.add("第二", type="fact")
 
         entries = memory.list_all()
         # 最新的在前

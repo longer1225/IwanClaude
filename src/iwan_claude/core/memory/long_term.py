@@ -36,6 +36,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 # ======================================================================
 # 数据结构定义
@@ -84,12 +85,12 @@ class MemoryEntry:
     session_id: str | None = None
     tags: list[str] = field(default_factory=list)
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         """转换为字典（用于 JSON 序列化）"""
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: dict) -> MemoryEntry:
+    def from_dict(cls, data: dict[str, Any]) -> MemoryEntry:
         """从字典创建（用于 JSON 反序列化）"""
         return cls(
             id=data.get("id", _new_id()),

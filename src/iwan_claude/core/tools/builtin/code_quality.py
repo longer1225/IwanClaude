@@ -85,7 +85,7 @@ class ReviewCodeParams(BaseModel):
     # 要审查的文件路径，必填
     file_path: str = Field(description="Path to the file to review")
     # 审查重点，可选值：security, performance, readability, maintainability
-    focus: str | None = Field(default=None, description="Focus area: security, performance, readability, or maintainability")
+    focus: str | None = Field(default=None, description="Focus area: security, performance, readability, or maintainability")  # noqa: E501
 
 
 class ReviewCodeTool(BaseTool):

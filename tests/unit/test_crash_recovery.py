@@ -14,8 +14,6 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
-import pytest
-
 from iwan_claude.core.bus.events import (
     StepFinishedEvent,
     ToolCallFinishedEvent,

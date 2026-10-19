@@ -24,8 +24,8 @@ from iwan_claude.core.subagent.tool import (
     AgentResultTool,
     BatchResultTool,
     CancelAgentTool,
-    SpawnAgentTool,
     SpawnAgentsTool,
+    SpawnAgentTool,
 )
 
 __all__ = [

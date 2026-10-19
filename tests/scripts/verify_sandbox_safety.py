@@ -6,7 +6,6 @@
 """
 from __future__ import annotations
 
-import os
 import re
 import sys
 from pathlib import Path
@@ -14,13 +13,11 @@ from pathlib import Path
 # 让脚本在任意路径都能 import src 下的包
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
-from iwan_claude.core.config import IwanConfig, get_config
-from iwan_claude.core.sandbox import SandboxManager, scrub_env
-from iwan_claude.core.permissions.policy import PermissionPolicy
-from iwan_claude.core.permissions.manager import PermissionManager
 from iwan_claude.core.bus.events import SessionCreatedEvent
-from iwan_claude.core import bus as bus_mod
-
+from iwan_claude.core.config import IwanConfig, get_config
+from iwan_claude.core.permissions.manager import PermissionManager
+from iwan_claude.core.permissions.policy import PermissionPolicy
+from iwan_claude.core.sandbox import SandboxManager, scrub_env
 
 # ============================================================
 # 1. 构造一个和生产环境一致的 SandboxManager
@@ -57,7 +54,7 @@ pm = PermissionManager(
 
 TEST_SESSION = "sess-verify-001"
 # 通知 manager 有 session，方便缓存
-import asyncio
+import asyncio  # noqa: E402
 
 asyncio.get_event_loop().run_until_complete(
     pm.on_session_created(SessionCreatedEvent(session_id=TEST_SESSION, mode="chat", ts="2026-01-01T00:00:00"))

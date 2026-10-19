@@ -23,6 +23,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from iwan_claude.core.events.bus import EventBus
+
 if TYPE_CHECKING:
     from iwan_claude.core.llm.base import LLMProvider
 
@@ -69,17 +71,20 @@ async def select_engine(goal: str, provider: LLMProvider) -> str:
         return _FALLBACK_ENGINE
 
     try:
-        # 构建分类消息
-        messages = [{
+        # 构建分类消息（元素类型显式标注：chat 期望 list[dict[str, object]]）
+        messages: list[dict[str, object]] = [{
             "role": "user",
             "content": _CLASSIFY_PROMPT.format(goal=goal[:500]),
         }]
 
         # 调用 LLM（不使用工具，限制 max_tokens 降低成本）
+        # 【设计】这里传一个一次性 EventBus 而不是 None：provider.chat 会无条件
+        # await bus.publish(...)（流式 token/用量），传 None 会在分类阶段直接
+        # AttributeError；用临时总线既满足签名，也不会把分类器的 token 灌进 UI。
         response = await provider.chat(
             messages=messages,
             tool_schemas=[],
-            bus=None,
+            bus=EventBus(),
             run_id="",
             step=0,
             system="You are a task classifier. Reply with only the engine name.",

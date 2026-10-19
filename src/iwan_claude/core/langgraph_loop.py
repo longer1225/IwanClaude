@@ -35,20 +35,23 @@ from __future__ import annotations
 
 # asyncio：异步 I/O 框架
 import asyncio
+import logging
+from typing import Any, TypedDict
+
 # LangGraph 核心类：StateGraph 用于定义工作流，START 和 END 是特殊节点
 from langgraph.graph import END, START, StateGraph
-from typing import Any, Literal, TypedDict
 
 # 导入事件类型
 from iwan_claude.core.bus.events import StepFinishedEvent, StepStartedEvent
 
 # 导入核心组件
-from iwan_claude.core.compact.compactor import Compactor       # 会话压缩器
-from iwan_claude.core.context import ExecutionContext           # 执行上下文
-from iwan_claude.core.effort import get_effort_params           # 努力等级参数查询
-from iwan_claude.core.events.bus import EventBus                # 事件总线
-from iwan_claude.core.llm.base import LLMProvider               # LLM 提供者接口
-from iwan_claude.core.llm.types import ToolCallBlock            # LLM 响应类型
+from iwan_claude.core.compact.compactor import Compactor  # 会话压缩器
+from iwan_claude.core.context import ExecutionContext  # 执行上下文
+from iwan_claude.core.effort import get_effort_params  # 努力等级参数查询
+from iwan_claude.core.events.bus import EventBus  # 事件总线
+from iwan_claude.core.llm.base import LLMProvider  # LLM 提供者接口
+from iwan_claude.core.llm.types import ToolCallBlock  # LLM 响应类型
+
 # 消息块构造共享工具（与 plan_execute/debate/pipeline 引擎共用）
 from iwan_claude.core.message_blocks import (
     _add_tool_result_to_messages,
@@ -60,9 +63,8 @@ from iwan_claude.core.message_blocks import (
 from iwan_claude.core.permissions.manager import PermissionManager  # 权限管理器
 from iwan_claude.core.run_registry import pop_steers, steer_as_message  # 运行中修正队列
 from iwan_claude.core.system_prompt import build_base_system_prompt  # 构建基础 system prompt
-from iwan_claude.core.tools.invocation import invoke_tool       # 工具调用函数
-from iwan_claude.core.tools.registry import ToolRegistry        # 工具注册表
-import logging
+from iwan_claude.core.tools.invocation import invoke_tool  # 工具调用函数
+from iwan_claude.core.tools.registry import ToolRegistry  # 工具注册表
 
 # 获取当前模块的日志记录器
 log = logging.getLogger(__name__)
@@ -96,7 +98,9 @@ class AgentState(TypedDict):
     system_prompt: str                    # 系统提示词
     step: int                             # 当前步骤数
     result: str | None                    # 最终结果
-    status: Literal["running", "success", "failed"]  # 运行状态
+    # 状态值来自 ExecutionContext.status（str）；这里放宽成 str，
+    # 否则从 context 透传时 TypedDict 只接受字面量联合（mypy typeddict-item）
+    status: str  # 运行状态
     fail_reason: str | None               # 失败原因
     _stop_reason: str | None              # LLM 停止原因（内部）
     _tool_calls: list[ToolCallBlock] | None  # 工具调用列表（内部）
@@ -200,7 +204,9 @@ class LangGraphAgentLoop:
         # 构建并编译工作流图
         self._graph = self._build_graph()
 
-    def _build_graph(self) -> StateGraph:
+    # 返回类型标 Any：build 出来的是 compile() 后的 CompiledStateGraph（可 ainvoke），
+    # 与 StateGraph 不是同一类型；langgraph 的泛型参数在桩里也补不全
+    def _build_graph(self) -> Any:
         """
         构建 LangGraph 工作流图
         
@@ -573,12 +579,12 @@ class LangGraphAgentLoop:
         pending: list[ToolCallBlock] = []
         skip_results: list[tuple[str, object]] = []  # (tc_id, error_result)
         for tc in tool_calls:
-            if self._effort_params.max_files_read > 0 and tc.name in ("read_file", "list_dir", "file_exists", "file_stat"):
+            if self._effort_params.max_files_read > 0 and tc.name in ("read_file", "list_dir", "file_exists", "file_stat"):  # noqa: E501
                 if files_read_count >= self._effort_params.max_files_read:
                     # 超限，构造错误结果
                     skip_results.append((
                         tc.id,
-                        type("R", (), {"content": f"Error: effort level limit reached ({self._effort_params.max_files_read} files max). "
+                        type("R", (), {"content": f"Error: effort level limit reached ({self._effort_params.max_files_read} files max). "  # noqa: E501
                                                   "Increase effort level to read more files.",
                                         "is_error": True})()
                     ))
@@ -686,7 +692,7 @@ class LangGraphAgentLoop:
         try:
             # 执行会话压缩
             await self._compactor.compact(temp_ctx, self._provider)
-        except Exception as exc:
+        except Exception:
             # 压缩失败，记录警告并返回原状态（继续执行）；计数仍递增，避免反复重试
             log.warning("Compaction failed, continuing without compact", exc_info=True)
             return {**state, "_compact_count": state.get("_compact_count", 0) + 1}
@@ -778,7 +784,9 @@ class LangGraphAgentLoop:
             "只回复 DONE 或 CONTINUE。"
         )
 
-        messages = [{"role": "user", "content": reflect_prompt}]
+        # 显式标注元素类型：LLMProvider.chat 期望 list[dict[str, object]]，
+        # 由字面量推断出的 list[dict[str, str]] 会因 list 不变性被拒（mypy）
+        messages: list[dict[str, object]] = [{"role": "user", "content": reflect_prompt}]
 
         try:
             response = await self._provider.chat(

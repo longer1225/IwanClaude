@@ -31,25 +31,25 @@ import argparse
 import sys
 
 # 导入各个子命令的实现函数
-from iwan_claude.cli.commands.chat import cmd_chat           # 聊天命令
-from iwan_claude.cli.commands.core import (                  # 核心服务管理命令
+from iwan_claude.cli.commands.chat import cmd_chat  # 聊天命令
+from iwan_claude.cli.commands.core import (  # 核心服务管理命令
     cmd_core_start,
     cmd_core_status,
     cmd_core_stop,
 )
-from iwan_claude.cli.commands.ping import cmd_ping           # 连接测试命令
-from iwan_claude.cli.commands.run import cmd_run             # 任务执行命令
+from iwan_claude.cli.commands.ping import cmd_ping  # 连接测试命令
+from iwan_claude.cli.commands.run import cmd_run  # 任务执行命令
 from iwan_claude.cli.commands.runctl import cmd_cancel, cmd_steer  # 运行中取消/修正命令
-from iwan_claude.cli.commands.trace import cmd_trace         # 日志追踪命令
-from iwan_claude.cli.commands.trust import cmd_trust         # 项目信任管理命令（Layer 0）
-from iwan_claude.cli.commands.version import cmd_version     # 版本显示命令
+from iwan_claude.cli.commands.trace import cmd_trace  # 日志追踪命令
+from iwan_claude.cli.commands.trust import cmd_trust  # 项目信任管理命令（Layer 0）
+from iwan_claude.cli.commands.version import cmd_version  # 版本显示命令
 
 # 导入懒启动 daemon 守护模块
-from iwan_claude.cli.daemon_guard import ensure_daemon       # 懒启动 daemon
+from iwan_claude.cli.daemon_guard import ensure_daemon  # 懒启动 daemon
 
 # 导入核心模块
-from iwan_claude.core.config import get_config               # 配置加载函数
-from iwan_claude.core.logging_setup import setup_logging     # 日志初始化函数
+from iwan_claude.core.config import get_config  # 配置加载函数
+from iwan_claude.core.logging_setup import setup_logging  # 日志初始化函数
 
 
 # CLI 主入口函数：解析命令行参数并分发到对应子命令

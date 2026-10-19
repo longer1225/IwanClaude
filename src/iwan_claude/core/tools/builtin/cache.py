@@ -25,7 +25,6 @@
 """
 from __future__ import annotations
 
-import hashlib
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -82,7 +81,7 @@ class CacheManager:
     stats = cache.stats()
     ```
     """
-    def __init__(self):
+    def __init__(self) -> None:
         """
         初始化缓存管理器
 

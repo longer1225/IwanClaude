@@ -9,18 +9,16 @@ Pipeline 引擎测试模块
 
 from __future__ import annotations
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from iwan_claude.core.context import ExecutionContext
 from iwan_claude.core.events.bus import EventBus
-from iwan_claude.core.langgraph_pipeline import PipelineState, LangGraphPipelineLoop
+from iwan_claude.core.langgraph_pipeline import LangGraphPipelineLoop, PipelineState
 from iwan_claude.core.llm.base import LLMProvider
 from iwan_claude.core.llm.types import LlmResponse
 from iwan_claude.core.tools.registry import ToolRegistry
-
 
 # ======================================================================
 # 辅助函数

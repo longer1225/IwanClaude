@@ -184,7 +184,7 @@ class PipManageTool(BaseTool):
 
         # 检查 install/uninstall/upgrade 操作是否提供了 package 参数
         if action in ["install", "uninstall", "upgrade"] and not p.package:
-            return ToolResult(content="Package name is required for install, uninstall, and upgrade", is_error=True, error_type="schema_error")
+            return ToolResult(content="Package name is required for install, uninstall, and upgrade", is_error=True, error_type="schema_error")  # noqa: E501
 
         try:
             # 3. 根据 action 创建对应的 pip 子进程
@@ -337,7 +337,7 @@ class DependencyCheckTool(BaseTool):
         req_path = Path(req_file).resolve()
 
         if not req_path.exists():
-            return ToolResult(content=f"Requirements file not found: {req_path}", is_error=True, error_type="runtime_error")
+            return ToolResult(content=f"Requirements file not found: {req_path}", is_error=True, error_type="runtime_error")  # noqa: E501
 
         try:
             # 3. 执行 pip list --outdated 命令

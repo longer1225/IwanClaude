@@ -27,7 +27,7 @@
 【设计目的】
 提供统一的事件定义，
 便于服务器向客户端推送事件和客户端处理事件。
-"""
+"""  # noqa: E501
 from __future__ import annotations
 
 from typing import Annotated, Any, Literal

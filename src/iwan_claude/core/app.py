@@ -53,7 +53,7 @@ import sys
 import time
 from datetime import UTC
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
     # 仅类型标注用的前向引用（装配处运行期局部导入，与 hooks 同一模式，
@@ -66,163 +66,177 @@ if TYPE_CHECKING:
 IS_WINDOWS = sys.platform.startswith("win")
 
 # Pydantic：数据验证和序列化库
-from pydantic import BaseModel
+from pydantic import BaseModel  # noqa: E402
 
 # 导入包版本信息
-import iwan_claude
+import iwan_claude  # noqa: E402
+from iwan_claude.core import (  # noqa: E402
+    gitpanel as core_git,  # noqa: E402  本地 git 面板支撑（status/stage/commit/分支/log/pull/push）
+)
+from iwan_claude.core import pr as core_pr  # noqa: E402  PR 面板支撑（git 解析 + GitHub API）
 
 # 导入 RPC 命令和响应的数据模型
-from iwan_claude.core.bus.commands import (
-    AgentRunCommand,                # Agent 运行命令
-    AgentRunResult,                 # Agent 运行结果
-    CheckpointInfo,                 # 检查点信息
-    EventSubscribeCommand,          # 事件订阅命令
-    EventSubscribeResult,           # 事件订阅结果
-    FileChangeInfo,                 # 文件变更条目
-    FileChangesListCommand,         # 文件变更清单命令
-    FileChangesListResult,          # 文件变更清单结果
-    FileRestoreCommand,             # 文件还原命令
-    FileRestoreItem,                # 文件还原结果行
-    FileRestoreResult,              # 文件还原结果
-    GitBranchesCommand,             # git 分支列表命令
-    GitBranchesResult,              # git 分支列表结果
-    GitCheckoutCommand,             # git 切分支命令
-    GitCommitCommand,               # git 提交命令
-    GitLogCommand,                  # git 提交历史命令
-    GitLogResult,                   # git 提交历史结果
-    GitOpResult,                    # git 写操作统一结果
-    GitPathsCommand,                # git 按路径操作命令（stage/unstage/discard）
-    GitPullCommand,                 # git 拉取命令
-    GitPushCommand,                 # git 推送命令
-    GitStatusCommand,               # git 状态查询命令
-    GitStatusResult,                # git 状态查询结果
-    McpServerStatus,                # MCP 服务器运行时状态行
-    McpStatusCommand,               # MCP 状态查询命令
-    McpStatusResult,                # MCP 状态查询结果
-    PermissionRespondCommand,       # 权限响应命令
-    PermissionRespondResult,        # 权限响应结果
-    PongResult,                     # Ping 响应
-    PluginInstallCommand,           # 插件 URL 安装命令
-    PluginInstallResult,            # 插件 URL 安装结果
-    PluginListCommand,              # 插件列表命令
-    PluginListResult,               # 插件列表结果
-    PluginRow,                      # 插件行模型
-    PluginSetEnabledCommand,        # 插件启停命令
-    PluginSetEnabledResult,         # 插件启停结果
-    PrContextCommand,               # PR 上下文命令（本地 git 解析）
-    PrContextResult,                # PR 上下文结果
-    PrCreateCommand,                # PR 创建命令（push + 建 PR）
-    PrCreateResult,                 # PR 创建结果
-    PrListCommand,                  # PR 列表命令
-    PrListResult,                   # PR 列表结果
-    PrReviewCommand,                # PR 评审命令（拉 diff + 起评审会话）
-    PrReviewResult,                 # PR 评审结果
-    RunCancelCommand,               # 取消运行命令
-    RunCancelResult,                # 取消运行结果
-    RunSteerCommand,                # 运行中修正命令
-    RunSteerResult,                 # 运行中修正结果
-    ScheduleCreateCommand,          # 定时任务创建命令
-    ScheduleDeleteCommand,          # 定时任务删除命令
-    ScheduleListCommand,            # 定时任务列表命令
-    ScheduleListResult,             # 定时任务列表结果
-    ScheduleOpResult,               # 定时任务写操作统一结果
-    ScheduleRunNowCommand,          # 定时任务立即执行命令
-    ScheduleTaskInfo,               # 定时任务行
-    ScheduleUpdateCommand,          # 定时任务更新命令
-    SpeechTranscribeCommand,        # 语音转写命令
-    SpeechTranscribeResult,         # 语音转写结果
-    SshConnAddCommand,              # SSH 连接新增命令
-    SshConnDeleteCommand,           # SSH 连接删除命令
-    SshConnInfo,                    # SSH 连接行
-    SshConnListCommand,             # SSH 连接列表命令
-    SshConnListResult,              # SSH 连接列表结果
-    SshConnOpResult,                # SSH 连接写操作统一结果
-    SshConnUpdateCommand,           # SSH 连接更新命令
-    SshHostTrustCommand,            # SSH 主机信任命令
-    SshKeyGenerateCommand,          # SSH 密钥生成命令
-    SshKeyOpResult,                 # SSH 密钥操作结果
-    SshKeyStatusCommand,            # SSH 密钥状态查询命令
-    SshKeyStatusResult,             # SSH 密钥状态结果
-    SshTermCloseCommand,            # SSH 终端关闭会话命令
-    SshTermOpenCommand,             # SSH 终端开会话命令
-    SshTermOpenResult,              # SSH 终端开会话结果
-    SshTermOpResult,                # SSH 终端操作统一结果
-    SshTermResizeCommand,           # SSH 终端尺寸调整命令
-    SshTermWriteCommand,            # SSH 终端输入命令
-    SshTrustResult,                 # SSH 主机信任结果
-    SessionCheckpointListCommand,   # 检查点列表命令
-    SessionCheckpointListResult,    # 检查点列表结果
-    SessionCheckpointRestoreCommand, # 检查点恢复命令
+from iwan_claude.core.bus.commands import (  # noqa: E402
+    AgentRunCommand,  # Agent 运行命令
+    AgentRunResult,  # Agent 运行结果
+    CheckpointInfo,  # 检查点信息
+    EventSubscribeCommand,  # 事件订阅命令
+    EventSubscribeResult,  # 事件订阅结果
+    FileChangeInfo,  # 文件变更条目
+    FileChangesListCommand,  # 文件变更清单命令
+    FileChangesListResult,  # 文件变更清单结果
+    FileRestoreCommand,  # 文件还原命令
+    FileRestoreItem,  # 文件还原结果行
+    FileRestoreResult,  # 文件还原结果
+    GitBranchesCommand,  # git 分支列表命令
+    GitBranchesResult,  # git 分支列表结果
+    GitCheckoutCommand,  # git 切分支命令
+    GitCommitCommand,  # git 提交命令
+    GitLogCommand,  # git 提交历史命令
+    GitLogResult,  # git 提交历史结果
+    GitOpResult,  # git 写操作统一结果
+    GitPathsCommand,  # git 按路径操作命令（stage/unstage/discard）
+    GitPullCommand,  # git 拉取命令
+    GitPushCommand,  # git 推送命令
+    GitStatusCommand,  # git 状态查询命令
+    GitStatusResult,  # git 状态查询结果
+    McpServerStatus,  # MCP 服务器运行时状态行
+    McpStatusCommand,  # MCP 状态查询命令
+    McpStatusResult,  # MCP 状态查询结果
+    PermissionRespondCommand,  # 权限响应命令
+    PermissionRespondResult,  # 权限响应结果
+    PluginInstallCommand,  # 插件 URL 安装命令
+    PluginInstallResult,  # 插件 URL 安装结果
+    PluginListCommand,  # 插件列表命令
+    PluginListResult,  # 插件列表结果
+    PluginRow,  # 插件行模型
+    PluginSetEnabledCommand,  # 插件启停命令
+    PluginSetEnabledResult,  # 插件启停结果
+    PongResult,  # Ping 响应
+    PrContextCommand,  # PR 上下文命令（本地 git 解析）
+    PrContextResult,  # PR 上下文结果
+    PrCreateCommand,  # PR 创建命令（push + 建 PR）
+    PrCreateResult,  # PR 创建结果
+    PrListCommand,  # PR 列表命令
+    PrListResult,  # PR 列表结果
+    PrReviewCommand,  # PR 评审命令（拉 diff + 起评审会话）
+    PrReviewResult,  # PR 评审结果
+    RunCancelCommand,  # 取消运行命令
+    RunCancelResult,  # 取消运行结果
+    RunSteerCommand,  # 运行中修正命令
+    RunSteerResult,  # 运行中修正结果
+    ScheduleCreateCommand,  # 定时任务创建命令
+    ScheduleDeleteCommand,  # 定时任务删除命令
+    ScheduleListCommand,  # 定时任务列表命令
+    ScheduleListResult,  # 定时任务列表结果
+    ScheduleOpResult,  # 定时任务写操作统一结果
+    ScheduleRunNowCommand,  # 定时任务立即执行命令
+    ScheduleTaskInfo,  # 定时任务行
+    ScheduleUpdateCommand,  # 定时任务更新命令
+    SessionCheckpointListCommand,  # 检查点列表命令
+    SessionCheckpointListResult,  # 检查点列表结果
+    SessionCheckpointRestoreCommand,  # 检查点恢复命令
     SessionCheckpointRestoreResult,  # 检查点恢复结果
-    SessionCloseCommand,            # 会话关闭命令
-    SessionCloseResult,             # 会话关闭结果
-    SessionCompactCommand,          # 会话压缩命令
-    SessionCompactResult,           # 会话压缩结果
-    SessionCreateCommand,           # 会话创建命令
-    SessionCreateResult,            # 会话创建结果
-    SessionGetHistoryCommand,       # 获取历史命令
-    SessionGetHistoryResult,        # 获取历史结果
-    SessionSendMessageCommand,      # 发送消息命令
-    SessionSendMessageResult,       # 发送消息结果
-    SessionSetAutoModeCommand,      # 设置自动模式命令
-    SessionSetAutoModeResult,       # 设置自动模式结果
-    SessionSetPermissionModeCommand,   # 设置五态权限模式命令
-    SessionSetPermissionModeResult,    # 设置五态权限模式结果
-    SessionSetEffortLevelCommand,   # 设置努力等级命令
-    SessionSetEffortLevelResult,    # 设置努力等级结果
-    SessionSetModelCommand,         # 设置模型预设命令
-    SessionSetModelResult,          # 设置模型预设结果
-    SessionSetEngineCommand,        # 设置引擎命令
-    SessionSetEngineResult,         # 设置引擎结果
-    SessionListCommand,             # 会话列表命令
-    SessionListResult,              # 会话列表结果
-    SessionInfo,                    # 会话信息
-    SessionRenameCommand,           # 重命名会话命令
-    SessionRenameResult,            # 重命名会话结果
-    TrustListCommand,               # 信任列表命令
-    TrustListResult,                # 信任列表结果
-    TrustRespondCommand,            # 信任响应命令
-    TrustRespondResult,             # 信任响应结果
-    TrustRevokeCommand,             # 信任撤销命令
-    TrustRevokeResult,              # 信任撤销结果
-    WorkflowCancelCommand,          # 工作流取消命令
-    WorkflowDeleteCommand,          # 工作流删除命令
-    WorkflowGetCommand,             # 工作流详情命令
-    WorkflowGetResult,              # 工作流详情结果
-    WorkflowInfo,                   # 工作流定义行
-    WorkflowListCommand,            # 工作流列表命令
-    WorkflowListResult,             # 工作流列表结果
-    WorkflowNodeRunInfo,            # 工作流节点运行态行
-    WorkflowOpResult,               # 工作流写操作统一结果
-    WorkflowRunCommand,             # 工作流运行命令
-    WorkflowRunInfo,                # 工作流运行行
-    WorkflowRunsCommand,            # 工作流运行历史命令
-    WorkflowRunsResult,             # 工作流运行历史结果
-    WorkflowSaveCommand,            # 工作流保存命令
+    SessionCloseCommand,  # 会话关闭命令
+    SessionCloseResult,  # 会话关闭结果
+    SessionCompactCommand,  # 会话压缩命令
+    SessionCompactResult,  # 会话压缩结果
+    SessionCreateCommand,  # 会话创建命令
+    SessionCreateResult,  # 会话创建结果
+    SessionGetHistoryCommand,  # 获取历史命令
+    SessionGetHistoryResult,  # 获取历史结果
+    SessionInfo,  # 会话信息
+    SessionListResult,  # 会话列表结果
+    SessionRenameCommand,  # 重命名会话命令
+    SessionRenameResult,  # 重命名会话结果
+    SessionSendMessageCommand,  # 发送消息命令
+    SessionSendMessageResult,  # 发送消息结果
+    SessionSetAutoModeCommand,  # 设置自动模式命令
+    SessionSetAutoModeResult,  # 设置自动模式结果
+    SessionSetEffortLevelCommand,  # 设置努力等级命令
+    SessionSetEffortLevelResult,  # 设置努力等级结果
+    SessionSetEngineCommand,  # 设置引擎命令
+    SessionSetEngineResult,  # 设置引擎结果
+    SessionSetModelCommand,  # 设置模型预设命令
+    SessionSetModelResult,  # 设置模型预设结果
+    SessionSetPermissionModeCommand,  # 设置五态权限模式命令
+    SessionSetPermissionModeResult,  # 设置五态权限模式结果
+    SpeechTranscribeCommand,  # 语音转写命令
+    SpeechTranscribeResult,  # 语音转写结果
+    SshConnAddCommand,  # SSH 连接新增命令
+    SshConnDeleteCommand,  # SSH 连接删除命令
+    SshConnInfo,  # SSH 连接行
+    SshConnListCommand,  # SSH 连接列表命令
+    SshConnListResult,  # SSH 连接列表结果
+    SshConnOpResult,  # SSH 连接写操作统一结果
+    SshConnUpdateCommand,  # SSH 连接更新命令
+    SshHostTrustCommand,  # SSH 主机信任命令
+    SshKeyGenerateCommand,  # SSH 密钥生成命令
+    SshKeyOpResult,  # SSH 密钥操作结果
+    SshKeyStatusCommand,  # SSH 密钥状态查询命令
+    SshKeyStatusResult,  # SSH 密钥状态结果
+    SshTermCloseCommand,  # SSH 终端关闭会话命令
+    SshTermOpenCommand,  # SSH 终端开会话命令
+    SshTermOpenResult,  # SSH 终端开会话结果
+    SshTermOpResult,  # SSH 终端操作统一结果
+    SshTermResizeCommand,  # SSH 终端尺寸调整命令
+    SshTermWriteCommand,  # SSH 终端输入命令
+    SshTrustResult,  # SSH 主机信任结果
+    TrustListResult,  # 信任列表结果
+    TrustRespondCommand,  # 信任响应命令
+    TrustRespondResult,  # 信任响应结果
+    TrustRevokeCommand,  # 信任撤销命令
+    TrustRevokeResult,  # 信任撤销结果
+    WorkflowCancelCommand,  # 工作流取消命令
+    WorkflowDeleteCommand,  # 工作流删除命令
+    WorkflowGetCommand,  # 工作流详情命令
+    WorkflowGetResult,  # 工作流详情结果
+    WorkflowInfo,  # 工作流定义行
+    WorkflowListCommand,  # 工作流列表命令
+    WorkflowListResult,  # 工作流列表结果
+    WorkflowNodeRunInfo,  # 工作流节点运行态行
+    WorkflowOpResult,  # 工作流写操作统一结果
+    WorkflowRunCommand,  # 工作流运行命令
+    WorkflowRunInfo,  # 工作流运行行
+    WorkflowRunsCommand,  # 工作流运行历史命令
+    WorkflowRunsResult,  # 工作流运行历史结果
+    WorkflowSaveCommand,  # 工作流保存命令
 )
-from iwan_claude.core.bus.envelope import EventPushEnvelope  # 事件推送封装
+from iwan_claude.core.bus.envelope import EventPushEnvelope  # 事件推送封装  # noqa: E402
 
 # 导入核心组件
-from iwan_claude.core.config import (
+from iwan_claude.core.config import (  # noqa: E402
     IwanConfig,
     get_config,
-    resolve_checkpoint_db_path,                            # checkpoint DB 路径解析（锚定会话根）
-    resolve_sessions_root,                                 # 会话根解析（工作流 run 子目录锚定）
-)   # 配置
-from iwan_claude.core import gitpanel as core_git  # noqa: E402  本地 git 面板支撑（status/stage/commit/分支/log/pull/push）
-from iwan_claude.core import pr as core_pr  # noqa: E402  PR 面板支撑（git 解析 + GitHub API）
-from iwan_claude.core.events.bus import EventBus             # 事件总线
-from iwan_claude.core.llm import create_provider_from_config # LLM 提供者创建
-from iwan_claude.core.logging_setup import setup_logging     # 日志初始化
-from iwan_claude.core.mcp.server import McpServerManager     # MCP 服务器管理
-from iwan_claude.core.permissions.manager import PermissionManager  # 权限管理
-from iwan_claude.core.permissions.storage import load_policy_file   # 加载权限策略
-from iwan_claude.core.schedule import ScheduleStore, Scheduler  # noqa: E402  定时任务（存储 + 调度循环）
+    resolve_checkpoint_db_path,  # checkpoint DB 路径解析（锚定会话根）
+    resolve_sessions_root,  # 会话根解析（工作流 run 子目录锚定）
+)  # 配置
+from iwan_claude.core.events.bus import EventBus  # 事件总线  # noqa: E402
+from iwan_claude.core.llm import create_provider_from_config  # LLM 提供者创建  # noqa: E402
+from iwan_claude.core.logging_setup import setup_logging  # 日志初始化  # noqa: E402
+from iwan_claude.core.mcp.server import McpServerManager  # MCP 服务器管理  # noqa: E402
+from iwan_claude.core.permissions.manager import PermissionManager  # 权限管理  # noqa: E402
+from iwan_claude.core.permissions.storage import load_policy_file  # 加载权限策略  # noqa: E402
+from iwan_claude.core.run_registry import add_steer, request_cancel  # 活跃运行注册表：取消/修正  # noqa: E402
+from iwan_claude.core.runner import AgentRunner  # Agent 运行器  # noqa: E402
+from iwan_claude.core.runs import events_file, new_run_id  # 运行相关工具  # noqa: E402
+from iwan_claude.core.schedule import Scheduler, ScheduleStore  # noqa: E402  定时任务（存储 + 调度循环）
+from iwan_claude.core.session import SessionManager, SessionStore  # 会话管理  # noqa: E402
+from iwan_claude.core.shadow import ShadowStore  # Layer 4 文件回滚  # noqa: E402
 from iwan_claude.core.speech import SpeechTranscriber, prewarm_enabled  # noqa: E402  本地语音转写器（V1）
 from iwan_claude.core.ssh import keys as ssh_keys  # noqa: E402  SSH 密钥与主机信任（M4a）
 from iwan_claude.core.ssh.connections import SshConnStore  # noqa: E402  SSH 连接表存储（M4a）
 from iwan_claude.core.ssh.session import SshSessionManager  # noqa: E402  SSH 终端会话池（M4c）
+
+# 后台子 Agent 注册表：每 daemon 唯一实例，跨 run 共享
+from iwan_claude.core.subagent.registry import BackgroundTaskRegistry  # noqa: E402
 from iwan_claude.core.subagent.tool import SpawnAgentTool  # noqa: E402  工作流节点=后台子 Agent（W1）
+from iwan_claude.core.trace.record import TraceRecord  # 跟踪记录  # noqa: E402
+from iwan_claude.core.trace.writer import TraceWriter  # 跟踪写入器  # noqa: E402
+from iwan_claude.core.transport.ipc_broadcaster import IpcEventBroadcaster  # IPC 广播器  # noqa: E402
+from iwan_claude.core.transport.socket_server import SocketServer, get_connection_writer  # Socket 服务端  # noqa: E402
+from iwan_claude.core.trust import TrustStore, normalize_dir_key  # Layer 0 信任门  # noqa: E402
+from iwan_claude.core.trust.gate import TrustGate  # Layer 0 信任闸门（未答复不启动 run）  # noqa: E402
 from iwan_claude.core.workflow.engine import (  # noqa: E402  工作流引擎装配（W1）
     NodeLaunchCtx,
     NodeTransition,
@@ -230,19 +244,6 @@ from iwan_claude.core.workflow.engine import (  # noqa: E402  工作流引擎装
     WorkflowEngine,
 )
 from iwan_claude.core.workflow.store import WorkflowStore  # noqa: E402  工作流定义/运行存储（W1）
-from iwan_claude.core.trust import TrustStore, normalize_dir_key    # Layer 0 信任门
-from iwan_claude.core.trust.gate import TrustGate                   # Layer 0 信任闸门（未答复不启动 run）
-from iwan_claude.core.shadow import ShadowStore                     # Layer 4 文件回滚
-from iwan_claude.core.run_registry import add_steer, request_cancel  # 活跃运行注册表：取消/修正
-from iwan_claude.core.runner import AgentRunner              # Agent 运行器
-from iwan_claude.core.runs import events_file, new_run_id    # 运行相关工具
-from iwan_claude.core.session import SessionManager, SessionStore  # 会话管理
-# 后台子 Agent 注册表：每 daemon 唯一实例，跨 run 共享
-from iwan_claude.core.subagent.registry import BackgroundTaskRegistry
-from iwan_claude.core.trace.record import TraceRecord        # 跟踪记录
-from iwan_claude.core.trace.writer import TraceWriter        # 跟踪写入器
-from iwan_claude.core.transport.ipc_broadcaster import IpcEventBroadcaster  # IPC 广播器
-from iwan_claude.core.transport.socket_server import SocketServer, get_connection_writer  # Socket 服务端
 
 # 获取日志记录器
 logger = logging.getLogger(__name__)
@@ -1280,7 +1281,7 @@ class CoreApp:
             if self._permission_manager is not None else "default"
         )
         effort_level = self._permission_manager.get_effort_level() if self._permission_manager is not None else "medium"
-        model_preset = self._permission_manager.get_model_preset() if self._permission_manager is not None else "balanced"
+        model_preset = self._permission_manager.get_model_preset() if self._permission_manager is not None else "balanced"  # noqa: E501
         # ===== Layer 0 信任门（S9 Part A）=====
         # 信任判定对准的目录必须与会话实际工作目录一致：cmd.cwd 为空时
         # create() 走 daemon 进程 CWD 兜底，这里用同一判据，否则弹窗问 A 写的是 B
@@ -1908,6 +1909,7 @@ class CoreApp:
             SessionSetEngineResult: 包含设置后的引擎名称
         """
         assert self._sessions is not None
+        assert self._config is not None
 
         # 验证请求参数
         cmd = SessionSetEngineCommand.model_validate(params)
@@ -1999,6 +2001,7 @@ class CoreApp:
         返回：
             dict: 包含 engine 和 checkpoint_backend
         """
+        assert self._config is not None
         return {
             "engine": self._config.agent.engine,
             "checkpoint_backend": self._config.agent.checkpoint_backend,
@@ -2341,7 +2344,11 @@ class CoreApp:
             render_claude_md_prompt,
         )
         from iwan_claude.core.rag.embedding import get_embedding_provider
-        from iwan_claude.core.rag.vectorstore import get_vector_store
+        from iwan_claude.core.rag.vectorstore import MemoryVectorStore, get_vector_store
+
+        # 本段之后的所有构造都依赖配置：显式断言，避免 mypy 把 `IwanConfig | None`
+        # 带进每个调用点（也为未来"配置晚到"的改动留一个明确前置条件）
+        assert self._config is not None
 
         memory_dir = Path.home() / ".iwan_claude" / "memory"
         memory_dir.mkdir(parents=True, exist_ok=True)
@@ -2361,7 +2368,9 @@ class CoreApp:
         self._memory = MemoryManager(
             long_term=long_term,
             vector_memory=VectorMemory(
-                vector_store=get_vector_store(),
+                # 工厂签名刻意返回抽象 VectorStore（为将来换后端），但 VectorMemory 用到
+                # MemoryVectorStore 的 size/_chunks，这里按实现收窄——当前工厂只造这一种
+                vector_store=cast(MemoryVectorStore, get_vector_store()),
                 embedding_provider=embedder,
                 # 【设计】index_path 是"目录"不是"文件"（store.save 会 mkdir 后写
                 # chunks.json/vectors.json 两个文件）——旧实现传 vector_memory.json，
@@ -2380,11 +2389,14 @@ class CoreApp:
         # 注册表若跟着 runner 走，上一轮 spawn_agent 的 run_id 下一轮
         # 就查不到、也取消不了（工具描述的"稍后用 agent_result 取"变成假承诺）
         self._subagent_registry = BackgroundTaskRegistry()
+        # 【学习要点】把 self._config 先绑到局部变量再给 lambda 用：mypy 对属性访问的
+        # 窄化不会穿透到闭包内部，直接写 self._config 会被当成 IwanConfig|None
+        cfg = self._config
         # 使用 lambda 作为 runner_factory，AgentRunner 每 run 新建、共享注册表
         self._sessions = SessionManager(
             store,
             runner_factory=lambda: AgentRunner(
-                self._config,
+                cfg,
                 bus=self._bus,
                 trace=self._trace,
                 permission_manager=self._permission_manager,

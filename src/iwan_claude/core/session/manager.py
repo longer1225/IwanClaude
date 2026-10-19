@@ -53,12 +53,13 @@ from iwan_claude.core.events.bus import EventBus
 from iwan_claude.core.run_registry import cancel_requested, register_run, unregister_run
 from iwan_claude.core.runs import new_run_id
 from iwan_claude.core.session.model import Session, SessionMode
-from iwan_claude.core.snapshot import format_recovery_context, read_snapshot
 from iwan_claude.core.session.store import SessionStore
 from iwan_claude.core.skills.loader import SkillLoader
+from iwan_claude.core.snapshot import format_recovery_context, read_snapshot
 
 # 类型检查时导入（避免循环导入）
 if TYPE_CHECKING:
+    from iwan_claude.core.bus.commands import SessionCompactResult
     from iwan_claude.core.llm.base import LLMProvider
     from iwan_claude.core.memory.manager import MemoryManager
     from iwan_claude.core.runner import AgentRunner
@@ -687,7 +688,7 @@ class SessionManager:
             # 8. 发布关闭事件
             await self._bus.publish(SessionClosedEvent(session_id=sid, ts=session.updated_at))
 
-    async def compact(self, sid: str, focus: str = "") -> Any:
+    async def compact(self, sid: str, focus: str = "") -> SessionCompactResult:
         """
         手动压缩指定会话的消息历史
 

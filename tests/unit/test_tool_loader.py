@@ -16,14 +16,13 @@ from pathlib import Path
 
 import pytest
 
-from iwan_claude.core.tools.base import BaseTool, ToolResult
+from iwan_claude.core.tools.base import BaseTool
 from iwan_claude.core.tools.builtin.hot_reload import (
     ListCustomToolsTool,
     ReloadToolsTool,
 )
 from iwan_claude.core.tools.loader import ToolLoader
 from iwan_claude.core.tools.registry import ToolRegistry
-
 
 # ======================================================================
 # 辅助函数：在临时目录创建工具 .py 文件

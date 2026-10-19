@@ -149,7 +149,9 @@ class WorkflowExecutor:
 
             # 处理结果
             for name, result in zip(ready, task_results):
-                if isinstance(result, Exception):
+                # gather(return_exceptions=True) 也可能给出 BaseException（如 CancelledError），
+                # 只判 Exception 会让它漏进 results、把非 str 的值塞进 dict；统一按失败收口
+                if isinstance(result, BaseException):
                     log.error("Task '%s' failed: %s", name, result)
                     # 保留已完成的结果，但标记失败
                     results[name] = f"ERROR: {result}"

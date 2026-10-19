@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 
 from iwan_claude.core.session.store import SessionStore
 from iwan_claude.core.tools.base import BaseTool, ToolResult

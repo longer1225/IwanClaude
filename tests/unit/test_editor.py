@@ -80,7 +80,7 @@ def _write_sample(tmp_path: Path, trailing_eol: bool = True) -> Path:
 @pytest.mark.asyncio
 async def test_view_file_default_full(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
-    f = _write_sample(tmp_path)
+    _write_sample(tmp_path)
     result = await ViewFileTool().invoke({"path": "sample.txt"})
     assert not result.is_error
     assert "total_lines=12" in result.content
@@ -94,7 +94,7 @@ async def test_view_file_default_full(tmp_path: Path, monkeypatch: pytest.Monkey
 @pytest.mark.asyncio
 async def test_view_file_range(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
-    f = _write_sample(tmp_path)
+    _write_sample(tmp_path)
     result = await ViewFileTool().invoke(
         {"path": "sample.txt", "start_line": 5, "end_line": 7}
     )
@@ -110,7 +110,7 @@ async def test_view_file_range(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
 @pytest.mark.asyncio
 async def test_view_file_pagination(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
-    f = _write_sample(tmp_path)  # 12 lines
+    _write_sample(tmp_path)  # 12 lines
     r1 = await ViewFileTool().invoke(
         {"path": "sample.txt", "page": 1, "page_size": 5}
     )
@@ -126,7 +126,7 @@ async def test_view_file_pagination(tmp_path: Path, monkeypatch: pytest.MonkeyPa
 @pytest.mark.asyncio
 async def test_view_file_hide_line_numbers_and_total(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
-    f = _write_sample(tmp_path)
+    _write_sample(tmp_path)
     result = await ViewFileTool().invoke(
         {
             "path": "sample.txt",
@@ -258,7 +258,7 @@ async def test_edit_by_lines_bounds_and_validation(tmp_path: Path, monkeypatch: 
 @pytest.mark.asyncio
 async def test_edit_by_lines_no_backup_flag(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
-    f = _prog(tmp_path)
+    _prog(tmp_path)
     await EditByLinesTool().invoke(
         {"path": "prog.py", "start_line": 1, "end_line": 1, "replacement": "# nothing\n", "backup": False}
     )

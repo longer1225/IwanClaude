@@ -29,7 +29,7 @@
 - 权限系统在 check_and_wait 中调用 log_permission_decision 记录决策
 - bash 工具在网络命令阻断时调用 log_sandbox_block
 - scrub_env 在脱敏时调用 log_env_scrub
-"""
+"""  # noqa: E501
 from __future__ import annotations
 
 import json

@@ -134,7 +134,7 @@ class ListCheckpointsTool(BaseTool):
         # 检查 checkpointer 是否可用
         if checkpointer is None:
             return ToolResult(
-                content="Checkpointer not available. Checkpoints are only available when using LangGraph engine with checkpoint backend enabled (memory or sqlite).",
+                content="Checkpointer not available. Checkpoints are only available when using LangGraph engine with checkpoint backend enabled (memory or sqlite).",  # noqa: E501
                 is_error=False,
             )
 
@@ -282,7 +282,7 @@ class RestoreCheckpointTool(BaseTool):
         # 检查 checkpointer 是否可用
         if checkpointer is None:
             return ToolResult(
-                content="Checkpointer not available. Checkpoints are only available when using LangGraph engine with checkpoint backend enabled (memory or sqlite).",
+                content="Checkpointer not available. Checkpoints are only available when using LangGraph engine with checkpoint backend enabled (memory or sqlite).",  # noqa: E501
                 is_error=False,
             )
 

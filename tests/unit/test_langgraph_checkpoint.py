@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -9,8 +8,8 @@ import pytest
 from iwan_claude.core.config import AgentConfig, IwanConfig
 from iwan_claude.core.context import ExecutionContext
 from iwan_claude.core.events.bus import EventBus
-from iwan_claude.core.llm.types import LlmResponse, ToolCallBlock, UsageStats
 from iwan_claude.core.langgraph_loop import LangGraphAgentLoop
+from iwan_claude.core.llm.types import LlmResponse, UsageStats
 from iwan_claude.core.tools.registry import ToolRegistry
 
 
@@ -185,8 +184,8 @@ async def test_runner_list_checkpoints_memory(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_runner_list_checkpoints_none_backend(tmp_path: Path) -> None:
-    from iwan_claude.core.runner import AgentRunner
     from iwan_claude.core.config import IwanConfig
+    from iwan_claude.core.runner import AgentRunner
 
     config = IwanConfig(agent=AgentConfig(checkpoint_backend="none"))
     runner = AgentRunner(config)

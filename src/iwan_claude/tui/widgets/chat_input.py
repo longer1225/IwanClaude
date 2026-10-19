@@ -1,9 +1,9 @@
-# -*- coding: utf-8 -*-
 # ---------------------------------------------------------------------------
 # 聊天输入框模块
 # ---------------------------------------------------------------------------
 
 from __future__ import annotations
+
 # 本模块从 app.py 中提取 ChatTextArea 类，负责用户输入的接收和提交。
 # 设计要点：
 # - Enter 提交消息（当补全弹窗有选中项时优先选择命令）
@@ -11,7 +11,6 @@ from __future__ import annotations
 # - 斜杠命令导航（↑↓/Tab/Esc）转发到 SlashCompleteWidget
 # - 通过消息机制（Submitted、SlashChanged）与宿主 App 通信
 # ---------------------------------------------------------------------------
-
 # 从 textual 导入 events 模块，用于处理键盘事件
 from textual import events
 
