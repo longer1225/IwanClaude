@@ -479,6 +479,28 @@ def check_total_quota(additional_bytes: int = 0) -> None:
     get_sandbox().check_total_quota(additional_bytes)
 
 
+# 写文件前的统一配额检查：单文件大小 + 总配额（覆盖写只计增量，不重复计费）
+def check_write_quota(path: Path, content: str | bytes, *, append: bool = False) -> None:
+    """
+    所有"落盘"工具在写之前都应调用本函数。
+
+    【为什么要统一】过去只有 write_file 做 check_file_size + check_total_quota，
+    edit_by_lines / insert_lines / delete_lines 等直接 Path.write_bytes，
+    绕过了磁盘配额（技术债）。这里把两步合并，按"新旧差值"计总配额：
+    覆盖写一个 10MB 文件不该再交 10MB 的额度，否则修个小笔误也可能被拒。
+    append 模式则按全文长度计（内容全部是新增）。
+    """
+    check_file_size(content)
+    size = len(content.encode("utf-8")) if isinstance(content, str) else len(content)
+    old = 0
+    if not append:
+        try:
+            old = path.stat().st_size
+        except OSError:
+            old = 0
+    check_total_quota(max(0, size - old))
+
+
 def get_search_root() -> Path:
     """
     获取搜索工具的根目录

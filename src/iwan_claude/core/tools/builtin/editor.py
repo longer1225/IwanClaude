@@ -35,7 +35,7 @@ from typing import ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from iwan_claude.core.sandbox import validate_path
+from iwan_claude.core.sandbox import check_write_quota, validate_path
 from iwan_claude.core.tools.base import BaseTool, ToolResult
 
 # ===== 兜底常量（配置加载失败时使用，通常不会触发） =====
@@ -694,10 +694,19 @@ class EditByLinesTool(BaseTool, _EditorWriteToolMixin):
                     new_lines[-1] = _strip_eol(new_lines[-1])
 
         new_text = join_preserve_endings(new_lines)
+        new_bytes = new_text.encode("utf-8")
         try:
+            # 配额检查与其他写工具统一（此前 edit_by_lines 直接落盘，可绕过磁盘配额）
+            check_write_quota(path, new_bytes)
             # Write raw bytes to avoid OS newline translation (e.g. Windows
             # would double '\n' → '\r\r\n' on top of our already-CRLF data).
-            path.write_bytes(new_text.encode("utf-8"))
+            path.write_bytes(new_bytes)
+        except ValueError as exc:
+            return ToolResult(
+                content=f"edit_by_lines: {exc}",
+                is_error=True,
+                error_type="runtime_error",
+            )
         except OSError as exc:
             return ToolResult(
                 content=f"edit_by_lines: write failed for {p.path}: {exc}",
@@ -857,7 +866,15 @@ class EditBySearchTool(BaseTool, _EditorWriteToolMixin):
                     error_type="runtime_error",
                 )
         try:
-            path.write_bytes(new_text.encode("utf-8"))
+            new_bytes = new_text.encode("utf-8")
+            check_write_quota(path, new_bytes)  # 与其他写工具统一的配额检查
+            path.write_bytes(new_bytes)
+        except ValueError as exc:
+            return ToolResult(
+                content=f"edit_by_search: {exc}",
+                is_error=True,
+                error_type="runtime_error",
+            )
         except OSError as exc:
             return ToolResult(
                 content=f"edit_by_search: write failed {p.path}: {exc}",
@@ -994,7 +1011,15 @@ class InsertAtLineTool(BaseTool, _EditorWriteToolMixin):
 
         new_text = join_preserve_endings(new_lines)
         try:
-            path.write_bytes(new_text.encode("utf-8"))
+            new_bytes = new_text.encode("utf-8")
+            check_write_quota(path, new_bytes)  # 与其他写工具统一的配额检查
+            path.write_bytes(new_bytes)
+        except ValueError as exc:
+            return ToolResult(
+                content=f"insert_at_line: {exc}",
+                is_error=True,
+                error_type="runtime_error",
+            )
         except OSError as exc:
             return ToolResult(
                 content=f"insert_at_line: write failed {p.path}: {exc}",

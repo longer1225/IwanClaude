@@ -4,7 +4,7 @@
 【学习要点】
 1. 多种写入模式：支持 overwrite（覆盖）、append（追加）、fail_if_exists（存在则失败）
 2. 自动备份：默认在覆盖写入前创建 .bak.<timestamp> 备份文件
-3. 配额检查：通过 check_file_size 和 check_total_quota 控制磁盘使用
+3. 配额检查：通过 check_write_quota 控制单文件大小与总磁盘使用
 4. 安全检查：禁止路径遍历，验证沙箱权限
 5. Mixin 模式：使用 _WriteToolMixin 添加元数据和接口
 
@@ -12,7 +12,7 @@
 - 路径遍历检测：检查路径中是否包含 ".."
 - 沙箱验证：validate_path 确保文件在工作目录内
 - 大小限制：单文件最大 1MB
-- 配额控制：check_total_quota 检查总磁盘使用量
+- 配额控制：check_write_quota 统一检查单文件上限与总量增量
 
 【写入模式】
 - overwrite：覆盖现有文件（默认）
@@ -30,7 +30,7 @@ from typing import ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict
 
-from iwan_claude.core.sandbox import check_file_size, check_total_quota, validate_path
+from iwan_claude.core.sandbox import check_write_quota, validate_path
 from iwan_claude.core.tools.base import BaseTool, ToolResult
 
 logger = logging.getLogger(__name__)
@@ -272,12 +272,9 @@ class WriteFileTool(BaseTool, _WriteToolMixin):
                 error_type="runtime_error",
             )
 
-        # 4. 检查配额
+        # 4. 检查配额（单文件大小 + 总量增量；append 按全文新增计）
         try:
-            check_file_size(encoded)  # 检查单文件大小限制
-            logger.debug("write_file: check_file_size OK")
-            check_total_quota(len(encoded))  # 检查总磁盘使用量
-            logger.debug("write_file: check_total_quota OK")
+            check_write_quota(path, encoded, append=(p.mode == "append"))
         except ValueError as exc:
             return ToolResult(
                 content=str(exc),

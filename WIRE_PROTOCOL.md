@@ -8064,7 +8064,7 @@ Events sent over the IPC socket (daemon → client).
 
 ```json
 {
-  "description": "定时任务触发事件 - 调度器到点启动一次运行时发送\n\n【字段说明】\n- type: Literal[\"schedule.fired\"] - 事件类型\n- task_id: str - 被触发的任务 ID\n- run_id: str - 本次触发启动的运行 ID（启动失败时空串）\n- session_id: str - 为本次触发新建的 one_shot 会话 ID\n- ok: bool - 触发是否成功（False 时 detail 给出原因）\n- detail: str - 失败摘要或附加说明\n- ts: str - 时间戳（ISO 8601）\n\n【设计目的】\n调度器在没人盯着屏幕的时候干活，事件是它唯一的\"打过卡\"证明：\nGUI 订阅后刷新任务表（last_run/next_due），任何客户端离线也能\n靠 run 的既有事件链还原全过程。CRUD 不发事件——发起端自知。",
+  "description": "定时任务触发事件 - 调度器到点启动一次运行时发送\n\n【字段说明】\n- type: Literal[\"schedule.fired\"] - 事件类型\n- task_id: str - 被触发的任务 ID\n- run_id: str - 本次触发启动的运行 ID（启动失败时空串）\n- session_id: str - 本次触发所用会话 ID：同一定时任务复用**同一个 chat 会话**\n  （不是每次新建 one_shot——那样结果随会话关闭即弃、审批每次重弹、侧栏被刷成日志），\n  因此在 daemon 重启后按标题回收；回收/创建都失败时为空串\n- ok: bool - 触发是否成功（False 时 detail 给出原因）\n- detail: str - 失败摘要或附加说明\n- ts: str - 时间戳（ISO 8601）\n\n【设计目的】\n调度器在没人盯着屏幕的时候干活，事件是它唯一的\"打过卡\"证明：\nGUI 订阅后刷新任务表（last_run/next_due），任何客户端离线也能\n靠 run 的既有事件链还原全过程。CRUD 不发事件——发起端自知。\n\n【时序约定】广播发生在**记账之前**：客户端要靠这条事件先把 run_id 登记进\n路由表，而 fire 回调里的 run 是异步开跑的——先记账（含磁盘写）再广播的间隙，\n定时 run 的首批 llm.token 已到客户端，run_id 无人认领被严格归属丢弃，\n此后整条回复永久消失、审批卡冻结在\"运行中\"。",
   "properties": {
     "type": {
       "const": "schedule.fired",

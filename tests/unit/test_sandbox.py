@@ -30,6 +30,7 @@ from iwan_claude.core.permissions.policy import (
 from iwan_claude.core.sandbox import (
     SandboxAccessError,
     SandboxManager,
+    check_write_quota,
     get_sandbox,
     init_sandbox,
     scrub_env,
@@ -250,6 +251,46 @@ class TestFileSizeLimits:
         """沙箱禁用时不检查总配额"""
         manager = _make_manager(root=str(tmp_path), enabled=False, max_total_size=10)
         manager.check_total_quota(additional_bytes=100000)  # 不抛异常
+
+
+class TestCheckWriteQuota:
+    """测试写前统一配额检查（所有落盘工具共用）"""
+
+    # 功能：覆盖写已存在文件时只按"新旧差值"计总配额，不重复计费
+    # 设计：造 100B 旧文件、写 120B 新内容、上限 150；差值 20 → 100+20=120 通过。
+    #       若按全文计（100+120=220）会误报，正好区分两种语义
+    def test_overwrite_counts_only_delta(self, tmp_path: Path) -> None:
+        init_sandbox(SandboxConfig(enabled=True, root=str(tmp_path), max_total_size=150))
+        target = tmp_path / "a.txt"
+        target.write_text("x" * 100)
+        check_write_quota(target, "y" * 120)  # 不抛异常
+
+    # 功能：新文件（原本不存在）按全文长度计总配额
+    # 设计：上限 50、内容 60B 且文件不存在 → 必须抛 ValueError，否则"新建即绕过配额"
+    def test_new_file_counts_full_size(self, tmp_path: Path) -> None:
+        init_sandbox(SandboxConfig(enabled=True, root=str(tmp_path), max_total_size=50))
+        with pytest.raises(ValueError, match="quota exceeded"):
+            check_write_quota(tmp_path / "new.txt", "x" * 60)
+
+    # 功能：append 模式按全文计（内容全是新增），不能因文件已存在而算出 0 增量
+    # 设计：文件 30B + 追加 30B、上限 50：按差值会得 0 而误放行，按全文才会拦
+    def test_append_counts_full_size(self, tmp_path: Path) -> None:
+        init_sandbox(SandboxConfig(enabled=True, root=str(tmp_path), max_total_size=50))
+        target = tmp_path / "a.txt"
+        target.write_text("x" * 30)
+        with pytest.raises(ValueError, match="quota exceeded"):
+            check_write_quota(target, "y" * 30, append=True)
+
+    # 功能：单文件上限仍然生效（走 check_file_size）
+    # 设计：总量上限给足、只把 max_file_size 调到 10，20B 内容必须被单文件规则拦下
+    def test_single_file_limit_still_applies(self, tmp_path: Path) -> None:
+        init_sandbox(
+            SandboxConfig(
+                enabled=True, root=str(tmp_path), max_total_size=10_000, max_file_size=10
+            )
+        )
+        with pytest.raises(ValueError, match="exceeds sandbox limit"):
+            check_write_quota(tmp_path / "big.txt", "x" * 20)
 
 
 # ======================================================================
