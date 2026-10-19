@@ -32,9 +32,12 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from iwan_claude.core.sandbox import get_sandbox
+
+if TYPE_CHECKING:
+    from iwan_claude.core.sandbox import SandboxManager
 
 
 class PermissionDecision(StrEnum):
@@ -328,7 +331,9 @@ def param_preview(tool_name: str, params: dict[str, Any]) -> str:
     return snippet[:_PREVIEW_MAX] if len(snippet) > _PREVIEW_MAX else snippet
 
 
-def _check_sandbox_path(tool_name: str, params: dict[str, Any]) -> bool:
+def _check_sandbox_path(
+    tool_name: str, params: dict[str, Any], *, sandbox: SandboxManager | None = None,
+) -> bool:
     """
     检查文件操作工具的路径是否在沙箱允许范围内
 
@@ -359,8 +364,8 @@ def _check_sandbox_path(tool_name: str, params: dict[str, Any]) -> bool:
     - 沙箱未启用时返回 False（表示无需检查）
     - 返回 True 表示路径不在允许范围内，应触发 ASK
     """
-    # 获取沙箱实例（contextvar 优先，即当前会话的沙箱）
-    sandbox = get_sandbox()
+    # 获取沙箱实例：优先用注入的（测试/子 Agent 显式传），否则取当前上下文生效的那份
+    sandbox = sandbox if sandbox is not None else get_sandbox()
     # 如果沙箱未启用，返回 False（表示无需检查）
     if not sandbox.enabled:
         return False
@@ -481,9 +486,11 @@ def run_python_dynamic_write(code: str) -> bool:
 
 # 沙箱维度的强制 ASK 判定：路径越界 或 run_python 存在无法静态验证的写操作
 # （缓存/auto 模式均不可绕过）
-def sandbox_forces_ask(tool_name: str, params: dict[str, Any]) -> bool:
+def sandbox_forces_ask(
+    tool_name: str, params: dict[str, Any], *, sandbox: SandboxManager | None = None,
+) -> bool:
     # 规则一：文件/git 工具的路径参数越出沙箱
-    if _check_sandbox_path(tool_name, params):
+    if _check_sandbox_path(tool_name, params, sandbox=sandbox):
         return True
     # 规则二：run_python 写路径无法静态确定（AST 判定，fail-closed）
     if tool_name == "run_python":
@@ -500,6 +507,8 @@ def evaluate(
     params: dict[str, Any],
     policy: ToolPolicy | None = None,
     rules: Any = None,
+    *,
+    sandbox: SandboxManager | None = None,
 ) -> PermissionDecision:
     """
     对工具 + 参数执行完整静态策略评估，返回 ALLOW/DENY/ASK
@@ -511,7 +520,7 @@ def evaluate(
     """
     from iwan_claude.core.permissions.rules import PermissionRules
     _rules: PermissionRules | None = rules
-    pre = evaluate_pre_cache(tool_name, params, policy, _rules)
+    pre = evaluate_pre_cache(tool_name, params, policy, _rules, sandbox=sandbox)
     if pre is not None:
         return pre.decision
     return evaluate_post_cache(tool_name, params, policy, _rules).decision
@@ -523,6 +532,8 @@ def evaluate_pre_cache(
     params: dict[str, Any],
     policy: ToolPolicy | None,
     rules: Any = None,
+    *,
+    sandbox: SandboxManager | None = None,
 ) -> TierVerdict | None:
     """
     评估 Tier 1（deny 类）与 Tier 2（强制 ASK 类）；None 表示未定、可进缓存
@@ -548,7 +559,7 @@ def evaluate_pre_cache(
             if re.search(pat, command):
                 return TierVerdict(
                     PermissionDecision.DENY, True, "legacy deny_pattern", False)
-    sandbox = get_sandbox()
+    sandbox = sandbox if sandbox is not None else get_sandbox()
     if command and sandbox.enabled:
         for pat in sandbox.command_blacklist:
             if re.search(pat, command):
@@ -567,7 +578,7 @@ def evaluate_pre_cache(
     # Tier 2: 强制 ASK（不可被缓存/auto 绕过）
     if command and matches_outside_cwd(command):
         return TierVerdict(PermissionDecision.ASK, True, "outside-cwd 启发式", False)
-    if sandbox_forces_ask(tool_name, params):
+    if sandbox_forces_ask(tool_name, params, sandbox=sandbox):
         return TierVerdict(PermissionDecision.ASK, True, "沙箱强制 ASK", False)
 
     return None

@@ -26,6 +26,7 @@ from iwan_claude.core.permissions.policy import (
     evaluate,
     matches_network_command,
     matches_outside_cwd,
+    sandbox_forces_ask,
 )
 from iwan_claude.core.sandbox import (
     SandboxAccessError,
@@ -291,6 +292,43 @@ class TestCheckWriteQuota:
         )
         with pytest.raises(ValueError, match="exceeds sandbox limit"):
             check_write_quota(tmp_path / "big.txt", "x" * 20)
+
+
+class TestPermissionSandboxInjection:
+    """测试权限评估链对沙箱的显式注入（不再只认进程全局实例）"""
+
+    # 功能：显式注入的沙箱优先于全局实例，评估结果跟随注入的那一份
+    # 设计：全局沙箱根设成 allowed、注入实例根设成 outside；同一个越界路径在两种
+    #       情形下结论相反。若评估链仍偷偷调用 get_sandbox()，第二条断言就会失败
+    def test_injected_sandbox_wins(self, tmp_path: Path) -> None:
+        allowed = tmp_path / "allowed"
+        outside = tmp_path / "outside"
+        allowed.mkdir()
+        outside.mkdir()
+        target = str(outside / "x.txt")
+
+        init_sandbox(SandboxConfig(enabled=True, root=str(allowed)))
+        injected = SandboxManager(SandboxConfig(enabled=True, root=str(outside)))
+
+        # 全局沙箱：target 越界 → 强制 ASK（返回 True）
+        assert sandbox_forces_ask("read_file", {"path": target}) is True
+        # 注入沙箱：target 在根内 → 不强制 ASK（返回 False）
+        assert sandbox_forces_ask("read_file", {"path": target}, sandbox=injected) is False
+
+    # 功能：evaluate() 也接受注入沙箱，且结论与 pre-cache 层一致
+    # 设计：用同一越界路径分别走"全局"与"注入"两遍，确保入口函数把参数透传到了下层
+    def test_evaluate_passes_sandbox_down(self, tmp_path: Path) -> None:
+        allowed = tmp_path / "allowed2"
+        outside = tmp_path / "outside2"
+        allowed.mkdir()
+        outside.mkdir()
+        target = str(outside / "y.txt")
+
+        init_sandbox(SandboxConfig(enabled=True, root=str(allowed)))
+        injected = SandboxManager(SandboxConfig(enabled=True, root=str(outside)))
+
+        assert evaluate("read_file", {"path": target}) == PermissionDecision.ASK
+        assert evaluate("read_file", {"path": target}, sandbox=injected) == PermissionDecision.ALLOW
 
 
 # ======================================================================

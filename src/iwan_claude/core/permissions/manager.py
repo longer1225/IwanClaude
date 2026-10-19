@@ -46,7 +46,10 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from iwan_claude.core.sandbox import SandboxManager
 
 from iwan_claude.core.permissions.policy import (
     AUTO_MODE_READ_ONLY_TOOLS,
@@ -166,6 +169,7 @@ class PermissionManager:
         rules: Any = None,  # PermissionRules（声明式 deny/ask/allow 规则）
         hooks: Any = None,  # HookRegistry（PreToolUse/PostToolUse 外部裁判）
         default_mode: str = "default",  # 权限模式五态的会话默认值
+        sandbox: SandboxManager | None = None,  # 注入沙箱（None = 评估时取上下文全局实例）
     ) -> None:
         """
         初始化权限管理器
@@ -236,6 +240,9 @@ class PermissionManager:
         self._rules = rules
         # 生命周期钩子注册表（HookRegistry 或 None；见 core/hooks/registry.py）
         self._hooks = hooks
+        # 沙箱实例（None = 评估时取 contextvar/session 表的当前实例）：
+        # 注入后评估链不再直接摸进程级全局函数，测试与子 Agent 可各自带沙箱
+        self._sandbox = sandbox
         # Layer 0 项目信任（session_id → "allow"/"deny"/"ask"）：
         # 未登记的会话按 "allow" 处理——ask 的"每次写走审批"由既有默认策略
         # （未知工具兜底 ASK）天然承担，无需在此层重复强制
@@ -436,7 +443,8 @@ class PermissionManager:
         # 获取工具策略
         policy = self._policies.get(tool_name)
         # 调用策略评估函数
-        return evaluate(tool_name, params, policy, self._rules)
+        return evaluate(
+            tool_name, params, policy, self._rules, sandbox=self._sandbox)
 
     async def check_and_wait(
         self,
@@ -516,7 +524,7 @@ class PermissionManager:
 
         # Tier 1+2: deny 地板与强制 ASK —— 与 policy.evaluate 共享同一实现，
         # 静态评估和审批链永不漂移（此前这里是复制的第二份 tier 逻辑，已删）
-        pre = evaluate_pre_cache(tool_name, params, policy, self._rules)
+        pre = evaluate_pre_cache(tool_name, params, policy, self._rules, sandbox=self._sandbox)
         if pre is not None and pre.decision == PermissionDecision.DENY:
             logger.debug("permission: deny floor tool=%s  %s", tool_name, pre.detail)
             return False, "auto_deny"
